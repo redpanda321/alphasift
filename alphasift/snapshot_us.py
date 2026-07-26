@@ -11,12 +11,16 @@ rather than silently screening the US pool.
 
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 _SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+_US_LISTED_EXCHANGES = ("NMS", "NGM", "NCM", "NYQ", "ASE")
+_US_SCREEN_PAGE_SIZE = 250
+_US_SCREEN_MAX_RETRIES = 3
 
 _DEFAULT_US_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "BRK-B",
@@ -29,25 +33,16 @@ _DEFAULT_US_UNIVERSE = [
 
 
 def fetch_us_universe(source: str = "auto") -> list[str]:
-    """Return a list of US equity tickers.
-
-    Sources:
-        sp500   — scrape S&P 500 from Wikipedia
-        env     — read ALPHASIFT_US_TICKERS (comma-separated)
-        default — hardcoded top-50 US large-caps
-        auto    — try sp500 → env → default
-    """
+    """Return US equity tickers from a full or explicitly limited source."""
     src = source.lower()
-    if src == "auto":
-        for s in ("sp500", "env", "default"):
-            try:
-                tickers = fetch_us_universe(s)
-                if tickers:
-                    logger.info("US universe from %s: %d tickers", s, len(tickers))
-                    return tickers
-            except Exception as e:
-                logger.debug("US universe source %s failed: %s", s, e)
-        return list(_DEFAULT_US_UNIVERSE)
+    if src in {"auto", "full", "yahoo_screen"}:
+        quotes = _fetch_yahoo_screen_quotes()
+        tickers = [str(item.get("symbol") or "").strip() for item in quotes]
+        tickers = [ticker for ticker in tickers if ticker]
+        if not tickers:
+            raise RuntimeError("Yahoo listed-equity screen returned no US tickers")
+        logger.info("US universe from yahoo_screen: %d tickers", len(tickers))
+        return tickers
 
     if src == "sp500":
         return _fetch_sp500_tickers()
@@ -60,6 +55,113 @@ def fetch_us_universe(source: str = "auto") -> list[str]:
         return list(_DEFAULT_US_UNIVERSE)
     else:
         raise ValueError(f"Unknown US universe source: {source}")
+
+
+def _fetch_yahoo_screen_quotes() -> list[dict]:
+    """Fetch every exchange-listed US equity, rejecting partial pagination."""
+    import yfinance as yf
+
+    query = yf.EquityQuery("and", [
+        yf.EquityQuery("eq", ["region", "us"]),
+        yf.EquityQuery("is-in", ["exchange", *_US_LISTED_EXCHANGES]),
+    ])
+    quotes: list[dict] = []
+    expected_total: int | None = None
+    offset = 0
+
+    while expected_total is None or offset < expected_total:
+        response = None
+        last_error: Exception | None = None
+        for attempt in range(_US_SCREEN_MAX_RETRIES):
+            try:
+                response = yf.screen(
+                    query,
+                    offset=offset,
+                    size=_US_SCREEN_PAGE_SIZE,
+                    sortField="ticker",
+                    sortAsc=True,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < _US_SCREEN_MAX_RETRIES:
+                    time.sleep(0.25 * (attempt + 1))
+        if response is None:
+            raise RuntimeError(
+                f"Yahoo US equity screen failed at offset {offset}: {last_error}"
+            ) from last_error
+
+        page = response.get("quotes") or []
+        page_total = int(response.get("total") or 0)
+        if expected_total is None:
+            expected_total = page_total
+        elif page_total != expected_total:
+            logger.warning(
+                "Yahoo US equity total changed during pagination: %d -> %d",
+                expected_total,
+                page_total,
+            )
+            expected_total = max(expected_total, page_total)
+        if not page and offset < expected_total:
+            raise RuntimeError(
+                f"Yahoo US equity screen returned a partial result at offset {offset} "
+                f"of {expected_total}"
+            )
+        quotes.extend(item for item in page if isinstance(item, dict))
+        offset += len(page)
+
+    deduplicated: dict[str, dict] = {}
+    for quote in quotes:
+        symbol = str(quote.get("symbol") or "").strip()
+        if symbol:
+            deduplicated[symbol] = quote
+    if expected_total and len(deduplicated) < expected_total:
+        raise RuntimeError(
+            "Yahoo US equity screen was incomplete after de-duplication: "
+            f"expected {expected_total}, received {len(deduplicated)}"
+        )
+    return list(deduplicated.values())
+
+
+def _screen_quotes_to_snapshot(quotes: list[dict]) -> pd.DataFrame:
+    """Map Yahoo screener records to AlphaSift's snapshot schema."""
+    rows = []
+    for quote in quotes:
+        symbol = str(quote.get("symbol") or "").strip()
+        price = quote.get("regularMarketPrice")
+        if not symbol or price is None:
+            continue
+        volume = quote.get("regularMarketVolume") or 0
+        average_volume = quote.get("averageDailyVolume3Month") or 0
+        shares = quote.get("sharesOutstanding") or quote.get("impliedSharesOutstanding") or 0
+        rows.append({
+            "code": symbol,
+            "name": quote.get("shortName") or quote.get("longName") or symbol,
+            "price": price,
+            "change_pct": quote.get("regularMarketChangePercent"),
+            "amount": float(volume) * float(price),
+            "total_mv": quote.get("marketCap"),
+            "circ_mv": quote.get("marketCap"),
+            "pe_ratio": quote.get("trailingPE"),
+            "pb_ratio": quote.get("priceToBook"),
+            "volume_ratio": round(float(volume) / float(average_volume), 2) if average_volume else None,
+            "turnover_rate": round(float(volume) / float(shares) * 100, 4) if shares else None,
+            "industry": quote.get("industry") or quote.get("sector") or "",
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError("Yahoo listed-equity screen returned no valid quote rows")
+    numeric_cols = [
+        "price", "change_pct", "amount", "total_mv", "circ_mv",
+        "pe_ratio", "pb_ratio", "volume_ratio", "turnover_rate",
+    ]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["price"])
+    df = df[df["price"] > 0].reset_index(drop=True)
+    df.attrs["snapshot_source"] = "yahoo_screen"
+    return df
 
 
 def _fetch_sp500_tickers() -> list[str]:
@@ -78,12 +180,17 @@ def fetch_us_snapshot(
 ) -> pd.DataFrame:
     """Fetch US equity snapshot in AlphaSift standard schema.
 
-    Uses yfinance to fetch current data for each ticker. Returns a
-    DataFrame matching the standard snapshot columns: code, name, price,
-    change_pct, amount, total_mv, pe_ratio, pb_ratio, volume_ratio,
-    turnover_rate, industry.
+    The default path paginates Yahoo's complete listed-equity screen.
+    Explicit tickers and explicitly limited universe sources retain the
+    historical-price path. The returned frame uses the standard snapshot
+    columns consumed by AlphaSift filters.
     """
     import yfinance as yf
+
+    if tickers is None and universe_source.lower() in {"auto", "full", "yahoo_screen"}:
+        df = _screen_quotes_to_snapshot(_fetch_yahoo_screen_quotes())
+        logger.info("US snapshot: %d rows from yahoo_screen", len(df))
+        return df
 
     if tickers is None:
         tickers = fetch_us_universe(universe_source)
