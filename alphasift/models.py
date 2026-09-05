@@ -54,6 +54,7 @@ class ScreeningConfig:
     portfolio_profile: dict[str, Any] = field(default_factory=dict)
     scorecard_profile: dict[str, Any] = field(default_factory=dict)
     event_profile: dict[str, Any] = field(default_factory=dict)
+    lifecycle_profile: dict[str, Any] = field(default_factory=dict)
     ranking_hints: str = ""
     max_output: int = 5
 
@@ -125,6 +126,38 @@ class Pick:
     body_pct: float | None = None
     pullback_to_ma20_pct: float | None = None
     consolidation_days_20d: int | None = None
+    a_score: float | None = None
+    h_score: float | None = None
+    a_eligible: bool | None = None
+    h_eligible: bool | None = None
+    fundamental_risk_status: str = "unverified"
+    data_source: str = ""
+    data_granularity: str = ""
+    max_drawdown_pct: float | None = None
+    max_drawdown_from_d_pct: float | None = None
+    distance_post_d_low_pct: float | None = None
+    atr14_pct: float | None = None
+    history_sessions: int | None = None
+    lifecycle_stage: str = ""
+    lifecycle_action: str = ""
+    data_as_of: str = ""
+    history_start: str = ""
+    history_scope: str = ""
+    history_retrieved_at: str = ""
+    snapshot_price: float | None = None
+    data_timestamp: str = ""
+    low_52w: float | None = None
+    distance_52w_low_pct: float | None = None
+    cycle_high: float | None = None
+    cycle_high_date: str = ""
+    drawdown_from_cycle_high_pct: float | None = None
+    distance_cycle_low_pct: float | None = None
+    distance_3y_low_pct: float | None = None
+    prior_runup_pct: float | None = None
+    lower_high_count: int | None = None
+    lower_low_count: int | None = None
+    bottom_divergence: bool | None = None
+    lifecycle_reasons: list[str] = field(default_factory=list)
     factor_scores: dict[str, float] = field(default_factory=dict)
     llm_confidence: float | None = None
     llm_sector: str = ""
@@ -167,6 +200,10 @@ class Pick:
 class ScreenResult:
     strategy: str
     market: str
+    scan_started_at: str = ""
+    snapshot_retrieved_at: str = ""
+    expected_daily_session: str = ""
+    freshness_policy: str = ""
     strategy_version: str = ""
     strategy_category: str = ""
     snapshot_count: int = 0

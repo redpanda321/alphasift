@@ -37,6 +37,7 @@ _SCREENING_KEYS = {
     "portfolio_profile",
     "scorecard_profile",
     "event_profile",
+    "lifecycle_profile",
     "ranking_hints",
     "max_output",
 }
@@ -153,6 +154,22 @@ _EVENT_PROFILE_KEYS = {
     "source_weights",
     "notes",
 }
+_LIFECYCLE_PROFILE_KEYS = {
+    "mode",
+    "lookback_days",
+    "min_history_days",
+    "max_candidates",
+    "max_workers",
+    "min_score",
+    "top_per_stage",
+    "market_cap_min_us",
+    "near_52w_low_pct",
+    "panic_20d_pct",
+    "panic_60d_pct",
+    "h_min_prior_runup_pct",
+    "h_min_drawdown_pct",
+    "pivot_window_weeks",
+}
 _STRATEGY_DIR_CACHE: dict[
     Path,
     tuple[tuple[tuple[str, int, int, str], ...], dict[str, Strategy]],
@@ -201,6 +218,9 @@ def load_strategy(filepath: Path) -> Strategy:
         ),
         event_profile=_optional_mapping(
             screening_data, "event_profile", filepath, allowed_keys=_EVENT_PROFILE_KEYS
+        ),
+        lifecycle_profile=_optional_mapping(
+            screening_data, "lifecycle_profile", filepath, allowed_keys=_LIFECYCLE_PROFILE_KEYS
         ),
         ranking_hints=screening_data.get("ranking_hints", ""),
         max_output=screening_data.get("max_output", 5),

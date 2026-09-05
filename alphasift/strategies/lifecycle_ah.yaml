@@ -1,0 +1,37 @@
+name: lifecycle_ah
+display_name: A/H生命周期
+description: 用2至5年日K和周K识别新周期A点与完整牛熊周期末端H点，严格区分普通超跌与H结构
+version: "1.2"
+category: framework
+tags: [lifecycle, reversal, daily_k, weekly_k, a_point, h_point]
+
+screening:
+  enabled: true
+  market_scope: [cn, us]
+  hard_filters:
+    exclude_st: true
+    price_min: 1.0
+    amount_min: 20000000
+  factor_weights:
+    lifecycle: 1.0
+  lifecycle_profile:
+    mode: both
+    lookback_days: 0  # all available years, no truncation
+    min_history_days: 504
+    max_candidates: 0
+    max_workers: 12
+    min_score: 45
+    top_per_stage: 20
+    market_cap_min_us: 1000000000
+    near_52w_low_pct: 10
+    panic_20d_pct: -12
+    panic_60d_pct: -22
+    h_min_prior_runup_pct: 100
+    h_min_drawdown_pct: 50
+    pivot_window_weeks: 4
+  ranking_hints: |
+    这是结构化生命周期扫描，不以单一超卖指标排序。
+    A点优先长期横盘或缓跌后快速杀跌、接近低位并出现止跌证据的股票。
+    H点必须先有至少约100%的主升浪和D顶部，再出现多个Lower High/Lower Low及深度回撤。
+    对退市、破产、造假或基本面永久恶化风险保持否决；技术得分不是投资建议。
+  max_output: 40

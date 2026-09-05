@@ -145,6 +145,11 @@ def main():
     sp.add_argument("--jsonl", action="store_true", help="以 JSONL 输出")
     sp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
 
+    cross = sub.add_parser("lifecycle-crosscheck", help="5-year/full-history A/B/D/E/H comparison")
+    cross.add_argument("--market", choices=["cn", "us"], required=True)
+    cross.add_argument("--symbols", default=None)
+    cross.add_argument("--output", required=True)
+
     # strategies
     sub.add_parser("strategies", help="列出可用策略")
 
@@ -229,7 +234,14 @@ def main():
     args = parser.parse_args()
     _apply_env_file_args(args.env_file)
 
-    if args.command == "screen":
+    if args.command == "lifecycle-crosscheck":
+        from alphasift.lifecycle_crosscheck import main as crosscheck_main
+        cross_args = ["--market", args.market, "--output", args.output]
+        if args.symbols:
+            cross_args.extend(["--symbols", args.symbols])
+        crosscheck_main(cross_args)
+
+    elif args.command == "screen":
         config = Config.from_env()
         if args.no_post_analysis and (args.post_analyzer or args.deep_analysis):
             parser.error("--no-post-analysis cannot be combined with --post-analyzer or --deep-analysis")

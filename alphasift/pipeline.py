@@ -14,6 +14,8 @@ from alphasift.daily import enrich_daily_features
 from alphasift.dsa_provider import apply_dsa_provider_context
 from alphasift.filter import apply_hard_filters, requires_daily_features, without_daily_filters
 from alphasift.industry import enrich_industry_concepts
+from alphasift.lifecycle import enrich_lifecycle_features
+from alphasift.freshness import latest_completed_session
 from alphasift.models import Pick, ScreenResult
 from alphasift.normalize import (
     normalize_code,
@@ -120,13 +122,25 @@ def screen(
     daily_limit = daily_enrich_max_candidates or config.daily_enrich_max_candidates
     snapshot_filters = without_daily_filters(screening.hard_filters) if daily_needed else screening.hard_filters
 
-    # 2. Fetch snapshot
+    lifecycle_requested = bool(screening.lifecycle_profile)
+    scan_started_at = pd.Timestamp.now(tz="UTC").isoformat()
+    expected_session = latest_completed_session(market, scan_started_at) if lifecycle_requested else ""
+    # 2. Fetch snapshot. Lifecycle scans never fall back to last-good files.
     snapshot_df = fetch_snapshot_with_fallback(
         config.snapshot_source_priority,
         required_columns=_required_snapshot_columns(snapshot_filters),
-        fallback_snapshot_path=config.fallback_snapshot_path,
+        fallback_snapshot_path=None if lifecycle_requested else config.fallback_snapshot_path,
         fallback_max_age_hours=config.snapshot_fallback_max_age_hours,
         market=market,
+    )
+    snapshot_retrieved_at = pd.Timestamp.now(tz="UTC").isoformat()
+    if lifecycle_requested and (snapshot_df.attrs.get("fallback_used") or snapshot_df.attrs.get("stale")):
+        raise RuntimeError("Lifecycle scan requires a newly fetched snapshot; cached/stale snapshot rejected")
+    freshness_metadata = dict(
+        scan_started_at=scan_started_at,
+        snapshot_retrieved_at=snapshot_retrieved_at,
+        expected_daily_session=expected_session,
+        freshness_policy="network_refresh_completed_daily" if lifecycle_requested else "standard",
     )
     effective_industry_map_files = (
         list(industry_map_files)
@@ -176,6 +190,7 @@ def screen(
             run_id=run_id,
             degradation=[*degradation, "No candidates after hard filter"],
             snapshot_source=snapshot_source,
+            **freshness_metadata,
             source_errors=source_errors,
             strategy_version=strat.version,
             strategy_category=strat.category,
@@ -185,9 +200,35 @@ def screen(
             portfolio_diversity_enabled=config.portfolio_diversity_enabled,
         )
 
-    daily_enriched = False
-    daily_enrich_count = 0
-    if daily_needed or daily_requested:
+    lifecycle_requested = bool(screening.lifecycle_profile)
+    if lifecycle_requested:
+        lifecycle_df = enrich_lifecycle_features(
+            df,
+            market=market,
+            profile=screening.lifecycle_profile,
+            source=config.daily_source,
+            cache_dir=config.daily_history_cache_dir,
+            cache_ttl_seconds=config.daily_history_cache_ttl_hours * 3600,
+            expected_session=expected_session,
+        )
+        attempted = int(lifecycle_df.attrs.get("lifecycle_attempted", len(df)))
+        succeeded = int(lifecycle_df.attrs.get("lifecycle_success_count", len(lifecycle_df)))
+        lifecycle_errors = [str(item) for item in lifecycle_df.attrs.get("lifecycle_errors", [])]
+        degradation.append(
+            f"Lifecycle history analysis attempted {attempted} candidates, succeeded {succeeded}"
+        )
+        if lifecycle_errors:
+            sample = " | ".join(lifecycle_errors[:5])
+            suffix = f" | +{len(lifecycle_errors) - 5} more" if len(lifecycle_errors) > 5 else ""
+            degradation.append(f"Lifecycle history row errors: {sample}{suffix}")
+        if attempted and succeeded == 0:
+            raise RuntimeError("No usable latest-session lifecycle histories: " + " | ".join(lifecycle_errors[:5]))
+        df = lifecycle_df
+        after_filter_count = len(df)
+
+    daily_enriched = lifecycle_requested
+    daily_enrich_count = succeeded if lifecycle_requested else 0
+    if (daily_needed or daily_requested) and not lifecycle_requested:
         provisional = _sort_screened_candidates(compute_screen_scores(df, screening), screening)
         enrich_count = min(daily_limit, len(provisional))
         daily_candidates = provisional.head(enrich_count)
@@ -235,6 +276,7 @@ def screen(
             run_id=run_id,
             degradation=[*degradation, "No candidates after daily hard filter"],
             snapshot_source=snapshot_source,
+            **freshness_metadata,
             source_errors=source_errors,
             post_analyzers=analyzer_names,
             daily_enriched=daily_enriched,
@@ -247,11 +289,14 @@ def screen(
     df = _sort_screened_candidates(compute_screen_scores(df, screening), screening)
 
     # 5. Take Top K for LLM ranking
-    top_k = min(
-        max(output_count * config.llm_candidate_multiplier, output_count),
-        config.llm_max_candidates,
-        len(df),
-    )
+    if use_llm:
+        top_k = min(
+            max(output_count * config.llm_candidate_multiplier, output_count),
+            config.llm_max_candidates,
+            len(df),
+        )
+    else:
+        top_k = min(output_count, len(df))
     df_top = df.head(top_k)
 
     # 6. Build Pick list
@@ -416,6 +461,7 @@ def screen(
         llm_parse_errors=llm_parse_errors,
         degradation=degradation,
         snapshot_source=snapshot_source,
+        **freshness_metadata,
         source_errors=source_errors,
         deep_analysis_requested=("dsa" in analyzer_names),
         post_analyzers=analyzer_names,
@@ -477,6 +523,38 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             body_pct=_safe_float(row.get("body_pct")),
             pullback_to_ma20_pct=_safe_float(row.get("pullback_to_ma20_pct")),
             consolidation_days_20d=_safe_int(row.get("consolidation_days_20d")),
+            a_score=_safe_float(row.get("a_score")),
+            h_score=_safe_float(row.get("h_score")),
+            a_eligible=_safe_bool(row.get("a_eligible")),
+            h_eligible=_safe_bool(row.get("h_eligible")),
+            fundamental_risk_status=_safe_text(row.get("fundamental_risk_status")) or "unverified",
+            data_source=_safe_text(row.get("data_source")),
+            data_granularity=_safe_text(row.get("data_granularity")),
+            max_drawdown_pct=_safe_float(row.get("max_drawdown_pct")),
+            max_drawdown_from_d_pct=_safe_float(row.get("max_drawdown_from_d_pct")),
+            distance_post_d_low_pct=_safe_float(row.get("distance_post_d_low_pct")),
+            atr14_pct=_safe_float(row.get("atr14_pct")),
+            history_sessions=_safe_int(row.get("history_sessions")),
+            lifecycle_stage=_safe_text(row.get("lifecycle_stage")),
+            lifecycle_action=_safe_text(row.get("lifecycle_action")),
+            data_as_of=_safe_text(row.get("data_as_of")),
+            distance_3y_low_pct=_safe_float(row.get("distance_3y_low_pct")),
+            history_start=_safe_text(row.get("history_start")),
+            history_scope=_safe_text(row.get("history_scope")),
+            history_retrieved_at=_safe_text(row.get("history_retrieved_at")),
+            snapshot_price=_safe_float(row.get("snapshot_price")),
+            data_timestamp=_safe_text(row.get("data_timestamp")),
+            low_52w=_safe_float(row.get("low_52w")),
+            distance_52w_low_pct=_safe_float(row.get("distance_52w_low_pct")),
+            cycle_high=_safe_float(row.get("cycle_high")),
+            cycle_high_date=_safe_text(row.get("cycle_high_date")),
+            drawdown_from_cycle_high_pct=_safe_float(row.get("drawdown_from_cycle_high_pct")),
+            distance_cycle_low_pct=_safe_float(row.get("distance_cycle_low_pct")),
+            prior_runup_pct=_safe_float(row.get("prior_runup_pct")),
+            lower_high_count=_safe_int(row.get("lower_high_count")),
+            lower_low_count=_safe_int(row.get("lower_low_count")),
+            bottom_divergence=_safe_bool(row.get("bottom_divergence")),
+            lifecycle_reasons=list(row.get("lifecycle_reasons") or []),
             factor_scores=factor_scores,
         ))
     return picks

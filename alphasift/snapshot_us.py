@@ -327,26 +327,35 @@ def fetch_daily_history_yfinance(
     """
     import yfinance as yf
 
-    end = pd.Timestamp.now().normalize()
+    # Yahoo's end date is exclusive. Include today's completed session; never
+    # silently lag one session merely because the machine is in US time.
+    timezone = "Asia/Shanghai" if ticker.endswith((".SS", ".SZ", ".BJ")) else "America/New_York"
+    local_now = pd.Timestamp.now(tz=timezone)
+    end = local_now.normalize().tz_localize(None) + pd.Timedelta(days=1)
     start = end - pd.Timedelta(days=max(lookback_days * 2, 180))
-    hist = yf.download(
-        ticker,
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
-        auto_adjust=True,
-        progress=False,
-    )
+    history_range = {"period": "max"} if lookback_days == 0 else {
+        "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")
+    }
+    hist = yf.download(ticker, **history_range, auto_adjust=True, progress=False)
     if hist is None or hist.empty:
         raise RuntimeError(f"yfinance daily history empty for {ticker}")
 
     if isinstance(hist.columns, pd.MultiIndex):
         hist.columns = hist.columns.droplevel("Ticker")
 
-    hist = hist.tail(max(lookback_days, 30)).copy()
+    from alphasift.freshness import latest_completed_session
+
+    completed_session = latest_completed_session(
+        "cn" if timezone == "Asia/Shanghai" else "us", local_now
+    )
+    hist = hist[hist.index.strftime("%Y-%m-%d") <= completed_session]
+    hist = hist.tail(max(lookback_days, 30)).copy() if lookback_days else hist.copy()
     hist = hist.rename(columns={
         "Open": "开盘", "High": "最高", "Low": "最低",
         "Close": "收盘", "Volume": "成交量",
     })
     hist.index.name = "日期"
     hist = hist.reset_index()
+    hist.attrs["data_source"] = "Yahoo Finance/yfinance adjusted daily OHLCV"
+    hist.attrs["retrieved_at"] = pd.Timestamp.now(tz="UTC").isoformat()
     return hist

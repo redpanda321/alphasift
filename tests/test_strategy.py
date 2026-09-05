@@ -27,6 +27,7 @@ def test_list_strategies_returns_enabled_strategies_only():
         "balanced_alpha",
         "capital_heat",
         "dual_low",
+        "lifecycle_ah",
         "momentum_quality",
         "oversold_reversal",
         "quality_value",
@@ -58,7 +59,12 @@ def test_builtin_strategy_factor_weights_are_normalized_and_diversified():
     for strat in strategies.values():
         weights = strat.screening.factor_weights
         assert sum(weights.values()) == pytest.approx(1.0), strat.name
-        assert len([factor for factor, weight in weights.items() if weight > 0]) >= 4, strat.name
+        if strat.screening.lifecycle_profile:
+            # The lifecycle factor is itself a documented multi-component
+            # A/H score built from price position, pivots, momentum and volume.
+            assert weights == {"lifecycle": 1.0}
+        else:
+            assert len([factor for factor, weight in weights.items() if weight > 0]) >= 4, strat.name
 
     for name in ("dual_low", "quality_value"):
         weights = strategies[name].screening.factor_weights

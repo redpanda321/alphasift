@@ -14,6 +14,7 @@ _FACTOR_COLUMNS = {
     "stability": "factor_stability_score",
     "size": "factor_size_score",
     "theme_heat": "factor_theme_heat_score",
+    "lifecycle": "factor_lifecycle_score",
 }
 _DEFAULT_SCORING_PROFILE = {
     "momentum_base": 60.0,
@@ -131,6 +132,7 @@ def _compute_factor_scores(df: pd.DataFrame, config: ScreeningConfig | None = No
         "stability": _compute_stability_score(df, profile),
         "size": _compute_size_score(df),
         "theme_heat": _compute_theme_heat_score(df, profile),
+        "lifecycle": _compute_lifecycle_score(df),
     }
 
 
@@ -336,6 +338,13 @@ def _compute_size_score(df: pd.DataFrame) -> pd.Series:
     mv = pd.to_numeric(df["total_mv"], errors="coerce")
     log_mv = np.log10(mv.clip(lower=1))
     return _rank_score(log_mv.where(mv > 0), lower_is_better=False, na_score=35)
+
+
+def _compute_lifecycle_score(df: pd.DataFrame) -> pd.Series:
+    """Return the absolute A/H lifecycle score computed from multi-year history."""
+    if "lifecycle_score" not in df.columns:
+        return pd.Series(0.0, index=df.index)
+    return pd.to_numeric(df["lifecycle_score"], errors="coerce").fillna(0).clip(0, 100)
 
 
 def _compute_theme_heat_score(df: pd.DataFrame, profile: dict[str, float]) -> pd.Series:
