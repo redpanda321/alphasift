@@ -336,7 +336,17 @@ def fetch_daily_history_yfinance(
     history_range = {"period": "max"} if lookback_days == 0 else {
         "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")
     }
-    hist = yf.download(ticker, **history_range, auto_adjust=True, progress=False)
+    # The scan already parallelizes by symbol. Disabling yfinance's nested
+    # downloader threads avoids curl_cffi lock contention in long-lived jobs;
+    # an explicit timeout prevents a single ticker from blocking a full scan.
+    hist = yf.download(
+        ticker,
+        **history_range,
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+        timeout=20,
+    )
     if hist is None or hist.empty:
         raise RuntimeError(f"yfinance daily history empty for {ticker}")
 

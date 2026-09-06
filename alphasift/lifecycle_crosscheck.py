@@ -8,7 +8,7 @@ Agreement measures temporal robustness, not independent-provider verification.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
@@ -263,11 +263,16 @@ def main(argv=None):
             return {"symbol": symbol, "status": "FAILED", "error": str(exc)}
 
     print(f"{args.market}: {len(symbols)} histories, expected {as_of}", flush=True)
-    workers = max(1, min(int(os.getenv("ALPHASIFT_HISTORY_WORKERS", "24")), 48))
+    # yfinance/curl_cffi maintains shared process state. High fan-out can
+    # deadlock before the first ordered result is yielded, so keep the
+    # production default deliberately bounded.
+    workers = max(1, min(int(os.getenv("ALPHASIFT_HISTORY_WORKERS", "8")), 16))
     print(f"{args.market}: workers={workers}", flush=True)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         rows = []
-        for row in pool.map(one, symbols):
+        futures = {pool.submit(one, symbol): symbol for symbol in symbols}
+        for future in as_completed(futures):
+            row = future.result()
             rows.append(row)
             if len(rows) % 250 == 0:
                 print(f"{args.market}: {len(rows)}/{len(symbols)}", flush=True)
