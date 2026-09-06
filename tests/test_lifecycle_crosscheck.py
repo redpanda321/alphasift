@@ -18,8 +18,9 @@ def test_full_and_five_are_separate_calendar_windows():
     assert result["five_year"]["history_sessions"] < 2000
     assert result["five_year_span_available"]
     assert result["full_has_older_data"]
-    assert result['strategy']['id'] == 'lifecycle_5y_full'
-    assert result['strategy']['require_weekly_monthly_agreement'] is False
+    assert result['strategy']['id'] == 'lifecycle_5y_full_wm'
+    assert result['strategy']['require_weekly_monthly_agreement'] is True
+    assert 'monthly' in result['five_year']['evidence']
     stage = result['consensus_stage']
     assert result['consensus_score'] == min(result['five_year']['scores'][stage],
                                             result['full_history']['scores'][stage])

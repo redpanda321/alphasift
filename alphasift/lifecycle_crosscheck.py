@@ -37,6 +37,29 @@ def classify_window(history: pd.DataFrame) -> dict:
     weekly = weekly[weekly.index <= dates.iloc[-1]]
     highs, _ = _pivots(weekly.high, 4)
     _, lows = _pivots(weekly.low, 4)
+    monthly = (
+        df.assign(date=dates)
+        .set_index("date")
+        .resample("ME")
+        .agg({"high": "max", "low": "min", "close": "last"})
+        .dropna()
+    )
+    month_close = monthly.close
+    month_low = float(month_close.tail(min(60, len(month_close))).min())
+    month_high = float(month_close.tail(min(60, len(month_close))).max())
+    month_position = (
+        float((price - month_low) / (month_high - month_low))
+        if month_high > month_low
+        else 0.5
+    )
+    month_ma6 = float(month_close.tail(min(6, len(month_close))).mean())
+    month_ma12 = float(month_close.tail(min(12, len(month_close))).mean())
+    month_return_3 = (
+        float((price / month_close.iloc[-4] - 1) * 100)
+        if len(month_close) >= 4
+        else 0.0
+    )
+    month_highs, _ = _pivots(monthly.high, 1)
     d_date = pd.Timestamp(f["cycle_high_date"])
     d_age = int((dates > d_date).sum())
     dd = f["drawdown_from_cycle_high_pct"]
@@ -53,9 +76,32 @@ def classify_window(history: pd.DataFrame) -> dict:
         "D_high": f["cycle_high"],
         "D_age_sessions": d_age,
         "drawdown_pct": dd,
+        "monthly": {
+            "position_60m": round(month_position, 4),
+            "ma6": round(month_ma6, 4),
+            "ma12": round(month_ma12, 4),
+            "return_3m_pct": round(month_return_3, 2),
+        },
     }
+    # A/H need a depressed monthly price regime, while D needs a high-zone
+    # monthly regime. This prevents daily/weekly noise from assigning a stage
+    # that contradicts the slower chart.
+    eligible["A"] = bool(f["a_eligible"] and month_position <= 0.40)
+    eligible["H"] = bool(
+        f["h_eligible"]
+        and month_position <= 0.35
+        and (month_ma6 <= month_ma12 or month_return_3 <= 0)
+    )
+    scores["A"] = round(min(100, f["a_score"] + 8 * (1 - month_position)), 2)
+    scores["H"] = round(min(100, f["h_score"] + 8 * (1 - month_position)), 2)
     # D is only a high-zone candidate; a final top cannot be confirmed in real time.
-    eligible["D"] = f["prior_runup_pct"] >= 100 and dd <= 12 and d_age <= 63
+    eligible["D"] = (
+        f["prior_runup_pct"] >= 100
+        and dd <= 12
+        and d_age <= 63
+        and month_position >= 0.75
+        and month_ma6 >= month_ma12
+    )
     if eligible["D"]:
         scores["D"] = round(
             min(
@@ -86,6 +132,8 @@ def classify_window(history: pd.DataFrame) -> dict:
             and len(after_lows) == 1
             and float(c.pct_change(20).iloc[-1]) > 0
             and price < f["ma200"]
+            and month_ma6 < month_ma12
+            and month_return_3 > 0
         )
         if eligible["E"]:
             scores["E"] = round(
@@ -121,6 +169,8 @@ def classify_window(history: pd.DataFrame) -> dict:
             and price > f["ma200"]
             and f["ma200_slope_60d_pct"] > 0
             and f["ma50"] > f["ma200"]
+            and month_ma6 > month_ma12
+            and month_position >= 0.45
         ):
             eligible["B"] = True
             scores["B"] = round(
@@ -137,6 +187,11 @@ def classify_window(history: pd.DataFrame) -> dict:
                 "pullback_pct": pullback,
             }
             break
+    post_d_month_highs = [v for d, v in month_highs if d > d_date.to_period("M").end_time]
+    evidence["monthly"]["post_D_lower_high_count"] = sum(
+        current < previous
+        for previous, current in zip(post_d_month_highs, post_d_month_highs[1:])
+    )
     matches = [s for s in scores if eligible[s]]
     return {
         "stage": matches[0]
