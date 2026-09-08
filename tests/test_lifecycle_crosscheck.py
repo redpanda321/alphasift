@@ -18,6 +18,7 @@ def test_full_and_five_are_separate_calendar_windows():
     assert result["five_year"]["history_sessions"] < 2000
     assert result["five_year_span_available"]
     assert result["full_has_older_data"]
+    assert result["window_years"] == 5
     assert result['strategy']['id'] == 'lifecycle_5y_full_wm'
     assert result['strategy']['require_weekly_monthly_agreement'] is True
     assert 'monthly' in result['five_year']['evidence']
@@ -26,8 +27,20 @@ def test_full_and_five_are_separate_calendar_windows():
                                             result['full_history']['scores'][stage])
 
 
-def test_young_listing_cannot_claim_cross_validation():
+def test_listing_under_five_years_falls_back_to_one_year_window():
+    # ~2.7 years of history: too short for the 5-year window, but long enough
+    # to cross-check against a trailing 1-year window instead of being
+    # excluded outright.
     result = crosscheck(history(700), as_of="2026-09-04")
+    assert result["window_years"] == 1
+    assert result["five_year_span_available"]
+    assert result["status"] in {"AGREEMENT", "NO_MATCH", "CONFLICT"}
+    assert result["five_year"] is not None
+    assert result["full_history"] is not None
+
+
+def test_listing_under_one_year_cannot_claim_cross_validation():
+    result = crosscheck(history(200), as_of="2026-09-04")
     assert result["status"] == "INSUFFICIENT_DISTINCT_HISTORY"
     assert result["consensus_stage"] is None
 

@@ -18,12 +18,15 @@ import pandas as pd
 
 from alphasift.daily import _normalize_daily_history
 from alphasift.lifecycle import compute_lifecycle_features, _pivots
-from alphasift.lifecycle_contract import WINDOW_YEARS, STAGES, strategy_contract
+from alphasift.lifecycle_contract import FALLBACK_WINDOW_YEARS, STAGES, strategy_contract
 
 
-def classify_window(history: pd.DataFrame) -> dict:
+def classify_window(history: pd.DataFrame, *, min_history_days: int | None = None) -> dict:
     df = _normalize_daily_history(history).reset_index(drop=True)
-    f = compute_lifecycle_features(df, profile={"lookback_days": 0})
+    profile = {"lookback_days": 0}
+    if min_history_days is not None:
+        profile["min_history_days"] = min_history_days
+    f = compute_lifecycle_features(df, profile=profile)
     c = df.close
     price = float(c.iloc[-1])
     dates = pd.to_datetime(df.date)
@@ -210,6 +213,41 @@ def classify_window(history: pd.DataFrame) -> dict:
     }
 
 
+# The A/H feature math (MA200, multi-year cycle-high lookback, etc.) needs a
+# real minimum of daily history to mean anything; this is the absolute floor
+# the model itself validates (see lifecycle.py's `min_history_days < 252`
+# guard). The production default for the primary 5-year/full pair stays a
+# more conservative 504 sessions (~2 years); this lower floor is only used
+# for the 1-year fallback pair below, so young listings can still be
+# classified instead of raising outright.
+MODEL_MIN_HISTORY_DAYS = 252
+DEFAULT_MIN_HISTORY_DAYS = 504
+
+
+def _pick_short_window(df: pd.DataFrame, dates: pd.Series, cutoff: pd.Timestamp):
+    """Pick the best available short window to cross-check against full history.
+
+    Tries FALLBACK_WINDOW_YEARS in preference order (5 years, then 1 year) and
+    uses the first one for which the stock has both a complete span of that
+    length *and* additional history beyond it (so the short window and full
+    history are meaningfully distinct, not the same data twice). This keeps
+    stocks with less than 5 years of history — recent IPOs in particular — in
+    the scan instead of excluding them outright, while still requiring at
+    least two independent windows to agree before a stage is confirmed.
+    Returns None if no window (including the shortest fallback) is usable.
+    """
+    for years in FALLBACK_WINDOW_YEARS:
+        start = cutoff - pd.DateOffset(years=years)
+        # Weekend/holiday allowance at the window boundary. Does not establish
+        # completeness of every session, or availability back to the IPO.
+        span_available = dates.min() <= start + pd.Timedelta(days=7)
+        extra_history = bool((dates < start).any())
+        if span_available and extra_history:
+            min_history_days = DEFAULT_MIN_HISTORY_DAYS if years == FALLBACK_WINDOW_YEARS[0] else MODEL_MIN_HISTORY_DAYS
+            return years, start, min_history_days
+    return None
+
+
 def crosscheck(history: pd.DataFrame, *, as_of: str) -> dict:
     df = _normalize_daily_history(history)
     if "date" not in df:
@@ -220,37 +258,62 @@ def crosscheck(history: pd.DataFrame, *, as_of: str) -> dict:
     dates = pd.to_datetime(df.date)
     if df.empty or dates.max().date().isoformat() != as_of:
         raise ValueError(f"latest daily bar must equal {as_of}")
-    start = cutoff - pd.DateOffset(years=WINDOW_YEARS)
-    full = classify_window(df)
-    five = classify_window(df.loc[dates >= start])
-    # Weekend/holiday allowance at the five-year boundary. Does not establish
-    # completeness of every session, or availability back to the IPO.
-    five_span = dates.min() <= start + pd.Timedelta(days=7)
-    extra_history = bool((dates < start).any())
-    comparable = bool(five_span and extra_history)
-    same = five["stage"] == full["stage"]
+
+    if len(df) < MODEL_MIN_HISTORY_DAYS:
+        # Too little history for the model to compute anything at all (a very
+        # recent IPO) — report it as an honest exclusion rather than raising.
+        return {
+            "strategy": strategy_contract(),
+            "as_of": as_of,
+            "window_years": None,
+            "five_year_boundary": None,
+            "five_year_span_available": False,
+            "full_has_older_data": False,
+            "status": "INSUFFICIENT_DISTINCT_HISTORY",
+            "consensus_stage": None,
+            "consensus_score": None,
+            "five_year": None,
+            "full_history": None,
+            "validation_kind": "same-provider different-window robustness; not predictive validation",
+        }
+
+    picked = _pick_short_window(df, dates, cutoff)
+    if picked is None:
+        # Enough history to classify once, but not enough to split into two
+        # meaningfully distinct windows for cross-checking.
+        window_years, start, comparable = None, None, False
+        full = classify_window(df, min_history_days=MODEL_MIN_HISTORY_DAYS)
+        short = None
+    else:
+        window_years, start, min_history_days = picked
+        comparable = True
+        full = classify_window(df, min_history_days=min_history_days)
+        short = classify_window(df.loc[dates >= start], min_history_days=min_history_days)
+
+    same = comparable and short["stage"] == full["stage"]
     status = (
         "INSUFFICIENT_DISTINCT_HISTORY"
         if not comparable
         else "AGREEMENT"
-        if same and five["stage"] in STAGES
+        if same and short["stage"] in STAGES
         else "NO_MATCH"
-        if same and five["stage"] == "UNCLASSIFIED"
+        if same and short["stage"] == "UNCLASSIFIED"
         else "CONFLICT"
     )
-    stage = five["stage"] if status == "AGREEMENT" else None
+    stage = short["stage"] if status == "AGREEMENT" else None
     return {
         "strategy": strategy_contract(),
         "as_of": as_of,
-        "five_year_boundary": str(start.date()),
-        "five_year_span_available": bool(five_span),
-        "full_has_older_data": extra_history,
+        "window_years": window_years,
+        "five_year_boundary": str(start.date()) if start is not None else None,
+        "five_year_span_available": comparable,
+        "full_has_older_data": comparable,
         "status": status,
         "consensus_stage": stage,
-        "consensus_score": min(five["scores"][stage], full["scores"][stage])
+        "consensus_score": min(short["scores"][stage], full["scores"][stage])
         if stage
         else None,
-        "five_year": five,
+        "five_year": short if short is not None else full,
         "full_history": full,
         "validation_kind": "same-provider different-window robustness; not predictive validation",
     }
