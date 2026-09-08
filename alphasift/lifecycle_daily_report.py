@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import html
 import json
+import random
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from itertools import pairwise
@@ -54,11 +56,37 @@ def candidate_rows(scan: dict[str, Any], market: str) -> list[dict[str, Any]]:
     return rows
 
 
+def _fetch_ticker_snapshot(symbol: str, *, retries: int = 3):
+    """Fetch a yfinance Ticker's statements/info, retrying transient failures.
+
+    This is a network-heavy call (income statement, cash flow, balance sheet,
+    and profile info each trigger their own request); a single retryable
+    failure otherwise drops the whole candidate — including its market cap —
+    from the daily report, not just this one field.
+    """
+    import yfinance as yf
+
+    last_error: Exception | None = None
+    for attempt in range(max(1, int(retries))):
+        try:
+            ticker = yf.Ticker(symbol)
+            income = ticker.income_stmt
+            cashflow = ticker.cash_flow
+            balance = ticker.quarterly_balance_sheet
+            if balance.empty:
+                balance = ticker.balance_sheet
+            info = ticker.get_info()
+            return ticker, income, cashflow, balance, info
+        except Exception as exc:  # noqa: BLE001 -- retried below; final attempt re-raises
+            last_error = exc
+            if attempt + 1 < retries:
+                time.sleep(min(1.5 * (2**attempt), 10) + random.uniform(0, 0.5))
+    raise last_error  # type: ignore[misc]
+
+
 def fetch_financial(
     stock: dict[str, Any], *, now: pd.Timestamp | None = None
 ) -> dict[str, Any]:
-    import yfinance as yf
-
     instant = now or pd.Timestamp.now(tz="UTC")
     cutoff = (
         instant.tz_localize(None).normalize() if instant.tzinfo else instant.normalize()
@@ -67,13 +95,7 @@ def fetch_financial(
     result["retrieved_at"] = instant.isoformat()
     result["source"] = f"https://finance.yahoo.com/quote/{stock['symbol']}/financials/"
     try:
-        ticker = yf.Ticker(stock["symbol"])
-        income = ticker.income_stmt
-        cashflow = ticker.cash_flow
-        balance = ticker.quarterly_balance_sheet
-        if balance.empty:
-            balance = ticker.balance_sheet
-        info = ticker.get_info()
+        _ticker, income, cashflow, balance, info = _fetch_ticker_snapshot(stock["symbol"])
         result.update(
             name=info.get("shortName") or info.get("longName") or stock["code"],
             currency=info.get("financialCurrency"),

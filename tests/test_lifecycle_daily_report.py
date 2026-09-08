@@ -1,6 +1,10 @@
-import pandas as pd
+import sys
+import types
 
-from alphasift.lifecycle_daily_report import build_report, score_financial
+import pandas as pd
+import pytest
+
+from alphasift.lifecycle_daily_report import _fetch_ticker_snapshot, build_report, score_financial
 
 
 def finance(stock):
@@ -94,3 +98,58 @@ def test_financial_company_not_scored_like_industrial_company():
     row["financial_company"] = True
     result, reason = score_financial(row, now=pd.Timestamp("2026-09-05", tz="UTC"))
     assert result is None and "capital" in reason
+
+
+def test_fetch_ticker_snapshot_retries_transient_failures(monkeypatch):
+    empty = pd.DataFrame()
+    attempts = {"count": 0}
+
+    class FlakyTicker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise RuntimeError("rate limited")
+
+        @property
+        def income_stmt(self):
+            return empty
+
+        @property
+        def cash_flow(self):
+            return empty
+
+        @property
+        def quarterly_balance_sheet(self):
+            return empty
+
+        @property
+        def balance_sheet(self):
+            return empty
+
+        def get_info(self):
+            return {"marketCap": 42}
+
+    fake_yf = types.ModuleType("yfinance")
+    fake_yf.Ticker = FlakyTicker
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+    monkeypatch.setattr("alphasift.lifecycle_daily_report.time.sleep", lambda _: None)
+
+    _ticker, income, cashflow, balance, info = _fetch_ticker_snapshot("AAPL", retries=3)
+    assert attempts["count"] == 3
+    assert info["marketCap"] == 42
+    assert income.empty and cashflow.empty and balance.empty
+
+
+def test_fetch_ticker_snapshot_raises_after_exhausting_retries(monkeypatch):
+    class AlwaysFailsTicker:
+        def __init__(self, symbol):
+            raise RuntimeError("still rate limited")
+
+    fake_yf = types.ModuleType("yfinance")
+    fake_yf.Ticker = AlwaysFailsTicker
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+    monkeypatch.setattr("alphasift.lifecycle_daily_report.time.sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError, match="still rate limited"):
+        _fetch_ticker_snapshot("AAPL", retries=2)
