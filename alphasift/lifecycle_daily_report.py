@@ -78,6 +78,7 @@ def fetch_financial(
             currency=info.get("financialCurrency"),
             sector=info.get("sector") or "Unclassified",
             industry=info.get("industry") or info.get("sector") or "Unclassified",
+            market_cap=info.get("marketCap"),
         )
         financial = result["sector"] == "Financial Services"
         result["financial_company"] = financial
@@ -242,6 +243,7 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
         "symbol",
         "name",
         "price",
+        "market_cap",
         "as_of",
         "score",
         "five_score",
