@@ -145,7 +145,7 @@ def main():
     sp.add_argument("--jsonl", action="store_true", help="以 JSONL 输出")
     sp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
 
-    cross = sub.add_parser("lifecycle-crosscheck", help="5-year/full-history A/B/D/E/H comparison")
+    cross = sub.add_parser("lifecycle-crosscheck", help="5-year/full-history A/B/C/D/E/F/G/H comparison")
     cross.add_argument("--market", choices=["cn", "us"], required=True)
     cross.add_argument("--symbols", default=None)
     cross.add_argument("--output", required=True)

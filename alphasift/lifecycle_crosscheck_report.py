@@ -4,6 +4,8 @@ from collections import Counter
 import json
 from pathlib import Path
 
+from alphasift.lifecycle_contract import STAGES
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -11,7 +13,7 @@ def main():
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     reports = [(Path(p), json.loads(Path(p).read_text(encoding="utf-8"))) for p in args.inputs]
-    lines = ["# A/B/D/E/H 五年与全部历史交叉验证", "",
+    lines = ["# A/B/C/D/E/F/G/H 五年与全部历史交叉验证", "",
              "同一份新获取的复权日K分别按最近5个日历年、全部可用历史计算。",
              "一致性分取两个窗口对应阶段评分的较小值，不代表收益概率。D仅为高位候选。", "",
              "| 市场文件 | 截至交易日 | 快照数 | 请求历史数 | 一致 | 冲突 | 无匹配 | 历史不足以交叉 | 失败 |",
@@ -23,7 +25,7 @@ def main():
         cells.extend(counts[k] for k in ["AGREEMENT", "CONFLICT", "NO_MATCH", "INSUFFICIENT_DISTINCT_HISTORY", "FAILED"])
         lines.append("| " + " | ".join(map(str, cells)) + " |")
         all_rows.extend(report["rows"])
-    for stage in "ABDEH":
+    for stage in STAGES:
         matches = sorted([r for r in all_rows if r.get("consensus_stage") == stage],
                          key=lambda r: (-r["consensus_score"], r["symbol"]))
         lines += ["", f"## {stage}：一致候选 {len(matches)} 只（展示前20）", "",

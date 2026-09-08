@@ -1,14 +1,14 @@
 """Authoritative contract for the scheduled five-year/full-history strategy."""
 
 STRATEGY_ID = 'lifecycle_5y_full_wm'
-STRATEGY_VERSION = '2.1.0'
+STRATEGY_VERSION = '2.2.0'
 WINDOW_YEARS = 5
 # Preference order for the "short" window compared against full history: try a
 # full trailing 5-calendar-year span first, and fall back to a 1-calendar-year
 # span for stocks whose full history is shorter than 5 years (e.g. recent
 # IPOs) so they still get a two-window cross-check instead of being excluded.
 FALLBACK_WINDOW_YEARS = (5, 1)
-STAGES = ('A', 'B', 'D', 'E', 'H')
+STAGES = ('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H')
 
 
 def strategy_contract():

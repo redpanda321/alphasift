@@ -5,9 +5,12 @@ import html
 import json
 from pathlib import Path
 
-STAGES = "ABDEH"
-LABELS = {"A": "底部候选", "B": "首次上涨回调", "D": "周期高位候选",
-          "E": "顶部后首次反弹", "H": "长期下降末端"}
+from alphasift.lifecycle_contract import STAGES
+
+LABELS = {"A": "底部候选", "B": "首次上涨回调", "C": "第二次上涨回调",
+          "D": "周期高位候选", "E": "顶部后首次反弹",
+          "F": "顶部后第二次反弹", "G": "顶部后第三次反弹",
+          "H": "长期下降末端"}
 US_SECTORS = {"Technology": "科技", "Communication Services": "通信服务",
               "Industrials": "工业", "Consumer Cyclical": "可选消费",
               "Consumer Defensive": "必需消费", "Healthcare": "医疗保健",

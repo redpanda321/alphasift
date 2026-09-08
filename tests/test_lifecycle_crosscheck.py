@@ -70,9 +70,41 @@ def test_monotonic_rally_is_d_candidate_not_b_or_e():
 @pytest.mark.parametrize("stage,controls", [
     ("B", [(0,10),(600,9),(650,6),(720,10),(860,18),(899,15)]),
     ("E", [(0,10),(500,20),(700,50),(800,25),(850,28),(899,33)]),
+    ("F", [(0,10),(500,9),(600,60),(650,30),(700,45),(750,20),(899,23)]),
+    ("G", [(0,10),(500,9),(600,60),(650,30),(700,45),(750,20),(800,35),(850,12),(899,15)]),
 ])
 def test_first_pullback_and_first_bear_rebound(stage, controls):
     x, y = zip(*controls)
     close = np.interp(np.arange(900), x, y)
     df = pd.DataFrame({"date": pd.bdate_range(end="2026-09-04", periods=900), "close": close})
     assert classify_window(df)["stage"] == stage
+
+
+def test_second_higher_low_and_second_rally_high_is_c_not_b():
+    # A second confirmed rally high above the first, with a higher-low
+    # pullback in between, should read as C (one leg further up than B) and
+    # must not also satisfy B's single-rally-high gate.
+    controls = [(0,10),(600,9),(650,6),(720,10),(860,18),(900,12),(1000,24),(1050,20)]
+    x, y = zip(*controls)
+    close = np.interp(np.arange(1051), x, y)
+    df = pd.DataFrame({"date": pd.bdate_range(end="2026-09-04", periods=1051), "close": close})
+    result = classify_window(df)
+    assert result["stage"] == "C"
+    assert "B" not in result["matches"]
+
+
+def test_e_f_g_h_are_mutually_exclusive_by_confirmed_leg_count():
+    # Same boom-and-bust shape at increasing numbers of confirmed post-D
+    # lower-high/lower-low legs; each additional leg should move the
+    # classification one stage further down the cycle without ambiguity.
+    legs = {
+        "E": [(0,10),(500,20),(700,50),(800,25),(850,28),(899,33)],
+        "F": [(0,10),(500,9),(600,60),(650,30),(700,45),(750,20),(899,23)],
+        "G": [(0,10),(500,9),(600,60),(650,30),(700,45),(750,20),(800,35),(850,12),(899,15)],
+    }
+    for stage, controls in legs.items():
+        x, y = zip(*controls)
+        close = np.interp(np.arange(900), x, y)
+        df = pd.DataFrame({"date": pd.bdate_range(end="2026-09-04", periods=900), "close": close})
+        result = classify_window(df)
+        assert result["matches"] == [stage]

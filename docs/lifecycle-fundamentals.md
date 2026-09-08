@@ -2,7 +2,7 @@
 
 运行 `uv run python -m alphasift.lifecycle_fundamentals`；只重建报表时加 `--report-only`。
 
-输入为 `data/lifecycle-sector-top10-all.csv` 的全部双窗口一致候选，**不是**上一轮被截断的行业前10，也不是全体上市公司。按市场、既有行业分类分组，跨 A/B/D/E/H 阶段取最多5只，阶段保持原值。未分类单列。
+输入为 `data/lifecycle-sector-top10-all.csv` 的全部双窗口一致候选，**不是**上一轮被截断的行业前10，也不是全体上市公司。按市场、既有行业分类分组，跨 A/B/C/D/E/F/G/H 阶段取最多5只，阶段保持原值。未分类单列。
 
 复用本工作区 `data/fundamental_scan.py` 的采集函数及 `data/rank_fundamental_top50.py` 的财务评分函数；通过 AST 只加载指定函数，不执行旧脚本的扫描或文件写入。运行需要保留这两个既有脚本。当天成功的缓存保留原获取时间，其他候选以2并发补抓，遇供应商限流停止新请求。
 

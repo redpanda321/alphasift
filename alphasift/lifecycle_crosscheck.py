@@ -66,13 +66,25 @@ def classify_window(history: pd.DataFrame, *, min_history_days: int | None = Non
     d_date = pd.Timestamp(f["cycle_high_date"])
     d_age = int((dates > d_date).sum())
     dd = f["drawdown_from_cycle_high_pct"]
-    scores = {"A": f["a_score"], "H": f["h_score"], "B": 0.0, "D": 0.0, "E": 0.0}
+    scores = {
+        "A": f["a_score"],
+        "H": f["h_score"],
+        "B": 0.0,
+        "C": 0.0,
+        "D": 0.0,
+        "E": 0.0,
+        "F": 0.0,
+        "G": 0.0,
+    }
     eligible = {
         "A": f["a_eligible"],
         "H": f["h_eligible"],
         "B": False,
+        "C": False,
         "D": False,
         "E": False,
+        "F": False,
+        "G": False,
     }
     evidence = {
         "D_date": f["cycle_high_date"],
@@ -147,6 +159,75 @@ def classify_window(history: pd.DataFrame, *, min_history_days: int | None = Non
                 2,
             )
             evidence["E_trough"] = {"date": str(trough_date.date()), "price": trough}
+    # F: exactly one confirmed post-D lower high followed by a second, deeper
+    # trough than the first; currently rebounding without a second confirmed
+    # peak yet. One decline leg further down the cycle than E.
+    if len(after_highs) == 1 and len(after_lows) == 2:
+        peak_date, peak = after_highs[0]
+        trough1_date, trough1 = after_lows[0]
+        trough2_date, trough2 = after_lows[1]
+        rebound = (price / trough2 - 1) * 100
+        decline_from_peak = (1 - trough2 / peak) * 100
+        eligible["F"] = bool(
+            f["prior_runup_pct"] >= 100
+            and peak < f["cycle_high"]
+            and trough2 < trough1
+            and decline_from_peak >= 15
+            and 20 <= dd <= 65
+            and 5 <= rebound <= 50
+            and d_age <= 504
+            and float(c.pct_change(20).iloc[-1]) > 0
+            and price < f["ma200"]
+            and month_ma6 < month_ma12
+        )
+        if eligible["F"]:
+            scores["F"] = round(
+                60
+                + 15 * min(rebound / 20, 1)
+                + 10 * (f["ma200_slope_60d_pct"] < 0)
+                + 10 * (f["macd_status"] == "improving")
+                + 5 * (dd >= 35),
+                2,
+            )
+            evidence["F_trough"] = {"date": str(trough2_date.date()), "price": trough2}
+            evidence["F_lower_high"] = {"date": str(peak_date.date()), "price": peak}
+    # G: two confirmed post-D lower highs and a third, deeper trough; the
+    # decline is maturing toward acceleration but has not yet met H's near-low
+    # and acceleration gates. One decline leg further down than F.
+    if len(after_highs) == 2 and len(after_lows) == 3:
+        peak1_date, peak1 = after_highs[0]
+        peak2_date, peak2 = after_highs[1]
+        trough2_date, trough2 = after_lows[1]
+        trough3_date, trough3 = after_lows[2]
+        rebound = (price / trough3 - 1) * 100
+        decline_from_peak = (1 - trough3 / peak2) * 100
+        eligible["G"] = bool(
+            f["prior_runup_pct"] >= 100
+            and peak2 < peak1 < f["cycle_high"]
+            and trough3 < trough2
+            and decline_from_peak >= 15
+            and 35 <= dd <= 80
+            and 5 <= rebound <= 50
+            and d_age <= 756
+            and not f["h_eligible"]
+            and float(c.pct_change(20).iloc[-1]) > 0
+            and price < f["ma200"]
+            and month_ma6 < month_ma12
+        )
+        if eligible["G"]:
+            scores["G"] = round(
+                55
+                + 15 * min(rebound / 20, 1)
+                + 10 * (f["ma200_slope_60d_pct"] < 0)
+                + 10 * (f["macd_status"] == "improving")
+                + 10 * (dd >= 50),
+                2,
+            )
+            evidence["G_trough"] = {"date": str(trough3_date.date()), "price": trough3}
+            evidence["G_lower_highs"] = [
+                {"date": str(peak1_date.date()), "price": peak1},
+                {"date": str(peak2_date.date()), "price": peak2},
+            ]
     # B requires an A that was identifiable using only information then
     # available, followed by the FIRST confirmed weekly rally high.
     for low_date, low in reversed(lows):
@@ -187,6 +268,61 @@ def classify_window(history: pd.DataFrame, *, min_history_days: int | None = Non
                 "date": str(low_date.date()),
                 "price": low,
                 "rally_high_date": str(peak_date.date()),
+                "pullback_pct": pullback,
+            }
+            break
+    # C: same A anchor as B, but a SECOND confirmed rally high above the
+    # first with a higher-low pullback in between — the uptrend has continued
+    # one leg further than B — while price has pulled back from that second
+    # high without yet meeting D's high-zone criteria.
+    for low_date, low in reversed(lows):
+        if (dates.iloc[-1] - low_date).days > 1460:
+            break
+        rally_highs = [(d, v) for d, v in highs if d > low_date]
+        if len(rally_highs) != 2:
+            continue
+        prefix = df[dates <= low_date]
+        if len(prefix) < 504:
+            continue
+        anchor = compute_lifecycle_features(prefix, profile={"lookback_days": 0})
+        if not anchor["a_eligible"]:
+            continue
+        peak1_date, peak1 = rally_highs[0]
+        peak2_date, peak2 = rally_highs[1]
+        mid_lows = [(d, v) for d, v in lows if peak1_date < d < peak2_date]
+        if not mid_lows:
+            continue
+        mid_low_date, mid_low = mid_lows[-1]
+        pullback = (1 - price / peak2) * 100
+        rise = (peak2 / low - 1) * 100
+        subsequent_low = float(df.loc[dates > peak2_date, "low"].min())
+        if (
+            peak2 > peak1
+            and mid_low > low
+            and rise >= 50
+            and 5 <= pullback <= 25
+            and subsequent_low > mid_low
+            and price > f["ma200"]
+            and f["ma200_slope_60d_pct"] > 0
+            and f["ma50"] > f["ma200"]
+            and month_ma6 > month_ma12
+            and month_position >= 0.55
+            and not eligible["D"]
+        ):
+            eligible["C"] = True
+            scores["C"] = round(
+                65
+                + 15 * min(rise / 100, 1)
+                + 10 * f["stabilized"]
+                + 10 * (f["macd_status"] == "improving"),
+                2,
+            )
+            evidence["C_anchor_A"] = {
+                "date": str(low_date.date()),
+                "price": low,
+                "first_rally_high": {"date": str(peak1_date.date()), "price": peak1},
+                "higher_low": {"date": str(mid_low_date.date()), "price": mid_low},
+                "second_rally_high_date": str(peak2_date.date()),
                 "pullback_pct": pullback,
             }
             break
