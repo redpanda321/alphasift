@@ -14,7 +14,11 @@ from itertools import pairwise
 
 import pandas as pd
 
-from alphasift.daily import _normalize_daily_history, fetch_daily_history
+from alphasift.daily import (
+    _normalize_daily_history,
+    cn_code_to_yfinance_symbol,
+    fetch_daily_history,
+)
 
 DEFAULT_PROFILE = {
     "mode": "both",
@@ -74,12 +78,7 @@ def enrich_lifecycle_features(
                 else source
             )
             if market == "cn" and history_source == "yfinance" and code.isdigit():
-                suffix = (
-                    ".SS"
-                    if code.startswith(("6", "9"))
-                    else (".BJ" if code.startswith(("4", "8")) else ".SZ")
-                )
-                fetch_code = code + suffix
+                fetch_code = cn_code_to_yfinance_symbol(code)
             hist = fetcher(
                 fetch_code,
                 lookback_days=int(cfg["lookback_days"]),

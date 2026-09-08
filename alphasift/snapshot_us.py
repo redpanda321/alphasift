@@ -11,6 +11,7 @@ rather than silently screening the US pool.
 
 import logging
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
@@ -319,11 +320,18 @@ def fetch_daily_history_yfinance(
     ticker: str,
     *,
     lookback_days: int = 120,
+    retries: int = 3,
 ) -> pd.DataFrame:
     """Fetch daily OHLCV history for a US ticker via yfinance.
 
     Returns a DataFrame with columns: date, open, high, low, close, volume
     matching the schema expected by alphasift.daily's enrichment logic.
+
+    Thousands of tickers get fetched per daily scan from a single provider
+    (deliberately, so both cross-check windows share one adjustment basis);
+    transient rate-limiting or network blips on any single request otherwise
+    excludes that stock from the whole scan. Retries with backoff turn most
+    of those transient failures into successes instead of a permanent FAILED.
     """
     import yfinance as yf
 
@@ -336,18 +344,33 @@ def fetch_daily_history_yfinance(
     history_range = {"period": "max"} if lookback_days == 0 else {
         "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")
     }
-    # The scan already parallelizes by symbol. Disabling yfinance's nested
-    # downloader threads avoids curl_cffi lock contention in long-lived jobs;
-    # an explicit timeout prevents a single ticker from blocking a full scan.
-    hist = yf.download(
-        ticker,
-        **history_range,
-        auto_adjust=True,
-        progress=False,
-        threads=False,
-        timeout=20,
-    )
+    attempts = max(1, int(retries))
+    hist = None
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            # The scan already parallelizes by symbol. Disabling yfinance's
+            # nested downloader threads avoids curl_cffi lock contention in
+            # long-lived jobs; an explicit timeout prevents a single ticker
+            # from blocking a full scan.
+            hist = yf.download(
+                ticker,
+                **history_range,
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+                timeout=20,
+            )
+        except Exception as exc:  # noqa: BLE001 -- retried below; final attempt re-raises
+            last_error = exc
+            hist = None
+        if hist is not None and not hist.empty:
+            break
+        if attempt + 1 < attempts:
+            time.sleep(min(1.5 * (2**attempt), 10) + random.uniform(0, 0.5))
     if hist is None or hist.empty:
+        if last_error is not None:
+            raise RuntimeError(f"yfinance daily history empty for {ticker}") from last_error
         raise RuntimeError(f"yfinance daily history empty for {ticker}")
 
     if isinstance(hist.columns, pd.MultiIndex):

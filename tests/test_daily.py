@@ -17,6 +17,7 @@ from alphasift.daily import (
     _to_baostock_code,
     _to_tencent_code,
     _to_tushare_code,
+    cn_code_to_yfinance_symbol,
 )
 
 
@@ -616,6 +617,20 @@ def test_to_tencent_code_handles_exchange_prefixes():
     assert _to_tencent_code("830799") == "bj830799"
     assert _to_tencent_code("920593") == "bj920593"
     assert _to_tencent_code("1") == "sz000001"
+
+
+def test_cn_code_to_yfinance_symbol_handles_exchange_suffixes():
+    assert cn_code_to_yfinance_symbol("600519") == "600519.SS"
+    assert cn_code_to_yfinance_symbol("000001") == "000001.SZ"
+    assert cn_code_to_yfinance_symbol("300750") == "300750.SZ"
+    assert cn_code_to_yfinance_symbol("688981") == "688981.SS"
+    # Shanghai B-shares ("9"-prefixed, not the Beijing "920xxx" series).
+    assert cn_code_to_yfinance_symbol("900901") == "900901.SS"
+    # Beijing Exchange: legacy "4"/"8" codes and the newer "920xxx" series,
+    # which must not fall through to the generic "9" (Shanghai) match.
+    assert cn_code_to_yfinance_symbol("830799") == "830799.BJ"
+    assert cn_code_to_yfinance_symbol("920593") == "920593.BJ"
+    assert cn_code_to_yfinance_symbol("1") == "000001.SZ"
 
 
 def test_normalize_tushare_adj_accepts_qfq_and_none():

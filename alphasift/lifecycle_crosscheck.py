@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from alphasift.daily import _normalize_daily_history
+from alphasift.daily import _normalize_daily_history, cn_code_to_yfinance_symbol
 from alphasift.lifecycle import compute_lifecycle_features, _pivots
 from alphasift.lifecycle_contract import FALLBACK_WINDOW_YEARS, STAGES, strategy_contract
 
@@ -355,17 +355,7 @@ def main(argv=None):
         symbols = (
             codes
             if args.market == "us"
-            else [
-                c
-                + (
-                    ".BJ"
-                    if c.startswith(("4", "8", "920"))
-                    else ".SS"
-                    if c.startswith("6")
-                    else ".SZ"
-                )
-                for c in codes
-            ]
+            else [cn_code_to_yfinance_symbol(c) for c in codes]
         )
         scope = "provider universe; price>=1, amount>=20m; CN excludes ST; US cap>=1b"
 

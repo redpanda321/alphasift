@@ -627,6 +627,22 @@ def _to_tencent_code(code: str) -> str:
     return f"sz{raw}"
 
 
+def cn_code_to_yfinance_symbol(code: str) -> str:
+    """Map an A-share code to its Yahoo Finance ticker (exchange suffix).
+
+    Single source of truth for the exchange-prefix rule already used by the
+    tushare/tencent/baostock code converters above: Beijing Exchange codes
+    ("4"/"8"/"920"-prefixed) must be checked before the Shanghai check,
+    since "920xxx" would otherwise also match a bare "9" prefix.
+    """
+    raw = str(code).strip().zfill(6)
+    if raw.startswith(("4", "8", "920")):
+        return f"{raw}.BJ"
+    if raw.startswith(("6", "9", "5")):
+        return f"{raw}.SS"
+    return f"{raw}.SZ"
+
+
 def _is_baostock_network_outage(error_code: object, error_msg: object) -> bool:
     code = str(error_code)
     message = str(error_msg)
