@@ -169,6 +169,9 @@ _LIFECYCLE_PROFILE_KEYS = {
     "h_min_prior_runup_pct",
     "h_min_drawdown_pct",
     "pivot_window_weeks",
+    "monthly_min_bars",
+    "five_year_days",
+    "weekly_min_bars",
 }
 _STRATEGY_DIR_CACHE: dict[
     Path,

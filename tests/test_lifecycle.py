@@ -121,6 +121,17 @@ def test_lifecycle_strategy_yaml_loads():
     assert strategy.screening.market_scope == ["cn", "us"]
     assert strategy.screening.factor_weights == {"lifecycle": 1.0}
     assert strategy.screening.lifecycle_profile["mode"] == "both"
+    assert strategy.screening.lifecycle_profile["monthly_min_bars"] == 24
+
+
+def test_slow_cycle_prefers_all_history_monthly_then_weekly_fallback():
+    long = _history_from_controls([(0, 10), (799, 6.2)])
+    assert compute_lifecycle_features(long)["slow_cycle_timeframe"] == "all_available_history_monthly"
+
+    weekly_only = long.tail(260).copy()
+    features = compute_lifecycle_features(weekly_only, profile={"min_history_days": 252})
+    assert features["slow_cycle_timeframe"] == "weekly_fallback"
+    assert features["slow_cycle_bars"] >= 52
 
 
 def test_new_low_without_boom_cannot_be_h_even_with_zero_score_threshold():

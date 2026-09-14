@@ -17,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from alphasift.daily import _normalize_daily_history, cn_code_to_yfinance_symbol
-from alphasift.lifecycle import compute_lifecycle_features, _pivots
+from alphasift.lifecycle import compute_lifecycle_features, _pivots, _select_slow_cycle_frame
 from alphasift.lifecycle_contract import FALLBACK_WINDOW_YEARS, STAGES, strategy_contract
 
 
@@ -47,21 +47,11 @@ def classify_window(history: pd.DataFrame, *, min_history_days: int | None = Non
         .agg({"high": "max", "low": "min", "close": "last"})
         .dropna()
     )
-    month_close = monthly.close
-    month_low = float(month_close.tail(min(60, len(month_close))).min())
-    month_high = float(month_close.tail(min(60, len(month_close))).max())
-    month_position = (
-        float((price - month_low) / (month_high - month_low))
-        if month_high > month_low
-        else 0.5
-    )
-    month_ma6 = float(month_close.tail(min(6, len(month_close))).mean())
-    month_ma12 = float(month_close.tail(min(12, len(month_close))).mean())
-    month_return_3 = (
-        float((price / month_close.iloc[-4] - 1) * 100)
-        if len(month_close) >= 4
-        else 0.0
-    )
+    slow = _select_slow_cycle_frame(df.assign(_date=dates), weekly, {"lookback_days": 0, "monthly_min_bars": 24, "weekly_min_bars": 52})
+    month_position = slow["position"]
+    month_ma6 = slow["fast_ma"]
+    month_ma12 = slow["slow_ma"]
+    month_return_3 = slow["return_pct"]
     month_highs, _ = _pivots(monthly.high, 1)
     d_date = pd.Timestamp(f["cycle_high_date"])
     d_age = int((dates > d_date).sum())
@@ -92,6 +82,8 @@ def classify_window(history: pd.DataFrame, *, min_history_days: int | None = Non
         "D_age_sessions": d_age,
         "drawdown_pct": dd,
         "monthly": {
+            "timeframe": slow["timeframe"],
+            "bars": slow["bars"],
             "position_60m": round(month_position, 4),
             "ma6": round(month_ma6, 4),
             "ma12": round(month_ma12, 4),
@@ -363,13 +355,13 @@ DEFAULT_MIN_HISTORY_DAYS = 504
 def _pick_short_window(df: pd.DataFrame, dates: pd.Series, cutoff: pd.Timestamp):
     """Pick the best available short window to cross-check against full history.
 
-    Tries FALLBACK_WINDOW_YEARS in preference order (5 years, then 1 year) and
+    Tries FALLBACK_WINDOW_YEARS in preference order (five years) and
     uses the first one for which the stock has both a complete span of that
     length *and* additional history beyond it (so the short window and full
     history are meaningfully distinct, not the same data twice). This keeps
-    stocks with less than 5 years of history — recent IPOs in particular — in
-    the scan instead of excluding them outright, while still requiring at
-    least two independent windows to agree before a stage is confirmed.
+    the scan while still requiring at least two independent windows to agree
+    before a stage is confirmed.  Shorter histories remain visible through
+    the classifier's weekly fallback but cannot claim two-window agreement.
     Returns None if no window (including the shortest fallback) is usable.
     """
     for years in FALLBACK_WINDOW_YEARS:

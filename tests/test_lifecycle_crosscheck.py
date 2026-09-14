@@ -27,14 +27,14 @@ def test_full_and_five_are_separate_calendar_windows():
                                             result['full_history']['scores'][stage])
 
 
-def test_listing_under_five_years_falls_back_to_one_year_window():
-    # ~2.7 years of history: too short for the 5-year window, but long enough
-    # to cross-check against a trailing 1-year window instead of being
-    # excluded outright.
+def test_listing_under_five_years_does_not_claim_short_window_agreement():
+    # A one-year slice is not a valid substitute for a five-year slow cycle.
+    # The individual classification may still expose its slow-cycle timeframe,
+    # but it cannot claim two-window agreement.
     result = crosscheck(history(700), as_of="2026-09-04")
-    assert result["window_years"] == 1
-    assert result["five_year_span_available"]
-    assert result["status"] in {"AGREEMENT", "NO_MATCH", "CONFLICT"}
+    assert result["window_years"] is None
+    assert not result["five_year_span_available"]
+    assert result["status"] == "INSUFFICIENT_DISTINCT_HISTORY"
     assert result["five_year"] is not None
     assert result["full_history"] is not None
 

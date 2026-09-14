@@ -35,6 +35,12 @@ DEFAULT_PROFILE = {
     "h_min_prior_runup_pct": 100.0,
     "h_min_drawdown_pct": 50.0,
     "pivot_window_weeks": 4,
+    # Slow-cycle data priority for A/H decisions.  Full available history is
+    # requested by default; a caller constrained to a window can explicitly
+    # use five_year_monthly, and short histories degrade to weekly bars.
+    "monthly_min_bars": 24,
+    "five_year_days": 1260,
+    "weekly_min_bars": 52,
 }
 
 
@@ -72,6 +78,7 @@ def enrich_lifecycle_features(
         idx, code = item
         try:
             fetch_code = code
+            effective_profile = dict(cfg)
             history_source = (
                 "yfinance"
                 if market == "us" or int(cfg["lookback_days"]) == 0
@@ -79,14 +86,31 @@ def enrich_lifecycle_features(
             )
             if market == "cn" and history_source == "yfinance" and code.isdigit():
                 fetch_code = cn_code_to_yfinance_symbol(code)
-            hist = fetcher(
-                fetch_code,
-                lookback_days=int(cfg["lookback_days"]),
-                source=history_source,
-                retries=1,
-                cache_dir=None,  # every scan fetches afresh, with no stale fallback
-                cache_ttl_seconds=0,
-            )
+            try:
+                hist = fetcher(
+                    fetch_code,
+                    lookback_days=int(cfg["lookback_days"]),
+                    source=history_source,
+                    retries=1,
+                    cache_dir=None,  # every scan fetches afresh, with no stale fallback
+                    cache_ttl_seconds=0,
+                )
+            except Exception as full_error:
+                # A provider can reject its max/all-history query while still
+                # serving a normal bounded request.  Preserve the requested
+                # priority by retrying only the five-year fallback.
+                if int(cfg["lookback_days"]) != 0:
+                    raise
+                effective_profile["lookback_days"] = int(cfg["five_year_days"])
+                hist = fetcher(
+                    fetch_code,
+                    lookback_days=effective_profile["lookback_days"],
+                    source=history_source,
+                    retries=1,
+                    cache_dir=None,
+                    cache_ttl_seconds=0,
+                )
+                hist.attrs["all_history_fetch_error"] = str(full_error)
             retrieved_at = pd.Timestamp.now(tz="UTC").isoformat()
             if expected_session is not None:
                 normalized = _normalize_daily_history(hist)
@@ -98,7 +122,7 @@ def enrich_lifecycle_features(
                 ].copy()
                 normalized.attrs.update(hist.attrs)
                 hist = normalized
-            features = compute_lifecycle_features(hist, profile=cfg)
+            features = compute_lifecycle_features(hist, profile=effective_profile)
             if (
                 expected_session is not None
                 and features["data_as_of"] != expected_session
@@ -107,9 +131,7 @@ def enrich_lifecycle_features(
                     f"outdated history: {features['data_as_of']}; required {expected_session}"
                 )
             features["history_retrieved_at"] = retrieved_at
-            features["history_scope"] = (
-                "all_available" if int(cfg["lookback_days"]) == 0 else "window"
-            )
+            features["history_scope"] = features["slow_cycle_timeframe"]
             features["snapshot_price"] = frame.loc[idx].get("price")
             # A daily bar supplies a session date, not an observed quote time.
             features["data_timestamp"] = str(hist.attrs.get("data_timestamp", ""))
@@ -206,6 +228,60 @@ def enrich_lifecycle_features(
     return frame
 
 
+def _select_slow_cycle_frame(
+    df: pd.DataFrame, weekly: pd.DataFrame, cfg: dict
+) -> dict[str, float | int | str]:
+    """Return the slow-cycle regime using the documented data priority.
+
+    Daily OHLCV is resampled locally so CN and US providers have identical
+    semantics.  A full-history request uses every available monthly bar.  A
+    deliberately bounded request (the five-year fallback) uses its monthly
+    bars.  When fewer than two years of month bars are present, weekly bars
+    are the only sufficiently granular fallback.
+    """
+    monthly = (
+        df.set_index("_date")
+        .resample("ME")
+        .agg({"high": "max", "low": "min", "close": "last"})
+        .dropna()
+    )
+    min_months = int(cfg["monthly_min_bars"])
+    if len(monthly) >= min_months:
+        bars = monthly
+        timeframe = (
+            "all_available_history_monthly"
+            if int(cfg["lookback_days"]) == 0
+            else "five_year_monthly"
+        )
+        fast, slow, return_period = 6, 12, 3
+    else:
+        if len(weekly) < int(cfg["weekly_min_bars"]):
+            raise RuntimeError(
+                "insufficient monthly history and weekly fallback history"
+            )
+        bars = weekly
+        timeframe = "weekly_fallback"
+        # Roughly mirrors the six/twelve-month regime using 13/26 weeks.
+        fast, slow, return_period = 13, 26, 13
+
+    close = pd.to_numeric(bars["close"], errors="coerce").dropna()
+    low = float(close.min())
+    high = float(close.max())
+    position = float((close.iloc[-1] - low) / (high - low)) if high > low else 0.5
+    return {
+        "timeframe": timeframe,
+        "bars": len(close),
+        "position": position,
+        "fast_ma": float(close.tail(min(fast, len(close))).mean()),
+        "slow_ma": float(close.tail(min(slow, len(close))).mean()),
+        "return_pct": (
+            float((close.iloc[-1] / close.iloc[-return_period - 1] - 1) * 100)
+            if len(close) > return_period
+            else 0.0
+        ),
+    }
+
+
 def compute_lifecycle_features(
     hist: pd.DataFrame, *, profile: dict | None = None
 ) -> dict:
@@ -222,6 +298,8 @@ def compute_lifecycle_features(
         )
     if int(cfg["pivot_window_weeks"]) < 1:
         raise ValueError("pivot_window_weeks must be positive")
+    if int(cfg["monthly_min_bars"]) < 1 or int(cfg["weekly_min_bars"]) < 1:
+        raise ValueError("slow-cycle minimum bar counts must be positive")
     df = _normalize_daily_history(hist)
     if len(df) < int(cfg["min_history_days"]):
         raise RuntimeError(f"insufficient history: {len(df)} rows")
@@ -293,6 +371,7 @@ def compute_lifecycle_features(
     )
     # Never use the uncompleted calendar week to confirm a pivot.
     weekly = weekly[weekly.index <= df["_date"].iloc[-1]]
+    slow = _select_slow_cycle_frame(df, weekly, cfg)
     piv_hi, _ = _pivots(weekly["high"], int(cfg["pivot_window_weeks"]))
     _, piv_lo = _pivots(weekly["low"], int(cfg["pivot_window_weeks"]))
     post_d_week = pd.Timestamp(d_date).to_period("W-FRI").end_time.normalize()
@@ -346,6 +425,15 @@ def compute_lifecycle_features(
         and (base_range <= 60 or pre_flush_return < -10)
     )
 
+    # A/H are long-cycle labels.  Prefer all-available-history monthly bars,
+    # then a caller-provided five-year monthly window, and only then weekly
+    # bars when monthly history is unavailable.  This keeps a short provider
+    # response from silently treating daily noise as a cycle boundary.
+    slow_position = slow["position"]
+    slow_bearish_or_flat = slow["fast_ma"] <= slow["slow_ma"] or slow["return_pct"] <= 0
+    a_eligible = a_eligible and slow_position <= 0.40
+    h_eligible = h_eligible and slow_position <= 0.35 and slow_bearish_or_flat
+
     # A: low location + a recent flush + exhaustion/turn, penalized when the
     # chart clearly contains the completed D->E->F->G structure required by H.
     a_score = 0.0
@@ -365,6 +453,7 @@ def compute_lifecycle_features(
         0.25 + 0.50 * float(volume_pattern) + 0.25 * min(vol_rebound_ratio / 1.5, 1)
     )
     a_score += 6 * float(bottom_divergence)
+    a_score += 8 * (1 - slow_position)
     # Fundamental safety cannot be inferred from OHLCV. No free risk points.
     if (
         prior_runup >= float(cfg["h_min_prior_runup_pct"])
@@ -386,6 +475,7 @@ def compute_lifecycle_features(
     h_score += 5 * _descending(distance_post_d_low, 0, 20)
     h_score += 7 * min(1.0, (_descending(rsi_now, 20, 45) + float(macd_improving)) / 2)
     h_score += 5 * float(bottom_divergence)
+    h_score += 8 * (1 - slow_position)
     if prior_runup < float(cfg["h_min_prior_runup_pct"]):
         h_score = min(h_score, 49)
     if drawdown < float(cfg["h_min_drawdown_pct"]):
@@ -450,6 +540,12 @@ def compute_lifecycle_features(
         "weekly_pivot_lows": [
             {"date": d.date().isoformat(), "price": v} for d, v in post_lows
         ],
+        "slow_cycle_timeframe": slow["timeframe"],
+        "slow_cycle_bars": slow["bars"],
+        "slow_cycle_position": round(slow_position, 4),
+        "slow_cycle_fast_ma": round(slow["fast_ma"], 4),
+        "slow_cycle_slow_ma": round(slow["slow_ma"], 4),
+        "slow_cycle_return_pct": round(slow["return_pct"], 2),
         "a_score": a_score,
         "h_score": h_score,
         "a_stage": a_stage,
