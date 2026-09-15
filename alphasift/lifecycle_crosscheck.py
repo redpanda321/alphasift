@@ -474,18 +474,16 @@ def main(argv=None):
             fallback_snapshot_path=None,
         )
         snapshot_count = len(snapshot)
-        valid = snapshot.price.ge(1) & snapshot.amount.ge(20_000_000)
-        if args.market == "us":
-            valid &= snapshot.total_mv.ge(1_000_000_000)
-        else:
-            valid &= ~snapshot.name.str.contains("ST|退", case=False, na=False)
-        codes = snapshot.loc[valid, "code"].astype(str).tolist()
+        # This is a market-wide scan. Liquidity, market-cap, and ST labels
+        # must not silently remove a stock before its lifecycle is classified.
+        # Snapshot providers already exclude rows without a live positive quote.
+        codes = snapshot["code"].dropna().astype(str).drop_duplicates().tolist()
         symbols = (
             codes
             if args.market == "us"
             else [cn_code_to_yfinance_symbol(c) for c in codes]
         )
-        scope = "provider universe; price>=1, amount>=20m; CN excludes ST; US cap>=1b"
+        scope = "full provider universe; all quoted A shares / exchange-listed US equities"
 
     def one(symbol):
         try:

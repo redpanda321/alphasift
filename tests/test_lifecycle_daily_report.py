@@ -79,6 +79,10 @@ def test_report_takes_five_per_market_industry():
     assert report["scope"] == 12
     assert report["selected"] == 10
     assert report["stage_counts"] == {"cn": {"A": 6}, "us": {"A": 6}}
+    assert report["market_funnel"] == {
+        "cn": {"snapshot": 6, "attempted": 6, "agreement": 6, "financially_eligible": 6, "selected": 5},
+        "us": {"snapshot": 6, "attempted": 6, "agreement": 6, "financially_eligible": 6, "selected": 5},
+    }
     assert all(row["industry"] == "Software" for row in report["top5"])
 
 

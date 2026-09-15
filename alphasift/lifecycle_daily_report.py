@@ -330,6 +330,9 @@ def build_report(
                 "selected": len(chosen),
             }
         )
+    agreements_by_market = Counter(row["market"] for row in stocks)
+    eligible_by_market = Counter(row["market"] for row in scored)
+    selected_by_market = Counter(row["market"] for row in top5)
     coverage = {
         market: {
             "snapshot": scan.get("snapshot_count"),
@@ -347,6 +350,16 @@ def build_report(
         )
         for market, scan in scans.items()
     }
+    market_funnel = {
+        market: {
+            "snapshot": scan.get("snapshot_count"),
+            "attempted": scan["attempted"],
+            "agreement": agreements_by_market[market],
+            "financially_eligible": eligible_by_market[market],
+            "selected": selected_by_market[market],
+        }
+        for market, scan in scans.items()
+    }
     return {
         "generated_at": (now or pd.Timestamp.now(tz="UTC")).isoformat(),
         "strategy": next(iter(scans.values())).get("strategy"),
@@ -354,6 +367,7 @@ def build_report(
         "eligible": len(scored),
         "selected": len(top5),
         "coverage": coverage,
+        "market_funnel": market_funnel,
         "stage_counts": stage_counts,
         "exclusions": dict(exclusions),
         "summary": summaries,
