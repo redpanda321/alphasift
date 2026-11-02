@@ -105,6 +105,72 @@ def test_parse_llm_ranking_attaches_global_research_metadata():
     assert result.picks[0].llm_watch_items == ["成交额能否延续"]
 
 
+def test_parse_llm_ranking_extracts_fenced_json_with_surrounding_text():
+    picks = [
+        Pick(rank=1, code="000001", name="平安银行", final_score=70, screen_score=70),
+    ]
+    response = """这里是排序结果：
+
+```json
+{
+  "market_view": "低估值候选为主",
+  "ranked": [
+    {"code": "000001", "llm_score": 82, "reason": "估值修复", "risk": "弹性有限"}
+  ]
+}
+```
+
+请参考。"""
+
+    result = _parse_ranking_response_detail(response, picks)
+
+    assert result.coverage == 1.0
+    assert result.market_view == "低估值候选为主"
+    assert result.picks[0].llm_score == 82
+    assert result.picks[0].ranking_reason == "估值修复"
+
+
+def test_parse_llm_ranking_extracts_json_after_unrelated_braces():
+    picks = [
+        Pick(rank=1, code="600000", name="浦发银行", final_score=70, screen_score=70),
+    ]
+    response = (
+        "我会按 {行业/估值/催化} 三类因素判断。\n"
+        '{"ranked": [{"code": "600000", "llm_score": 91, "reason": "更强"}]}'
+    )
+
+    result = _parse_ranking_response_detail(response, picks)
+
+    assert result.coverage == 1.0
+    assert result.picks[0].llm_score == 91
+
+
+def test_parse_llm_ranking_recovers_partial_object_sequence():
+    picks = [
+        Pick(rank=1, code="000001", name="平安银行", final_score=70, screen_score=70),
+        Pick(rank=2, code="600000", name="浦发银行", final_score=68, screen_score=68),
+    ]
+    response = """
+1. {"code": "600000", "llm_score": 88, "reason": "低估值"}
+2. {"code": "000001", "llm_score": 77, "reason": "防守"}
+"""
+
+    result = _parse_ranking_response_detail(response, picks)
+
+    assert result.coverage == 1.0
+    assert "json_repaired:partial_array" in result.errors
+    assert [p.code for p in result.picks] == ["600000", "000001"]
+
+
+def test_parse_llm_ranking_reports_empty_response():
+    picks = [Pick(rank=1, code="000001", name="平安银行", final_score=70, screen_score=70)]
+
+    result = _parse_ranking_response_detail("   ", picks)
+
+    assert result.coverage == 0.0
+    assert result.errors == ["empty_response"]
+
+
 def test_rank_candidates_blends_screen_and_llm_scores(monkeypatch):
     picks = [
         Pick(rank=1, code="000001", name="平安银行", final_score=80, screen_score=80),

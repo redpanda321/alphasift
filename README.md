@@ -18,7 +18,7 @@ AlphaSift is an agent-friendly stock discovery and ranking engine. It scans a br
 - **L3 pluggable post-analysis**: local scorecard by default, with optional DSA or external HTTP analyzers.
 - **Hotspot discovery**: topic/sector heat ranking, hotspot detail resolution, leader stock fallbacks, cache quality metadata, and history sidecars.
 - **Daily feature enrichment**: optional candidate-level daily K-line features such as moving averages, MACD/RSI, breakout strength, volume ratio, pullback distance, and platform duration.
-- **Evaluation loop**: save runs, evaluate later using newer snapshots, deduct transaction cost, tag follow-through / failed-breakout outcomes, and optionally fetch price paths for max drawdown / max favorable excursion.
+- **Evaluation loop**: save runs, evaluate later using newer snapshots, deduct transaction cost, tag follow-through / failed-breakout outcomes, review failure samples, and optionally fetch price paths for max drawdown / max favorable excursion.
 - **Agent-native interface**: `SKILL.md` describes capabilities and callable interfaces for AI agents.
 
 ## Quick start
@@ -35,6 +35,12 @@ cp .env.example .env
 
 # List built-in strategies
 alphasift strategies
+
+# UI/agent overview: strategy groups, source health, recent runs
+alphasift overview --explain
+
+# Local read-only JSON API for dashboards/agents
+alphasift serve --host 127.0.0.1 --port 8765
 
 # Run the no-key demo
 alphasift quickstart
@@ -65,6 +71,11 @@ alphasift screen dual_low --no-post-analysis
 
 # Audit project and strategy configuration
 alphasift audit
+
+# Save a run and generate a Markdown review report
+alphasift screen dual_low --no-llm --save-run
+alphasift runs --json
+alphasift report <run_id> --output data/reports/dual_low.md
 ```
 
 Example output shape:
@@ -168,11 +179,16 @@ AlphaSift is designed to reuse LiteLLM-style configuration used by `daily_stock_
 | `INDUSTRY_PROVIDER` | No | Optional board/industry provider such as `akshare` | `none` |
 | `SNAPSHOT_SOURCE_PRIORITY` | No | Snapshot source order | Depends on Tushare token |
 | `SNAPSHOT_FALLBACK_MAX_AGE_HOURS` | No | Max acceptable age for last-good snapshot fallback; empty disables the guard | - |
+| `ALPHASIFT_SOURCE_CALL_TIMEOUT_SEC` | No | Global caller-side timeout for third-party wrapper data-source calls; `0`/`off` disables | - |
+| `ALPHASIFT_SNAPSHOT_CALL_TIMEOUT_SEC` | No | Snapshot wrapper timeout for `efinance`/`akshare_em`/`tushare` | `60` |
+| `ALPHASIFT_DAILY_CALL_TIMEOUT_SEC` | No | Daily wrapper timeout for `akshare`/`baostock`/`tushare`/`yfinance` | `20` |
+| `ALPHASIFT_EASTMONEY_MIN_INTERVAL_SEC` | No | Minimum interval for direct Eastmoney HTTP calls | `1.0` |
+| `ALPHASIFT_EASTMONEY_JITTER_SEC` | No | Random jitter added to the Eastmoney interval | `0.3` |
 | `TUSHARE_TOKEN` / `TUSHARE_API_TOKEN` | For Tushare | Tushare Pro token | - |
 | `POST_ANALYZERS` | No | L3 analyzers; set `none` to disable | `scorecard` |
 | `DSA_API_URL` | For DSA analyzer | DSA service URL or full analysis endpoint | - |
 | `DAILY_ENRICH_ENABLED` | No | Enable candidate-level daily K-line enrichment | `false` |
-| `DAILY_SOURCE` | No | Daily K-line source: `auto`, `tencent`, `akshare`, `baostock`, or `tushare` | `auto` |
+| `DAILY_SOURCE` | No | Daily K-line source: `auto`, `tencent`, `sina`, `akshare`, `baostock`, or `tushare` | `auto` |
 | `ALPHASIFT_DATA_DIR` | No | Run records, caches, and evaluation results | `./data` |
 | `STRATEGIES_DIR` | No | Custom strategy directory | auto-detect |
 
@@ -229,33 +245,35 @@ tushare -> sina -> efinance -> akshare_em -> em_datacenter
 | `em_datacenter` | Eastmoney Data Center | Often available outside trading hours |
 | `tushare` | Tushare Pro `daily` + `daily_basic` | Requires token; previous/nearest trading day data |
 
-Daily K-line enrichment defaults to `DAILY_SOURCE=auto`. The auto chain uses `tushare -> tencent -> akshare -> baostock` when a Tushare token is configured, otherwise `tencent -> akshare -> baostock`. Tencent is a direct HTTP K-line source with no wrapper dependency and is preferred over Eastmoney-heavy wrapper paths for candidate-level history enrichment. Repeatedly failing sources are temporarily skipped, and expired daily cache can be used as a marked stale fallback when every live daily source fails.
+Daily K-line enrichment defaults to `DAILY_SOURCE=auto`. The auto chain uses `tushare -> tencent -> sina -> akshare -> baostock` when a Tushare token is configured, otherwise `tencent -> sina -> akshare -> baostock`. Tencent is a direct HTTP K-line source with no wrapper dependency and is preferred over Eastmoney-heavy wrapper paths for candidate-level history enrichment; Sina provides a second direct HTTP fallback before wrapper sources. Repeatedly failing sources are temporarily skipped, and expired daily cache can be used as a marked stale fallback when every live daily source fails.
 
 Source support matrix:
 
 | Capability | Primary chain | Fields |
 |---|---|---|
-| Daily K-line enrichment | `tushare` when token exists, then `tencent`, `akshare`, `baostock` | OHLCV, qfq where supported, technical factors |
+| Daily K-line enrichment | `tushare` when token exists, then `tencent`, `sina`, `akshare`, `baostock` with health-aware auto reordering | OHLCV, qfq where supported, technical factors, 20d volatility/ATR/drawdown controls, per-row `daily_source` provenance, `daily_quality_score`/flags, source-health stats; low-quality/fetch-failed/stale rows feed the final risk overlay |
 | Full-market snapshot | `sina`, then `efinance`, `akshare_em`, `em_datacenter`; `tushare` first when token exists | price, change, amount, market cap, PE/PB, turnover |
 | Candidate context | `news`, `fund_flow`, `announcement`, `quote` | news, announcements, fund flow, Tencent quote valuation/turnover |
 | Last-good fallback | daily history cache and snapshot cache | marked with stale/fallback attrs when live sources fail |
 
-If a source is unavailable or lacks fields required by a strategy, AlphaSift skips it and tries the next source. Eastmoney-only HTTP fallbacks use a shared throttled session to reduce connection churn and bursty access. If all live sources fail, the last-good snapshot fallback is explicitly marked as stale/fallback data; `SNAPSHOT_FALLBACK_MAX_AGE_HOURS` can reject overly old fallback cache to avoid repeating stale selections.
+If a source is unavailable, times out, or lacks fields required by a strategy, AlphaSift skips it and tries the next source. Direct HTTP sources use request timeouts; third-party wrapper calls such as efinance, AkShare, Baostock, Tushare, and yfinance also have caller-side timeouts inspired by adjacent provider-manager projects, so a stuck wrapper cannot block the whole run indefinitely. Eastmoney-only HTTP fallbacks use a shared retrying session with serial throttling and jitter, following the same anti-ban pattern documented by `a-stock-data`; tune `ALPHASIFT_EASTMONEY_MIN_INTERVAL_SEC` upward for batch runs on sensitive networks. If all live sources fail, the last-good snapshot fallback is explicitly marked as stale/fallback data; `SNAPSHOT_FALLBACK_MAX_AGE_HOURS` can reject overly old fallback cache to avoid repeating stale selections.
 
 ## Built-in strategies
 
 | Strategy | Type | Description |
 |---|---|---|
 | `dual_low` | Value | Low PE + low PB defensive value screen |
+| `blue_chip_income` | Income | High-liquidity blue-chip and dividend-quality defensive screen |
 | `volume_breakout` | Trend | Volume expansion and resistance breakout |
 | `quality_value` | Value | Reasonable valuation, liquidity, and controlled volatility |
+| `low_volatility_quality` | Quality | Defensive quality screen using daily volatility, drawdown, ATR, and data-quality controls |
 | `capital_heat` | Momentum | Active capital flow without extreme overheating |
 | `oversold_reversal` | Reversal | Repair candidates with controlled drawdown and still-valid liquidity |
 | `balanced_alpha` | Framework | General multi-factor discovery strategy |
 | `momentum_quality` | Framework | Trend confirmation plus quality filters |
 | `shrink_pullback` | Trend | Pullback into support during a broader uptrend; uses daily enrichment |
 
-Add custom YAML strategies under `strategies/`. See [docs/strategy-guide.md](docs/strategy-guide.md).
+Use `alphasift overview --json/--explain` for one UI/agent payload that combines strategy groups, strategy facets, strategy cards, optional strategy recommendations, data-source `health_summary`, strategy coverage, data-source history, saved-evaluation performance, recent runs, and next actions. Use `alphasift serve` for a local read-only JSON API with `/health`, `/result-schema`, `/overview`, `/strategies`, `/strategy?name=<strategy_name>`, `/strategy-compare?base=<base>&target=<target>`, `/strategy-facets`, `/strategy-cards`, `/strategy-readiness`, `/strategy-run-summary`, `/data-source-history`, `/strategy-performance`, `/strategy-templates`, `/strategy-template?name=<template_name>`, `/runs`, `/report?run=<run_id>`, and `/doctor/data-sources` endpoints. Use `alphasift strategies --json` or `alphasift strategies --explain` to inspect strategy style, data requirements, active filters, factor weights, and profile overrides. Add matching flags such as `--risk-profile defensive --holding-period swing --strict --json` when a UI or agent needs ranked strategy recommendations, or `--compare dual_low low_volatility_quality --json` / `/strategy-compare` when reviewing strategy parameter drift. Use `/strategy-facets` when a UI needs filter values, counts, and backing strategy names for category, tag, style, data-requirement, and required-field controls. Use `/strategy-cards` when a UI needs one card per strategy with catalog metadata, readiness state, saved-run history, saved-evaluation performance, top factors, next actions, and lanes for needs-history, needs-evaluation, performance leaders, and attention. Use `/strategy-readiness` when a UI needs ready/attention/unchecked counts and missing-field impacts before live screening. Use `/strategy-run-summary` when a UI needs saved-run history by strategy without evaluating against live quotes, `/data-source-history` when it needs recent snapshot-source error/degradation/fallback rates, samples, stability status, and next actions from saved-run metadata, and `/strategy-performance` when it needs saved-evaluation return/win-rate leaderboards without re-running live evaluation. Use `alphasift strategies --templates --explain` and `alphasift strategies --template <name>` to start from reusable strategy authoring templates. Use `alphasift doctor data-sources --all-strategies --explain` to inspect the cross-strategy data-source field coverage matrix, source `health_summary`, and live snapshot `quality_summary` before relying on live screening. Add custom YAML strategies under `strategies/`. See [docs/strategy-guide.md](docs/strategy-guide.md).
 
 ## Project layout
 
@@ -289,6 +307,7 @@ alphasift/
     ├── post_analysis.py     # L3 post-analysis plugins
     ├── dsa.py               # Optional DSA integration
     ├── store.py             # Run persistence
+    ├── overview.py          # UI/agent overview payload
     ├── evaluate.py          # T+N evaluation
     ├── pipeline.py          # Main orchestration
     └── strategy.py          # Strategy YAML loader

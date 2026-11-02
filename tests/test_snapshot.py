@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -16,6 +17,7 @@ from alphasift.snapshot import (
     _source_disabled_reason,
     fetch_cn_snapshot,
     fetch_snapshot_with_fallback,
+    snapshot_source_health_snapshot,
 )
 
 
@@ -145,12 +147,13 @@ def test_eastmoney_get_reuses_session_and_throttles(monkeypatch):
     monkeypatch.setattr("alphasift.snapshot._EM_LAST_REQUEST_AT", 99.95)
     monkeypatch.setattr("alphasift.snapshot.time.monotonic", lambda: next(times))
     monkeypatch.setattr("alphasift.snapshot.time.sleep", lambda seconds: events.append(("sleep", seconds)))
+    monkeypatch.setattr("alphasift.snapshot.random.uniform", lambda start, end: 0.0)
 
     response = _eastmoney_get("https://example.test", params={"p": 1})
 
     assert isinstance(response, FakeResponse)
     assert events[0][0] == "sleep"
-    assert events[0][1] == pytest.approx(0.2)
+    assert events[0][1] == pytest.approx(0.95)
     assert events[1] == ("https://example.test", {"params": {"p": 1}})
     assert events[2] == "raise"
 
@@ -272,6 +275,30 @@ def test_fetch_snapshot_with_fallback_skips_disabled_sources(monkeypatch):
 
     assert calls == ["efinance"]
     assert df.attrs["source_errors"][0].startswith("sina: temporarily disabled")
+
+
+def test_snapshot_wrapper_timeout_falls_back_to_next_source(monkeypatch):
+    def slow_efinance():
+        time.sleep(0.05)
+        return pd.DataFrame([{"code": "000001", "name": "慢源", "price": 10.0}])
+
+    def fast_akshare():
+        return pd.DataFrame([{"code": "000001", "name": "快源", "price": 11.0}])
+
+    monkeypatch.setenv("ALPHASIFT_SNAPSHOT_CALL_TIMEOUT_SEC", "0.001")
+    monkeypatch.setattr("alphasift.snapshot._fetch_efinance", slow_efinance)
+    monkeypatch.setattr("alphasift.snapshot._fetch_akshare_em", fast_akshare)
+
+    df = fetch_snapshot_with_fallback(["efinance", "akshare_em"])
+    health = snapshot_source_health_snapshot(["efinance", "akshare_em"])
+
+    assert df.loc[0, "name"] == "快源"
+    assert df.attrs["snapshot_source"] == "akshare_em"
+    assert df.attrs["source_errors"][0].startswith("efinance: snapshot source efinance timed out")
+    assert health["efinance"]["failures"] == 1.0
+    assert "timed out" in health["efinance"]["last_error"]
+    assert health["akshare_em"]["successes"] == 1.0
+    assert health["akshare_em"]["last_rows"] == 1.0
 
 
 def test_fetch_snapshot_with_fallback_skips_missing_required_columns(monkeypatch):

@@ -11,8 +11,15 @@ name: my_strategy
 display_name: 我的策略
 description: 一句话描述策略目标
 version: "1.0"
-category: value     # trend / value / pattern / reversal
+category: value     # trend / value / income / quality / momentum / pattern / reversal
 tags: [value, custom]
+style:
+  risk_profile: defensive
+  holding_period: watchlist
+  execution_style: mean_reversion
+  market_regime: [risk_off, range_bound]
+  capital_profile: medium_liquidity
+  ui_badge: 价值
 
 screening:
   enabled: true
@@ -30,8 +37,15 @@ name: string              # 唯一标识（英文下划线）
 display_name: string      # 显示名称
 description: string       # 策略说明
 version: string           # 策略版本，建议每次语义变化递增
-category: string          # trend / value / pattern / reversal / framework
+category: string          # trend / value / income / quality / momentum / pattern / reversal / framework
 tags: [string]            # 可选标签，便于检索和评估分组
+style:                    # 可选，面向 UI/agent 的策略风格，不参与硬筛
+  risk_profile: string    # defensive / balanced / aggressive
+  holding_period: string  # short_term / swing / watchlist
+  execution_style: string # mean_reversion / momentum / breakout / multi_factor 等
+  market_regime: [string] # risk_on / risk_off / trend / range_bound / rotation 等
+  capital_profile: string # high_liquidity / medium_liquidity
+  ui_badge: string        # UI 中显示的短标签
 
 screening:
   enabled: bool            # 是否启用选股
@@ -87,6 +101,8 @@ screening:
     chase_change_pct: float
     abnormal_volume_ratio: float
     high_turnover_rate: float
+    low_daily_quality_score: float
+    fetch_failed_daily_points: float
 
   portfolio_profile:       # 可选，覆盖 LLM 行业/主题风险桶
     max_same_bucket: int
@@ -111,6 +127,26 @@ screening:
   ranking_hints: string    # 给 LLM 的排序提示（自然语言）
   max_output: int          # 最终输出数量，默认 5
 ```
+
+`style` 不参与硬筛，但会进入 `alphasift strategies --json` 和策略匹配命令。例如 `alphasift strategies --risk-profile defensive --market-regime risk_off --strict --json` 会按这些字段返回带 `score`、`matched`、`missing` 的候选策略，方便 Web UI、agent 或通知流解释为什么选用某个策略。
+
+## 策略模板
+
+从零新增策略时，可以先用内置模板生成草稿，再按目标市场环境、数据源覆盖和风险偏好调整：
+
+```bash
+alphasift strategies --templates --explain
+alphasift strategies --template defensive_value_quality > strategies/my_defensive_value_quality.yaml
+alphasift strategies --template momentum_breakout_daily --json
+```
+
+当前模板：
+
+- `defensive_value_quality`：稳健价值质量，snapshot-only，适合从 `quality_value` / `dual_low` 延伸。
+- `momentum_breakout_daily`：日 K 放量突破，依赖 `daily_k` 和行业/主题上下文，上线前应先跑数据源 doctor。
+- `oversold_reversal_snapshot`：超跌修复，snapshot-only，适合数据源不稳定时作为低依赖反转策略起点。
+
+模板不放在 `strategies/*.yaml` 下，因此不会被当成已启用策略自动加载。输出到 `strategies/` 后请先改 `name`、`display_name` 和 `version`，再用 `alphasift doctor data-sources --strategy <name> --no-live --explain` 检查字段覆盖。
 
 ## 策略分类说明
 
@@ -183,7 +219,16 @@ screening:
 - 改变因子权重结构：`1.1` → `1.2`
 - 改变策略目标或适用场景：`1.x` → `2.0`
 
-`alphasift screen --save-run` 会把 `strategy_version`、候选、分数、风险和后置分析结果一起保存。后续可用 `alphasift evaluate <run_id>` 做单次 T+N 后验评估，也可以用 `alphasift evaluate-batch --limit 20 --explain` 对最近保存的 runs 做策略级聚合复盘。评估会按收益、交易成本、行业/主题、风险标签、持有期和形态后验标签聚合。
+提交策略变更前可用对比命令检查参数漂移：
+
+```bash
+alphasift strategies --compare dual_low low_volatility_quality --explain
+alphasift strategies --compare dual_low low_volatility_quality --json
+```
+
+对比 payload 会列出风格、数据依赖、必需字段、硬筛参数、因子权重和 profile keys 的差异，并在 `summary.compatibility_notes` 中提示日 K 依赖或数据要求变化。
+
+`alphasift screen --save-run` 会把 `strategy_version`、候选、分数、风险和后置分析结果一起保存。后续可用 `alphasift evaluate <run_id>` 做单次 T+N 后验评估，也可以用 `alphasift evaluate-batch --limit 20 --explain` 对最近保存的 runs 做策略级聚合复盘。评估会按收益、交易成本、行业/主题、LLM 催化/风险、后置分析标签、风险标签、持有期和形态后验标签聚合，并输出 `failure_review` 和 `event_signal_review`，把失败样本、共性事件信号、事件信号胜率、共性风险 flag、失败突破、严重回撤和下一步调参建议聚在一起。
 
 ## L3 后置分析器
 

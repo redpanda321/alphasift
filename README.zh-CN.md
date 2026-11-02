@@ -25,6 +25,12 @@ cp .env.example .env
 # 列出可用策略
 alphasift strategies
 
+# UI/agent 总览：策略分组、数据源健康、最近运行
+alphasift overview --explain
+
+# 本地只读 JSON API，供 dashboard / agent 消费
+alphasift serve --host 127.0.0.1 --port 8765
+
 # 一键演示（无 API key）
 alphasift quickstart
 
@@ -62,6 +68,8 @@ alphasift screen balanced_alpha --industry-map-file data/industry_map.csv
 # 保存运行，之后用最新快照做 T+N 评估
 alphasift screen dual_low --no-llm --save-run
 alphasift runs
+alphasift runs --json
+alphasift report <run_id> --output data/reports/dual_low.md
 alphasift evaluate <run_id> --explain
 alphasift evaluate-batch --limit 20 --explain
 # 如需更完整复盘，可额外抓取日 K 路径，输出最大回撤/最大浮盈
@@ -136,13 +144,19 @@ $ alphasift screen dual_low --no-llm
 | `LLM_CONTEXT_MAX_CHARS` | 否 | 拼接后传给 LLM 的上下文最大长度 | `4000` |
 | `LLM_CANDIDATE_CONTEXT_ENABLED` | 否 | 是否默认对 LLM Top K 候选抓取新闻/公告/资金流线索 | `false` |
 | `LLM_CANDIDATE_CONTEXT_MAX_CANDIDATES` | 否 | 候选级上下文最多抓取前 N 只 | `8` |
-| `LLM_CANDIDATE_CONTEXT_PROVIDERS` | 否 | 候选级抓取来源，逗号分隔：`news,fund_flow,announcement` | `news,fund_flow,announcement` |
+| `LLM_CANDIDATE_CONTEXT_PROVIDERS` | 否 | 候选级抓取来源，逗号分隔：`news,fund_flow,announcement,quote` | `news,fund_flow,announcement,quote` |
 | `LLM_CANDIDATE_CONTEXT_CACHE_ENABLED` | 否 | 是否缓存候选级抓取上下文 | `true` |
 | `LLM_CANDIDATE_CONTEXT_CACHE_TTL_HOURS` | 否 | 候选上下文缓存有效小时数 | `24` |
 | `INDUSTRY_MAP_FILES` | 否 | 本地 code->industry/concepts/board_heat 映射 CSV/JSON/JSONL，逗号分隔 | - |
 | `INDUSTRY_PROVIDER` | 否 | 可选行业/概念/板块热度 provider，如 `akshare`；默认关闭 | `none` |
 | `INDUSTRY_PROVIDER_MAX_BOARDS` | 否 | provider 模式最多反查板块数 | `80` |
-| `SNAPSHOT_SOURCE_PRIORITY` | 否 | 数据源优先级（逗号分隔）；不设置时若配置了 Tushare token 会优先 `tushare` | 无 token: `efinance,akshare_em,em_datacenter` |
+| `SNAPSHOT_SOURCE_PRIORITY` | 否 | 数据源优先级（逗号分隔）；不设置时若配置了 Tushare token 会优先 `tushare` | 无 token: `sina,efinance,akshare_em,em_datacenter` |
+| `SNAPSHOT_FALLBACK_MAX_AGE_HOURS` | 否 | last-good 快照缓存最大可接受年龄；为空/`none` 表示不限制 | - |
+| `ALPHASIFT_SOURCE_CALL_TIMEOUT_SEC` | 否 | 第三方 wrapper 数据源调用的全局等待超时；`0`/`off` 表示关闭 | - |
+| `ALPHASIFT_SNAPSHOT_CALL_TIMEOUT_SEC` | 否 | 快照 wrapper 源 `efinance`/`akshare_em`/`tushare` 的调用超时 | `60` |
+| `ALPHASIFT_DAILY_CALL_TIMEOUT_SEC` | 否 | 日 K wrapper 源 `akshare`/`baostock`/`tushare`/`yfinance` 的调用超时 | `20` |
+| `ALPHASIFT_EASTMONEY_MIN_INTERVAL_SEC` | 否 | 东财直连 HTTP 请求最小串行间隔 | `1.0` |
+| `ALPHASIFT_EASTMONEY_JITTER_SEC` | 否 | 每次东财直连请求额外加入的随机抖动 | `0.3` |
 | `TUSHARE_TOKEN` / `TUSHARE_API_TOKEN` | 使用 `tushare` 时必须 | Tushare Pro token，用于最近交易日日线和 daily_basic 兜底 | - |
 | `TUSHARE_TRADE_DATE` | 否 | 固定 Tushare 交易日，格式 `YYYYMMDD`，便于复现实验 | 自动取最近开市日 |
 | `POST_ANALYZERS` | 否 | L3 后置分析器，设为 `none` 可关闭 | `scorecard` |
@@ -158,7 +172,7 @@ $ alphasift screen dual_low --no-llm
 | `DAILY_ENRICH_ENABLED` | 否 | 是否默认对 L1 后 Top N 候选补充日 K 特征 | `false` |
 | `DAILY_ENRICH_MAX_CANDIDATES` | 否 | 日 K 增强最多处理候选数 | `100` |
 | `DAILY_LOOKBACK_DAYS` | 否 | 日 K 特征回看天数 | `120` |
-| `DAILY_SOURCE` | 否 | 日 K 数据源：`akshare`、`baostock`、`tushare` 或 `auto`；有 Tushare token 时 `auto` 优先用 `tushare` | `akshare` |
+| `DAILY_SOURCE` | 否 | 日 K 数据源：`auto`、`tencent`、`sina`、`akshare`、`baostock` 或 `tushare`；有 Tushare token 时 `auto` 使用 `tushare,tencent,sina,akshare,baostock`，否则使用 `tencent,sina,akshare,baostock` | `auto` |
 | `DAILY_FETCH_RETRIES` | 否 | 单只候选日 K 拉取失败后的重试次数 | `2` |
 | `DAILY_FETCH_MAX_WORKERS` | 否 | 日 K 拉取并发数，网络不稳时建议 `1`，稳定后可设 `2`/`4` | `1` |
 | `RISK_ENABLED` | 否 | 是否启用独立风险层 | `true` |
@@ -234,6 +248,7 @@ alphasift/
     ├── post_analysis.py    # L3 可插拔后置分析器
     ├── dsa.py              # 可选 DSA 接入
     ├── store.py            # 运行结果持久化
+    ├── overview.py         # UI/agent 总览 payload
     ├── evaluate.py         # T+N 后验评估与批量评估聚合
     ├── pipeline.py         # 主流程编排
     └── strategy.py         # 策略 YAML 加载
@@ -249,9 +264,9 @@ alphasift/
 - **组合分散覆盖层**：LLM 标注行业/主题后，默认按行业风险桶对重复候选做温和扣分；若 LLM 缺失行业标签但候选有 `industry`，会用结构化行业作后备锚点
 - **LiteLLM 配置复用**：兼容主模型、fallback、多渠道和 Router YAML，方便复用作者其他项目配置
 - **独立风险层**：在 LLM 后对过热、弱信号、低置信度等风险做统一扣分或剔除
-- **候选级日 K 增强**：只对 L1 后 Top N 候选补充 MA、60 日涨幅、MACD/RSI、signal_score、20 日突破幅度、区间振幅、20 日量能比、实体强度、MA20 回踩距离和平台持续天数；`DAILY_SOURCE=auto` 且配置了 Tushare token 时会先试 `tushare`，否则走 `akshare`，失败后降级到 `baostock`
+- **候选级日 K 增强**：只对 L1 后 Top N 候选补充 MA、60 日涨幅、MACD/RSI、signal_score、20 日突破幅度、区间振幅、20 日量能比、实体强度、MA20 回踩距离和平台持续天数；`DAILY_SOURCE=auto` 且配置了 Tushare token 时会先试 `tushare`，否则优先走 `tencent`、`sina` 直连源，再降级到 `akshare`、`baostock`；低质量、拉取失败或 stale cache 行会进入最终风险扣分
 - **默认 L3 评分器**：本地 `scorecard` 默认启用，作为最终候选的轻量一致性复核
-- **可评估闭环**：保存运行结果，用后续最新快照做 T+N 收益、胜率、缺失报价、交易成本扣减、等权组合摘要和形态后验标签统计；可选抓取日 K 路径计算最大回撤和最大浮盈
+- **可评估闭环**：保存运行结果，用后续最新快照做 T+N 收益、胜率、缺失报价、交易成本扣减、等权组合摘要、形态后验标签和失败样本复盘；可选抓取日 K 路径计算最大回撤和最大浮盈
 - **DSA 后置增强**：DSA 只是一种可追加 L3 分析器，不参与全市场初筛，也不是默认依赖
 - **为 Agent 设计**：SKILL.md 描述能力和接口，任何支持 Skill 协议的 Agent 都能调用
 
@@ -274,34 +289,37 @@ AlphaSift 的定位是“全市场候选发现与横向排序引擎”。它负�
 
 ## 数据源
 
-支持四种 A 股全市场快照数据源，自动按优先级降级。默认未配置 Tushare token 时使用：
+支持五种 A 股全市场快照数据源，自动按优先级降级。默认未配置 Tushare token 时使用：
 
 ```text
-efinance → akshare_em → em_datacenter
+sina → efinance → akshare_em → em_datacenter
 ```
 
 若配置了 `TUSHARE_TOKEN` / `TUSHARE_API_TOKEN`，且没有手工设置 `SNAPSHOT_SOURCE_PRIORITY`，默认改为：
 
 ```text
-tushare → efinance → akshare_em → em_datacenter
+tushare → sina → efinance → akshare_em → em_datacenter
 ```
 
 | 数据源 | 接口 | 特点 |
 |--------|------|------|
+| `sina` | vip.stock.finance.sina.com.cn | 直连全市场源，含 PE/PB/换手率/市值字段 |
 | `efinance` | push2.eastmoney.com | 实时推送，交易时段最快 |
 | `akshare_em` | 82.push2.eastmoney.com | 实时推送，备选 |
 | `em_datacenter` | data.eastmoney.com | 选股器 API，**非交易时段可用** |
 | `tushare` | Tushare Pro `daily` + `daily_basic` | 最近交易日数据，需 `TUSHARE_TOKEN`，非实时 |
 
-> 周末/节假日 push2 接口不可用，会自动降级到 em_datacenter。若某个数据源缺少当前策略必需字段，例如 PB，系统会跳过该源继续尝试后续来源。
+> 周末/节假日 push2 接口不可用，会自动降级到 em_datacenter。若某个数据源超时、不可用或缺少当前策略必需字段，例如 PB，系统会跳过该源继续尝试后续来源。直接 HTTP 源使用请求级 timeout；efinance、AkShare、Baostock、Tushare、yfinance 等第三方 wrapper 调用也有 caller-side timeout，避免库调用卡住整次筛选。东财直连请求参考 `a-stock-data` 的防封实践，统一走共享重试会话、串行间隔和随机抖动。
 
 ## 内置策略
 
 | 策略 | 类型 | 说明 |
 |------|------|------|
 | `dual_low` | 价值 | 低 PE + 低 PB，适合价值投资 |
+| `blue_chip_income` | 收益 | 高流动性大盘蓝筹和红利资产的防守型候选 |
 | `volume_breakout` | 趋势 | 放量突破关键阻力位 |
 | `quality_value` | 价值 | 估值合理、流动性充足、波动不过热 |
+| `low_volatility_quality` | 质量 | 用日 K 波动、回撤、ATR 和数据质量约束做防守型质量筛选 |
 | `capital_heat` | 动量 | 资金活跃、量价同步但未极端过热 |
 | `oversold_reversal` | 反转 | 跌幅可控且流动性仍在的修复候选 |
 | `balanced_alpha` | 框架 | 综合估值、资金、动量、稳定性的通用发现策略 |
@@ -310,7 +328,7 @@ tushare → efinance → akshare_em → em_datacenter
 
 ### 自定义策略
 
-在 `strategies/` 目录添加 YAML 文件即可。参考 [docs/strategy-guide.md](docs/strategy-guide.md)。
+可用 `alphasift overview --json/--explain` 获取一份 UI/agent 总览 payload，包含策略分组、策略筛选 facets、策略卡片、可选策略推荐、数据源 `health_summary`、策略覆盖、数据源历史、已保存 evaluation 表现、最近运行和 next actions。可用 `alphasift serve` 启动本地只读 JSON API，提供 `/health`、`/result-schema`、`/overview`、`/strategies`、`/strategy?name=<strategy_name>`、`/strategy-compare?base=<base>&target=<target>`、`/strategy-facets`、`/strategy-cards`、`/strategy-readiness`、`/strategy-run-summary`、`/data-source-history`、`/strategy-performance`、`/strategy-templates`、`/strategy-template?name=<template_name>`、`/runs`、`/report?run=<run_id>` 和 `/doctor/data-sources` 端点。可用 `alphasift strategies --json` 或 `alphasift strategies --explain` 查看策略风格属性、数据依赖、活跃硬筛、因子权重和 profile 覆盖项；UI 或 agent 需要推荐策略时，可追加 `--risk-profile defensive --holding-period swing --strict --json` 这类匹配条件，输出带 `score`、`matched`、`missing` 的候选策略；构建筛选控件时可用 `/strategy-facets` 获取分类、标签、风格、数据依赖和必需字段的 `value/count/strategies`；构建策略卡片时可用 `/strategy-cards` 聚合策略属性、readiness、运行历史、已保存 evaluation 表现、主要因子、next actions，以及 needs-history、needs-evaluation、performance leaders、attention 分区；构建策略可用性面板时可用 `/strategy-readiness` 获取 ready/attention/unchecked 计数和缺字段影响；构建历史复盘面板时可用 `/strategy-run-summary` 按策略聚合 saved-run 索引、错误/降级计数和样例且不会触发 live 行情；构建数据源稳定性面板时可用 `/data-source-history` 从 saved-run 元数据聚合 snapshot source 错误率、降级率、fallback 率、具体样例、稳定性状态和 next actions；构建策略表现面板时可用 `/strategy-performance` 从已保存 evaluation 聚合收益、胜率、表现分数和 leaderboard，且不会重新抓行情；评审策略参数漂移时可用 `--compare dual_low low_volatility_quality --json` 或 `/strategy-compare`；新增策略时可用 `alphasift strategies --templates --explain` 和 `alphasift strategies --template <name>` 从模板生成 YAML 草稿；可用 `alphasift doctor data-sources --all-strategies --explain` 查看跨策略数据源字段覆盖矩阵、source `health_summary` 和 live snapshot `quality_summary`。在 `strategies/` 目录添加 YAML 文件即可。参考 [docs/strategy-guide.md](docs/strategy-guide.md)。
 
 ## 已知限制
 

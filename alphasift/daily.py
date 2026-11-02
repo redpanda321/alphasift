@@ -15,6 +15,8 @@ import time
 import pandas as pd
 import requests
 
+from alphasift.source_guard import call_with_timeout, parse_source_timeout_seconds
+
 _DAILY_FEATURE_DEFAULTS = {
     "daily_data_points": pd.NA,
     "change_60d": pd.NA,
@@ -34,16 +36,23 @@ _DAILY_FEATURE_DEFAULTS = {
     "body_pct": pd.NA,
     "pullback_to_ma20_pct": pd.NA,
     "consolidation_days_20d": pd.NA,
+    "volatility_20d_pct": pd.NA,
+    "max_drawdown_20d_pct": pd.NA,
+    "atr_20_pct": pd.NA,
+    "daily_quality_score": pd.NA,
+    "daily_quality_flags": "",
+    "daily_source": "",
 }
 _DAILY_ENRICH_MAX_WORKERS = 1
 _DAILY_HISTORY_CACHE_VERSION = 1
 _DAILY_HISTORY_CACHE_TTL_SECONDS = 24 * 60 * 60
 _SOURCE_HEALTH_FAILURE_THRESHOLD = 3
 _SOURCE_HEALTH_COOLDOWN_SECONDS = 5 * 60
+_DAILY_CALL_TIMEOUT_SECONDS = 20.0
 _DEFAULT_TUSHARE_HTTP_URL = "http://api.waditu.com"
 _BAOSTOCK_LOCK = threading.Lock()
 _BAOSTOCK_OUTAGE_ERROR: str | None = None
-_SOURCE_HEALTH: dict[str, dict[str, float]] = {}
+_SOURCE_HEALTH: dict[str, dict[str, object]] = {}
 _SOURCE_HEALTH_LOCK = threading.Lock()
 
 
@@ -68,6 +77,10 @@ def enrich_daily_features(
 
     result = df.copy()
     daily_errors: list[str] = []
+    daily_source_counts: dict[str, int] = {}
+    daily_quality_flag_counts: dict[str, int] = {}
+    daily_source_order_notes: list[str] = []
+    daily_source_health: dict[str, object] = {}
     success_count = 0
     selected_index = list(result.index[:max_rows])
     fetch_requests: list[tuple[object, str]] = []
@@ -78,7 +91,7 @@ def enrich_daily_features(
         code = raw_code.zfill(6) if raw_code.isdigit() else raw_code
         fetch_requests.append((idx, code))
 
-    def fetch_one(request: tuple[object, str]) -> tuple[object, dict[str, object], str | None]:
+    def fetch_one(request: tuple[object, str]) -> tuple[object, dict[str, object], str | None, dict[str, object]]:
         idx, code = request
         try:
             hist = fetch_daily_history(
@@ -89,9 +102,20 @@ def enrich_daily_features(
                 cache_dir=cache_dir,
                 cache_ttl_seconds=cache_ttl_seconds,
             )
-            return idx, compute_daily_features(hist), None
+            features = compute_daily_features(hist)
+            features["daily_source"] = str(hist.attrs.get("daily_source", ""))
+            metadata = {
+                "daily_source": features["daily_source"],
+                "daily_quality_flags": features.get("daily_quality_flags", ""),
+                "daily_source_order_notes": list(hist.attrs.get("daily_source_order_notes", []) or []),
+                "daily_source_health": dict(hist.attrs.get("daily_source_health", {}) or {}),
+            }
+            return idx, features, None, metadata
         except Exception as exc:
-            return idx, dict(_DAILY_FEATURE_DEFAULTS), f"{code}: {exc}"
+            features = dict(_DAILY_FEATURE_DEFAULTS)
+            features["daily_quality_score"] = 0.0
+            features["daily_quality_flags"] = "fetch_failed"
+            return idx, features, f"{code}: {exc}", {"daily_quality_flags": "fetch_failed"}
 
     if len(fetch_requests) <= 1:
         fetched_rows = [fetch_one(request) for request in fetch_requests]
@@ -100,16 +124,35 @@ def enrich_daily_features(
         with ThreadPoolExecutor(max_workers=worker_limit) as executor:
             fetched_rows = list(executor.map(fetch_one, fetch_requests))
 
-    for idx, features, error in fetched_rows:
+    for idx, features, error, metadata in fetched_rows:
+        for flag in str(metadata.get("daily_quality_flags") or "").split(";"):
+            if flag:
+                daily_quality_flag_counts[flag] = daily_quality_flag_counts.get(flag, 0) + 1
         if error:
             daily_errors.append(error)
         else:
             success_count += 1
+            source_name = str(metadata.get("daily_source") or "unknown")
+            daily_source_counts[source_name] = daily_source_counts.get(source_name, 0) + 1
+            order_notes = metadata.get("daily_source_order_notes", [])
+            if not isinstance(order_notes, list):
+                order_notes = []
+            for note in order_notes:
+                note_text = str(note)
+                if note_text and note_text not in daily_source_order_notes:
+                    daily_source_order_notes.append(note_text)
+            source_health = metadata.get("daily_source_health")
+            if isinstance(source_health, dict):
+                daily_source_health.update(source_health)
         for key, value in features.items():
             result.at[idx, key] = value
 
     result.attrs["daily_errors"] = daily_errors
     result.attrs["daily_success_count"] = success_count
+    result.attrs["daily_source_counts"] = daily_source_counts
+    result.attrs["daily_quality_flag_counts"] = daily_quality_flag_counts
+    result.attrs["daily_source_order_notes"] = daily_source_order_notes
+    result.attrs["daily_source_health"] = daily_source_health
     return result
 
 
@@ -124,10 +167,11 @@ def fetch_daily_history(
 ) -> pd.DataFrame:
     """Fetch daily history for one stock code.
 
-    ``source`` accepts ``tencent``, ``akshare``, ``baostock``, ``tushare``,
+    ``source`` accepts ``tencent``, ``sina``, ``akshare``, ``baostock``, ``tushare``,
     ``yfinance`` or ``auto``. ``auto`` prefers Tushare when a token is
     configured, then Tencent's direct HTTP K-line endpoint before wrapper-based
-    free sources. Without a token it starts with Tencent. ``yfinance`` is
+    free sources. Without a token it starts with Tencent. Sina is a second
+    direct HTTP K-line source before wrapper-based fallbacks. ``yfinance`` is
     explicit-only (never part of ``auto``) and expects a US ticker rather than
     an A-share code.
     """
@@ -136,12 +180,14 @@ def fetch_daily_history(
     src = _normalize_daily_source(source)
     if src == "auto":
         sources: tuple[str, ...] = (
-            ("tushare", "tencent", "akshare", "baostock")
+            ("tushare", "tencent", "sina", "akshare", "baostock")
             if _has_tushare_token()
-            else ("tencent", "akshare", "baostock")
+            else ("tencent", "sina", "akshare", "baostock")
         )
-    elif src in ("akshare", "baostock", "tushare", "tencent", "yfinance"):
+        sources, source_order_notes = _rank_daily_sources_by_health(sources)
+    elif src in ("akshare", "baostock", "tushare", "tencent", "sina", "yfinance"):
         sources = (src,)
+        source_order_notes = []
     else:
         raise ValueError(f"Unsupported daily source: {source}")
 
@@ -169,27 +215,50 @@ def fetch_daily_history(
             try:
                 if current == "yfinance":
                     from alphasift.snapshot_us import fetch_daily_history_yfinance
-                    result = fetch_daily_history_yfinance(code, lookback_days=lookback_days)
+                    result = _call_daily_wrapper(
+                        fetch_daily_history_yfinance,
+                        current,
+                        code,
+                        lookback_days=lookback_days,
+                    )
                 elif current == "tencent":
                     result = _fetch_daily_tencent(
                         normalized_code,
                         lookback_days=normalized_lookback_days,
                     )
+                elif current == "sina":
+                    result = _fetch_daily_sina(
+                        normalized_code,
+                        lookback_days=normalized_lookback_days,
+                    )
                 elif current == "akshare":
-                    result = _fetch_daily_akshare(
+                    result = _call_daily_wrapper(
+                        _fetch_daily_akshare,
+                        current,
                         normalized_code,
                         lookback_days=normalized_lookback_days,
                     )
                 elif current == "tushare":
-                    result = _fetch_daily_tushare(
+                    result = _call_daily_wrapper(
+                        _fetch_daily_tushare,
+                        current,
                         normalized_code,
                         lookback_days=normalized_lookback_days,
                     )
                 else:
-                    result = _fetch_daily_baostock(
+                    result = _call_daily_wrapper(
+                        _fetch_daily_baostock,
+                        current,
                         normalized_code,
                         lookback_days=normalized_lookback_days,
                     )
+                _record_source_success(current, rows=len(result))
+                result.attrs["daily_source"] = current
+                result.attrs["daily_requested_source"] = src
+                result.attrs["daily_source_order"] = list(sources)
+                result.attrs["daily_source_order_notes"] = list(source_order_notes)
+                result.attrs["source_errors"] = list(errors)
+                result.attrs["daily_source_health"] = _daily_source_health_snapshot(sources)
                 if cache_path is not None:
                     _write_daily_history_cache(
                         cache_path,
@@ -198,7 +267,6 @@ def fetch_daily_history(
                         source=src,
                         lookback_days=normalized_lookback_days,
                     )
-                _record_source_success(current)
                 return result
             except Exception as exc:  # noqa: BLE001 - aggregated below
                 last_error = exc
@@ -206,7 +274,7 @@ def fetch_daily_history(
                     break
                 time.sleep(min(0.5 * (attempt + 1), 2.0))
         errors.append(f"{current} after {attempts} attempts: {last_error}")
-        _record_source_failure(current)
+        _record_source_failure(current, last_error)
 
     if cache_path is not None:
         stale = _read_daily_history_cache(
@@ -216,7 +284,10 @@ def fetch_daily_history(
         )
         if stale is not None:
             stale.attrs["daily_stale"] = True
+            stale.attrs["daily_source_order"] = list(sources)
+            stale.attrs["daily_source_order_notes"] = list(source_order_notes)
             stale.attrs["source_errors"] = list(errors)
+            stale.attrs["daily_source_health"] = _daily_source_health_snapshot(sources)
             return stale
 
     raise RuntimeError(
@@ -246,6 +317,43 @@ def _normalize_max_workers(value: int | None) -> int:
     return max(1, int(value))
 
 
+def _call_daily_wrapper(fetcher, source: str, *args, **kwargs) -> pd.DataFrame:
+    return call_with_timeout(
+        fetcher,
+        *args,
+        timeout_sec=_daily_call_timeout_seconds(),
+        label=f"daily source {source}",
+        **kwargs,
+    )
+
+
+def _daily_call_timeout_seconds() -> float | None:
+    return parse_source_timeout_seconds(
+        "ALPHASIFT_DAILY_CALL_TIMEOUT_SEC",
+        default=_DAILY_CALL_TIMEOUT_SECONDS,
+    )
+
+
+def _rank_daily_sources_by_health(sources: tuple[str, ...]) -> tuple[tuple[str, ...], list[str]]:
+    """Move unhealthy daily sources later while preserving default order ties."""
+    now = time.monotonic()
+    with _SOURCE_HEALTH_LOCK:
+        health = {source: dict(_SOURCE_HEALTH.get(source, {})) for source in sources}
+    default_rank = {source: idx for idx, source in enumerate(sources)}
+
+    def rank_key(source: str) -> tuple[int, float, int]:
+        state = health.get(source, {})
+        disabled_until = float(state.get("disabled_until", 0.0))
+        disabled = disabled_until > now
+        failures = float(state.get("failures", 0.0))
+        return (1 if disabled else 0, failures, default_rank[source])
+
+    ranked = tuple(sorted(sources, key=rank_key))
+    if ranked == sources:
+        return sources, []
+    return ranked, [f"daily source order adjusted by health: {','.join(ranked)}"]
+
+
 def _source_disabled_reason(source: str) -> str | None:
     now = time.monotonic()
     with _SOURCE_HEALTH_LOCK:
@@ -260,19 +368,60 @@ def _source_disabled_reason(source: str) -> str | None:
         return f"temporarily disabled for {disabled_until - now:.1f}s after repeated failures"
 
 
-def _record_source_success(source: str) -> None:
+def _record_source_success(source: str, *, rows: int | None = None) -> None:
     with _SOURCE_HEALTH_LOCK:
-        _SOURCE_HEALTH.pop(source, None)
+        state = _SOURCE_HEALTH.setdefault(source, {"failures": 0.0, "disabled_until": 0.0})
+        successes = float(state.get("successes", 0.0)) + 1.0
+        state["successes"] = successes
+        state["failures"] = 0.0
+        state["disabled_until"] = 0.0
+        state["last_success_at"] = time.time()
+        if rows is not None:
+            state["last_rows"] = float(rows)
+            previous_avg = float(state.get("avg_rows", rows))
+            state["avg_rows"] = previous_avg + (float(rows) - previous_avg) / successes
 
 
-def _record_source_failure(source: str) -> None:
+def _record_source_failure(source: str, error: object | None = None) -> None:
     now = time.monotonic()
     with _SOURCE_HEALTH_LOCK:
         state = _SOURCE_HEALTH.setdefault(source, {"failures": 0.0, "disabled_until": 0.0})
         failures = float(state.get("failures", 0.0)) + 1.0
         state["failures"] = failures
+        state["total_failures"] = float(state.get("total_failures", 0.0)) + 1.0
+        state["last_failure_at"] = time.time()
+        if error is not None:
+            state["last_error"] = " ".join(str(error).split())
         if failures >= _SOURCE_HEALTH_FAILURE_THRESHOLD:
             state["disabled_until"] = now + _SOURCE_HEALTH_COOLDOWN_SECONDS
+
+
+def daily_source_health_snapshot() -> dict[str, dict[str, float | bool | str]]:
+    """Return a copy of in-process daily-source health statistics."""
+    return _daily_source_health_snapshot(tuple(_SOURCE_HEALTH))
+
+
+def _daily_source_health_snapshot(sources: tuple[str, ...]) -> dict[str, dict[str, float | bool | str]]:
+    now = time.monotonic()
+    snapshot: dict[str, dict[str, float | bool | str]] = {}
+    with _SOURCE_HEALTH_LOCK:
+        for source in sources:
+            state = dict(_SOURCE_HEALTH.get(source, {}))
+            disabled_until = float(state.get("disabled_until", 0.0))
+            cooldown_remaining = max(disabled_until - now, 0.0)
+            snapshot[source] = {
+                "successes": float(state.get("successes", 0.0)),
+                "failures": float(state.get("failures", 0.0)),
+                "total_failures": float(state.get("total_failures", 0.0)),
+                "last_rows": float(state.get("last_rows", 0.0)),
+                "avg_rows": float(state.get("avg_rows", 0.0)),
+                "disabled": disabled_until > now,
+                "cooldown_remaining_seconds": round(cooldown_remaining, 4),
+                "last_success_at": float(state.get("last_success_at", 0.0)),
+                "last_failure_at": float(state.get("last_failure_at", 0.0)),
+                "last_error": str(state.get("last_error", "")),
+            }
+    return snapshot
 
 
 def _daily_history_cache_path(
@@ -317,6 +466,11 @@ def _read_daily_history_cache(
         if not isinstance(columns, list) or not isinstance(data, list):
             return None
         df = pd.DataFrame(data, columns=columns)
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            for key in ("daily_source", "daily_requested_source", "daily_source_order", "daily_source_order_notes", "source_errors", "daily_source_health"):
+                if key in metadata:
+                    df.attrs[key] = metadata[key]
         if is_stale:
             df.attrs["daily_stale"] = True
         return df
@@ -340,6 +494,14 @@ def _write_daily_history_cache(
                 "code": code,
                 "source": source,
                 "lookback_days": int(lookback_days),
+            },
+            "metadata": {
+                "daily_source": df.attrs.get("daily_source", source),
+                "daily_requested_source": df.attrs.get("daily_requested_source", source),
+                "daily_source_order": list(df.attrs.get("daily_source_order", [])),
+                "daily_source_order_notes": list(df.attrs.get("daily_source_order_notes", [])),
+                "source_errors": list(df.attrs.get("source_errors", [])),
+                "daily_source_health": df.attrs.get("daily_source_health", {}),
             },
             "created_at": datetime.now().isoformat(),
             "frame": json.loads(df.to_json(orient="split", date_format="iso", force_ascii=False)),
@@ -418,6 +580,52 @@ def _fetch_daily_tencent(code: str, *, lookback_days: int) -> pd.DataFrame:
         normalized_rows,
         columns=["date", "open", "close", "high", "low", "volume", "amount"],
     )
+    for col in ("open", "close", "high", "low", "volume", "amount"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.tail(count).copy()
+
+
+def _fetch_daily_sina(code: str, *, lookback_days: int) -> pd.DataFrame:
+    """Fetch unadjusted daily history from Sina's direct K-line API.
+
+    Sina provides a lightweight non-Eastmoney HTTP fallback for A-share daily
+    bars. It does not expose forward-adjusted prices on this endpoint, so it is
+    deliberately placed behind Tencent in ``auto`` but ahead of wrapper-heavy
+    sources that are more prone to dependency/API drift.
+    """
+    symbol = _to_tencent_code(code)
+    count = max(int(lookback_days), 30)
+    response = requests.get(
+        "https://quotes.sina.cn/cn/api/openapi.php/CN_MarketDataService.getKLineData",
+        params={"symbol": symbol, "scale": 240, "ma": "no", "datalen": count},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("result", {}).get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list) or not data:
+        raise RuntimeError(f"sina daily history empty for {code}")
+
+    rows: list[dict[str, object]] = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        rows.append({
+            "date": row.get("day") or row.get("date"),
+            "open": row.get("open"),
+            "close": row.get("close"),
+            "high": row.get("high"),
+            "low": row.get("low"),
+            "volume": row.get("volume"),
+            "amount": row.get("amount", pd.NA),
+        })
+    if not rows:
+        raise RuntimeError(f"sina daily history malformed for {code}")
+
+    df = pd.DataFrame(rows, columns=["date", "open", "close", "high", "low", "volume", "amount"])
+    if "date" in df.columns:
+        df = df.sort_values("date")
     for col in ("open", "close", "high", "low", "volume", "amount"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.tail(count).copy()
@@ -667,6 +875,7 @@ def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
     last_ma20 = _last_float(ma20)
     last_ma60 = _last_float(ma60)
     shape = _compute_shape_features(df, last_close=last_close, last_ma20=last_ma20)
+    quality = _compute_daily_quality(hist, df)
 
     lookback_idx = max(0, len(close) - 61)
     base_close = float(close.iloc[lookback_idx])
@@ -699,6 +908,7 @@ def compute_daily_features(hist: pd.DataFrame) -> dict[str, object]:
         "rsi14": None if rsi_value is None else round(float(rsi_value), 4),
         "signal_score": round(float(signal_score), 4),
         **shape,
+        **quality,
     }
 
 
@@ -729,6 +939,69 @@ def _normalize_daily_history(hist: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _compute_daily_quality(raw: pd.DataFrame, normalized: pd.DataFrame) -> dict[str, object]:
+    """Score daily-history quality and expose compact audit flags."""
+    score = 100.0
+    flags: list[str] = []
+    points = len(normalized)
+    if points < 30:
+        score -= 35
+        flags.append("short_history_lt30")
+    elif points < 60:
+        score -= 15
+        flags.append("short_history_lt60")
+
+    for col in ("open", "high", "low", "close"):
+        if col not in normalized.columns:
+            score -= 20
+            flags.append(f"missing_{col}")
+            continue
+        missing_ratio = float(pd.to_numeric(normalized[col], errors="coerce").isna().mean())
+        if missing_ratio > 0:
+            score -= min(missing_ratio * 40, 20)
+            flags.append(f"incomplete_{col}")
+
+    if "volume" not in normalized.columns:
+        score -= 12
+        flags.append("missing_volume")
+    else:
+        volume = pd.to_numeric(normalized["volume"], errors="coerce")
+        missing_volume_ratio = float(volume.isna().mean())
+        if missing_volume_ratio > 0:
+            score -= min(missing_volume_ratio * 20, 10)
+            flags.append("incomplete_volume")
+        if (volume.dropna() < 0).any():
+            score -= 20
+            flags.append("negative_volume")
+
+    if {"open", "high", "low", "close"}.issubset(normalized.columns):
+        open_ = pd.to_numeric(normalized["open"], errors="coerce")
+        high = pd.to_numeric(normalized["high"], errors="coerce")
+        low = pd.to_numeric(normalized["low"], errors="coerce")
+        close = pd.to_numeric(normalized["close"], errors="coerce")
+        invalid_ohlc = (high < low) | (high < open_) | (high < close) | (low > open_) | (low > close)
+        if invalid_ohlc.fillna(False).any():
+            score -= 30
+            flags.append("invalid_ohlc")
+        if ((open_ <= 0) | (high <= 0) | (low <= 0) | (close <= 0)).fillna(False).any():
+            score -= 35
+            flags.append("non_positive_price")
+
+    if bool(raw.attrs.get("daily_stale")):
+        score -= 25
+        flags.append("stale_cache")
+
+    source_errors = list(raw.attrs.get("source_errors", []) or [])
+    if source_errors:
+        score -= min(len(source_errors) * 5, 20)
+        flags.append("fallback_errors")
+
+    return {
+        "daily_quality_score": round(max(score, 0.0), 4),
+        "daily_quality_flags": ";".join(flags),
+    }
+
+
 def _compute_shape_features(
     df: pd.DataFrame,
     *,
@@ -753,6 +1026,9 @@ def _compute_shape_features(
         if last_ma20 is not None and last_ma20 > 0
         else None
     )
+    volatility_20d_pct = _volatility_20d_pct(recent["close"])
+    max_drawdown_20d_pct = _max_drawdown_pct(recent["close"])
+    atr_20_pct = _atr_20_pct(df)
 
     return {
         "prev_high_20d": _round_or_none(prev_high_20d),
@@ -762,6 +1038,9 @@ def _compute_shape_features(
         "body_pct": _round_or_none(body_pct),
         "pullback_to_ma20_pct": _round_or_none(pullback_to_ma20_pct),
         "consolidation_days_20d": _consolidation_days(previous),
+        "volatility_20d_pct": _round_or_none(volatility_20d_pct),
+        "max_drawdown_20d_pct": _round_or_none(max_drawdown_20d_pct),
+        "atr_20_pct": _round_or_none(atr_20_pct),
     }
 
 
@@ -798,6 +1077,45 @@ def _volume_ratio_20d(df: pd.DataFrame) -> float | None:
     if base <= 0:
         return None
     return float(volume.iloc[-1]) / base
+
+
+def _volatility_20d_pct(close: pd.Series) -> float | None:
+    values = pd.to_numeric(close, errors="coerce").dropna()
+    returns = values.pct_change().dropna()
+    if len(returns) < 2:
+        return None
+    return float(returns.std()) * (252 ** 0.5) * 100
+
+
+def _max_drawdown_pct(close: pd.Series) -> float | None:
+    values = pd.to_numeric(close, errors="coerce").dropna()
+    if values.empty:
+        return None
+    running_high = values.cummax()
+    drawdowns = values / running_high - 1.0
+    return min(float(drawdowns.min()) * 100, 0.0)
+
+
+def _atr_20_pct(df: pd.DataFrame) -> float | None:
+    if not {"high", "low", "close"}.issubset(df.columns):
+        return None
+    high = pd.to_numeric(df["high"], errors="coerce")
+    low = pd.to_numeric(df["low"], errors="coerce")
+    close = pd.to_numeric(df["close"], errors="coerce")
+    previous_close = close.shift(1)
+    true_range = pd.concat([
+        high - low,
+        (high - previous_close).abs(),
+        (low - previous_close).abs(),
+    ], axis=1).max(axis=1)
+    atr = true_range.tail(20).dropna().mean()
+    valid_close = close.dropna()
+    if valid_close.empty:
+        return None
+    last_close = float(valid_close.iloc[-1])
+    if pd.isna(atr) or last_close <= 0:
+        return None
+    return float(atr) / last_close * 100
 
 
 def _consolidation_days(previous: pd.DataFrame, *, max_range_pct: float = 12.0) -> int | None:

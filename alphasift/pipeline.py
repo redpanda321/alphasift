@@ -12,7 +12,13 @@ from alphasift.candidate_context import collect_candidate_context
 from alphasift.context import build_llm_context
 from alphasift.daily import enrich_daily_features
 from alphasift.dsa_provider import apply_dsa_provider_context
-from alphasift.filter import apply_hard_filters, requires_daily_features, without_daily_filters
+from alphasift.filter import (
+    apply_hard_filters,
+    hard_filter_rejection_summary,
+    hard_filter_waterfall,
+    requires_daily_features,
+    without_daily_filters,
+)
 from alphasift.industry import enrich_industry_concepts
 from alphasift.lifecycle import enrich_lifecycle_features
 from alphasift.freshness import latest_completed_session
@@ -52,6 +58,7 @@ def screen(
     post_analysis_max_picks: int | None = None,
     daily_enrich: bool | None = None,
     daily_enrich_max_candidates: int | None = None,
+    explain_filters: bool = False,
     deep_analysis: bool = False,
     deep_analysis_max_picks: int | None = None,
     context: dict[str, object] | None = None,
@@ -61,7 +68,8 @@ def screen(
 
     Args:
         strategy: Strategy name (matches a YAML file in strategies/).
-        market: Market scope, currently only "cn".
+        market: Market scope, "cn" or "us". A strategy must declare the
+            market in its own market_scope to be runnable against it.
         max_output: Override max output count from strategy.
         use_llm: Whether to use LLM for L2 ranking.
         llm_context: Optional market/news/theme context supplied to the LLM ranker.
@@ -76,6 +84,7 @@ def screen(
         post_analysis_max_picks: Override max number of picks sent to post analyzers.
         daily_enrich: Whether to enrich shortlisted candidates with daily K-line features.
         daily_enrich_max_candidates: Max candidates to enrich after snapshot filtering.
+        explain_filters: Whether to include sequential hard-filter waterfall diagnostics.
         deep_analysis: Backward-compatible alias for post_analyzers=["dsa"].
         deep_analysis_max_picks: Backward-compatible max-picks alias for DSA.
         context: Optional host runtime context. DSA may provide LLM settings and
@@ -178,6 +187,13 @@ def screen(
 
     # 3. L1 hard filter. If a strategy needs daily features, first apply only
     # snapshot-safe filters, then enrich a narrowed candidate pool.
+    if explain_filters:
+        snapshot_waterfall = hard_filter_waterfall(snapshot_df, snapshot_filters)
+        if snapshot_waterfall:
+            degradation.append(
+                "Snapshot hard-filter waterfall: "
+                + _format_filter_waterfall(snapshot_waterfall)
+            )
     df = apply_hard_filters(snapshot_df, snapshot_filters)
     after_filter_count = len(df)
 
@@ -232,29 +248,73 @@ def screen(
         provisional = _sort_screened_candidates(compute_screen_scores(df, screening), screening)
         enrich_count = min(daily_limit, len(provisional))
         daily_candidates = provisional.head(enrich_count)
+        # config.daily_source's "auto" chain (tushare/tencent/sina/akshare/baostock)
+        # is CN-only and cannot resolve US tickers, so default US runs to the
+        # yfinance adapter unless the caller explicitly configured a source.
+        effective_daily_source = (
+            "yfinance" if market == "us" and config.daily_source in ("auto", "")
+            else config.daily_source
+        )
         try:
             enriched = enrich_daily_features(
                 daily_candidates,
                 max_rows=enrich_count,
                 lookback_days=config.daily_lookback_days,
-                source=config.daily_source,
+                source=effective_daily_source,
                 fetch_retries=config.daily_fetch_retries,
                 max_workers=config.daily_fetch_max_workers,
             )
             daily_enriched = True
             daily_errors = [str(item) for item in enriched.attrs.get("daily_errors", [])]
             daily_enrich_count = int(enriched.attrs.get("daily_success_count", len(enriched)))
+            daily_source_counts = dict(enriched.attrs.get("daily_source_counts", {}) or {})
+            daily_quality_flag_counts = dict(enriched.attrs.get("daily_quality_flag_counts", {}) or {})
+            daily_source_order_notes = [str(item) for item in enriched.attrs.get("daily_source_order_notes", [])]
+            daily_source_health_notes = _daily_source_health_notes(
+                dict(enriched.attrs.get("daily_source_health", {}) or {})
+            )
             degradation.append(
                 f"Daily K-line enrichment attempted {enrich_count} candidates, "
                 f"succeeded {daily_enrich_count} of {after_filter_count} snapshot-filtered candidates"
             )
+            if daily_source_counts:
+                source_summary = ", ".join(
+                    f"{name}={count}" for name, count in sorted(daily_source_counts.items())
+                )
+                degradation.append(f"Daily K-line sources: {source_summary}")
+            if daily_quality_flag_counts:
+                flag_summary = ", ".join(
+                    f"{name}={count}" for name, count in sorted(daily_quality_flag_counts.items())
+                )
+                degradation.append(f"Daily K-line quality flags: {flag_summary}")
+            if daily_source_order_notes:
+                degradation.append("Daily K-line source ordering: " + " | ".join(daily_source_order_notes[:3]))
+            if daily_source_health_notes:
+                degradation.append("Daily K-line source health: " + "; ".join(daily_source_health_notes))
             if daily_errors:
                 sample = " | ".join(daily_errors[:5])
                 suffix = f" | +{len(daily_errors) - 5} more" if len(daily_errors) > 5 else ""
                 degradation.append(f"Daily K-line enrichment row errors: {sample}{suffix}")
             if daily_needed:
+                if explain_filters:
+                    daily_waterfall = hard_filter_waterfall(enriched, screening.hard_filters)
+                    if daily_waterfall:
+                        degradation.append(
+                            "Daily hard-filter waterfall: "
+                            + _format_filter_waterfall(daily_waterfall)
+                        )
+                daily_filter_rejections = hard_filter_rejection_summary(
+                    enriched,
+                    screening.hard_filters,
+                    limit=6,
+                )
                 df = apply_hard_filters(enriched, screening.hard_filters)
                 after_filter_count = len(df)
+                if daily_filter_rejections:
+                    degradation.append(
+                        "Daily hard-filter rejections: "
+                        + "; ".join(daily_filter_rejections)
+                    )
             else:
                 df = enriched
         except Exception as exc:
@@ -555,6 +615,12 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             lower_low_count=_safe_int(row.get("lower_low_count")),
             bottom_divergence=_safe_bool(row.get("bottom_divergence")),
             lifecycle_reasons=list(row.get("lifecycle_reasons") or []),
+            volatility_20d_pct=_safe_float(row.get("volatility_20d_pct")),
+            max_drawdown_20d_pct=_safe_float(row.get("max_drawdown_20d_pct")),
+            atr_20_pct=_safe_float(row.get("atr_20_pct")),
+            daily_quality_score=_safe_float(row.get("daily_quality_score")),
+            daily_quality_flags=_safe_text(row.get("daily_quality_flags")),
+            daily_source=_safe_text(row.get("daily_source")),
             factor_scores=factor_scores,
         ))
     return picks
@@ -619,6 +685,75 @@ def _event_source_weights(event_profile: dict[str, object]) -> dict[str, float] 
         except (TypeError, ValueError):
             continue
     return result or None
+
+
+def _daily_source_health_notes(health: dict[str, object], *, limit: int = 4) -> list[str]:
+    source_states: list[tuple[tuple[int, float, float, str], str, dict[object, object]]] = []
+    for source, raw_state in health.items():
+        if not isinstance(raw_state, dict):
+            continue
+        failures = _safe_float(raw_state.get("failures")) or 0.0
+        total_failures = _safe_float(raw_state.get("total_failures")) or 0.0
+        disabled = bool(raw_state.get("disabled"))
+        if not disabled and failures <= 0 and total_failures <= 0:
+            continue
+        severity_key = (
+            0 if disabled else 1 if failures > 0 else 2,
+            -failures,
+            -total_failures,
+            str(source),
+        )
+        source_states.append((severity_key, str(source), raw_state))
+
+    notes: list[str] = []
+    for _severity_key, source, raw_state in sorted(source_states):
+        failures = _safe_float(raw_state.get("failures")) or 0.0
+        total_failures = _safe_float(raw_state.get("total_failures")) or 0.0
+        disabled = bool(raw_state.get("disabled"))
+        last_rows = _safe_float(raw_state.get("last_rows")) or 0.0
+        parts: list[str] = []
+        if disabled:
+            parts.append("disabled")
+        if failures > 0:
+            parts.append(f"failures={failures:g}")
+        elif total_failures > 0:
+            parts.append(f"total_failures={total_failures:g}")
+        if last_rows > 0:
+            parts.append(f"last_rows={last_rows:g}")
+        if parts:
+            notes.append(f"{source} " + ",".join(parts))
+        if len(notes) >= limit:
+            break
+    hidden_count = len(source_states) - len(notes)
+    if hidden_count > 0:
+        notes.append(f"+{hidden_count} more")
+    return notes
+
+
+def _format_filter_waterfall(steps: list[dict[str, object]], *, limit: int = 8) -> str:
+    parts: list[str] = []
+    for step in steps[:limit]:
+        text = (
+            f"{step.get('filter')} {step.get('before')}->{step.get('after')} "
+            f"removed={step.get('removed')}"
+        )
+        samples = step.get("samples")
+        if isinstance(samples, list) and samples:
+            sample_names = [
+                str(item.get("name") or item.get("code") or item.get("value") or "")
+                for item in samples
+                if isinstance(item, dict)
+            ]
+            sample_names = [item for item in sample_names if item]
+            if sample_names:
+                text += f" samples={','.join(sample_names[:3])}"
+        if step.get("suggestion"):
+            text += f" next={step.get('suggestion')}"
+        parts.append(text)
+    hidden = len(steps) - len(parts)
+    if hidden > 0:
+        parts.append(f"+{hidden} more")
+    return "; ".join(parts)
 
 
 def _safe_text(v: object) -> str:

@@ -15,6 +15,7 @@ _FACTOR_COLUMNS = {
     "size": "factor_size_score",
     "theme_heat": "factor_theme_heat_score",
     "lifecycle": "factor_lifecycle_score",
+    "topic_alignment": "factor_topic_alignment_score",
 }
 _DEFAULT_SCORING_PROFILE = {
     "momentum_base": 60.0,
@@ -56,6 +57,15 @@ _DEFAULT_SCORING_PROFILE = {
     "stability_high_volume_ratio": 5.0,
     "stability_high_volume_ratio_penalty_slope": 4.0,
     "stability_invalid_pe_penalty": 18.0,
+    "stability_high_volatility_pct": 45.0,
+    "stability_high_volatility_penalty_slope": 0.45,
+    "stability_max_drawdown_floor_pct": -12.0,
+    "stability_drawdown_penalty_slope": 1.2,
+    "stability_high_atr_pct": 6.0,
+    "stability_high_atr_penalty_slope": 2.0,
+    "stability_low_daily_quality_score": 80.0,
+    "stability_low_daily_quality_penalty_slope": 0.35,
+    "stability_bad_daily_quality_flag_penalty": 8.0,
     "theme_heat_unknown_score": 50.0,
     "theme_heat_change_slope": 6.0,
     "theme_heat_rank_bonus": 10.0,
@@ -71,6 +81,10 @@ _DEFAULT_SCORING_PROFILE = {
     "theme_heat_cooling_score_penalty_cap": 10.0,
     "theme_heat_overheat_score": 88.0,
     "theme_heat_overheat_penalty_slope": 0.5,
+    "topic_alignment_unknown_score": 50.0,
+    "topic_alignment_match_bonus": 25.0,
+    "topic_alignment_heat_weight": 0.25,
+    "topic_alignment_unmatched_penalty": 12.0,
 }
 
 
@@ -133,6 +147,7 @@ def _compute_factor_scores(df: pd.DataFrame, config: ScreeningConfig | None = No
         "size": _compute_size_score(df),
         "theme_heat": _compute_theme_heat_score(df, profile),
         "lifecycle": _compute_lifecycle_score(df),
+        "topic_alignment": _compute_topic_alignment_score(df, profile),
     }
 
 
@@ -326,6 +341,35 @@ def _compute_stability_score(df: pd.DataFrame, profile: dict[str, float]) -> pd.
         signal = pd.to_numeric(df["signal_score"], errors="coerce").fillna(50)
         score = score + (signal - 50) * 0.12
 
+    if "volatility_20d_pct" in df.columns:
+        volatility = pd.to_numeric(df["volatility_20d_pct"], errors="coerce")
+        score -= (
+            volatility - profile["stability_high_volatility_pct"]
+        ).clip(lower=0).fillna(0) * profile["stability_high_volatility_penalty_slope"]
+
+    if "max_drawdown_20d_pct" in df.columns:
+        drawdown = pd.to_numeric(df["max_drawdown_20d_pct"], errors="coerce")
+        score -= (
+            profile["stability_max_drawdown_floor_pct"] - drawdown
+        ).clip(lower=0).fillna(0) * profile["stability_drawdown_penalty_slope"]
+
+    if "atr_20_pct" in df.columns:
+        atr = pd.to_numeric(df["atr_20_pct"], errors="coerce")
+        score -= (
+            atr - profile["stability_high_atr_pct"]
+        ).clip(lower=0).fillna(0) * profile["stability_high_atr_penalty_slope"]
+
+    if "daily_quality_score" in df.columns:
+        quality = pd.to_numeric(df["daily_quality_score"], errors="coerce")
+        score -= (
+            profile["stability_low_daily_quality_score"] - quality
+        ).clip(lower=0).fillna(0) * profile["stability_low_daily_quality_penalty_slope"]
+
+    if "daily_quality_flags" in df.columns:
+        flags = df["daily_quality_flags"].fillna("").astype(str)
+        severe_flags = flags.str.contains("invalid_ohlc|non_positive_price|negative_volume|stale_cache")
+        score -= severe_flags.astype(float) * profile["stability_bad_daily_quality_flag_penalty"]
+
     return score.clip(0, 100)
 
 
@@ -401,6 +445,47 @@ def _compute_theme_heat_score(df: pd.DataFrame, profile: dict[str, float]) -> pd
     overheat = (score - profile["theme_heat_overheat_score"]).clip(lower=0)
     score = score - overheat * profile["theme_heat_overheat_penalty_slope"]
     return score.clip(0, 100)
+
+
+def _compute_topic_alignment_score(df: pd.DataFrame, profile: dict[str, float]) -> pd.Series:
+    """Score whether industry/concept labels align with hotspot route summaries."""
+    base = pd.Series(profile["topic_alignment_unknown_score"], index=df.index)
+    if not {"industry", "concepts", "board_heat_summary"} & set(df.columns):
+        return base
+
+    scores = []
+    for _, row in df.iterrows():
+        candidate_topics = _topic_tokens(row.get("industry")) | _topic_tokens(row.get("concepts"))
+        route_topics = _topic_tokens(row.get("board_heat_summary"))
+        if not candidate_topics or not route_topics:
+            scores.append(float(profile["topic_alignment_unknown_score"]))
+            continue
+        overlap = candidate_topics & route_topics
+        score = float(profile["topic_alignment_unknown_score"])
+        if overlap:
+            score += float(profile["topic_alignment_match_bonus"])
+            heat = pd.to_numeric(row.get("board_heat_score"), errors="coerce")
+            if pd.notna(heat):
+                score += max(float(heat) - 50.0, 0.0) * float(profile["topic_alignment_heat_weight"])
+        else:
+            score -= float(profile["topic_alignment_unmatched_penalty"])
+        scores.append(score)
+    return pd.Series(scores, index=df.index).clip(0, 100)
+
+
+def _topic_tokens(value: object) -> set[str]:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", "<na>"}:
+        return set()
+    normalized = text
+    for sep in ["|", ",", "，", ";", "；", "/"]:
+        normalized = normalized.replace(sep, " ")
+    tokens = set()
+    for raw in normalized.split():
+        token = raw.split(":", 1)[0].strip()
+        if token and token.lower() not in {"rank", "nan", "none", "<na>"}:
+            tokens.add(token)
+    return tokens
 
 
 def _numeric_column(df: pd.DataFrame, column: str) -> pd.Series:

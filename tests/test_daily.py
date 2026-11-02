@@ -7,10 +7,11 @@ import types
 import pandas as pd
 import pytest
 
-from alphasift.daily import compute_daily_features, enrich_daily_features, fetch_daily_history
+from alphasift.daily import compute_daily_features, daily_source_health_snapshot, enrich_daily_features, fetch_daily_history
 from alphasift.daily import (
     _SOURCE_HEALTH,
     _normalize_tushare_adj,
+    _rank_daily_sources_by_health,
     _record_source_failure,
     _record_source_success,
     _source_disabled_reason,
@@ -52,6 +53,46 @@ def test_compute_daily_features_adds_trend_fields():
     assert features["body_pct"] > 0
     assert features["pullback_to_ma20_pct"] > 0
     assert features["consolidation_days_20d"] >= 8
+    assert float(features["volatility_20d_pct"]) >= 0
+    assert float(features["max_drawdown_20d_pct"]) <= 0
+    assert float(features["atr_20_pct"]) > 0
+    assert features["daily_quality_score"] == 100.0
+    assert features["daily_quality_flags"] == ""
+
+
+def test_compute_daily_features_flags_short_stale_fallback_history():
+    hist = pd.DataFrame({
+        "日期": pd.date_range("2026-01-01", periods=25).astype(str),
+        "收盘": [10 + i * 0.1 for i in range(25)],
+    })
+    hist.attrs["daily_stale"] = True
+    hist.attrs["source_errors"] = ["tencent offline", "sina offline"]
+
+    features = compute_daily_features(hist)
+
+    assert float(features["daily_quality_score"]) < 60
+    flags = str(features["daily_quality_flags"])
+    assert "short_history_lt30" in flags
+    assert "stale_cache" in flags
+    assert "fallback_errors" in flags
+
+
+def test_compute_daily_features_flags_invalid_ohlcv_quality():
+    hist = pd.DataFrame({
+        "日期": pd.date_range("2026-01-01", periods=35).astype(str),
+        "开盘": [10] * 35,
+        "最高": [11] * 34 + [8],
+        "最低": [9] * 35,
+        "收盘": [10] * 35,
+        "成交量": [1000] * 34 + [-1],
+    })
+
+    features = compute_daily_features(hist)
+
+    flags = str(features["daily_quality_flags"])
+    assert "invalid_ohlc" in flags
+    assert "negative_volume" in flags
+    assert float(features["daily_quality_score"]) < 60
 
 
 def test_fetch_daily_history_retries_transient_source_errors(monkeypatch):
@@ -90,6 +131,28 @@ def test_fetch_daily_history_reports_retry_count(monkeypatch):
         fetch_daily_history("000001", retries=1)
 
 
+def test_fetch_daily_history_times_out_wrapper_sources(monkeypatch):
+    class FakeAkshare:
+        @staticmethod
+        def stock_zh_a_hist(**kwargs):
+            time.sleep(0.05)
+            return pd.DataFrame({
+                "日期": pd.date_range("2026-01-01", periods=40).astype(str),
+                "收盘": [10] * 40,
+            })
+
+    monkeypatch.setenv("ALPHASIFT_DAILY_CALL_TIMEOUT_SEC", "0.001")
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare)
+
+    with pytest.raises(RuntimeError, match="daily source akshare timed out"):
+        fetch_daily_history("000001", source="akshare", retries=0)
+
+    health = daily_source_health_snapshot()
+    assert health["akshare"]["failures"] == 1.0
+    assert "timed out" in health["akshare"]["last_error"]
+    assert health["akshare"]["last_failure_at"] > 0
+
+
 def test_daily_source_health_temporarily_disables_repeated_failures(monkeypatch):
     _SOURCE_HEALTH.clear()
     monkeypatch.setattr("alphasift.daily.time.monotonic", lambda: 100.0)
@@ -102,6 +165,47 @@ def test_daily_source_health_temporarily_disables_repeated_failures(monkeypatch)
     assert "temporarily disabled" in str(_source_disabled_reason("akshare"))
     _record_source_success("akshare")
     assert _source_disabled_reason("akshare") is None
+
+
+def test_daily_source_health_tracks_success_failure_and_rows(monkeypatch):
+    _SOURCE_HEALTH.clear()
+    monkeypatch.setattr("alphasift.daily.time.monotonic", lambda: 100.0)
+    _record_source_failure("tencent")
+    _record_source_success("tencent", rows=40)
+    _record_source_success("sina", rows=30)
+
+    snapshot = daily_source_health_snapshot()
+
+    assert snapshot["tencent"]["successes"] == 1.0
+    assert snapshot["tencent"]["failures"] == 0.0
+    assert snapshot["tencent"]["total_failures"] == 1.0
+    assert snapshot["tencent"]["last_rows"] == 40.0
+    assert snapshot["tencent"]["disabled"] is False
+    assert snapshot["sina"]["avg_rows"] == 30.0
+
+
+def test_daily_source_health_reorders_auto_sources(monkeypatch):
+    _SOURCE_HEALTH.clear()
+    monkeypatch.setattr("alphasift.daily.time.monotonic", lambda: 100.0)
+    _record_source_failure("tencent")
+    _record_source_failure("tencent")
+    _record_source_success("sina", rows=60)
+
+    ranked, notes = _rank_daily_sources_by_health(("tencent", "sina", "akshare"))
+
+    assert ranked == ("sina", "akshare", "tencent")
+    assert notes == ["daily source order adjusted by health: sina,akshare,tencent"]
+
+
+def test_daily_source_health_does_not_promote_later_success_above_neutral_source(monkeypatch):
+    _SOURCE_HEALTH.clear()
+    monkeypatch.setattr("alphasift.daily.time.monotonic", lambda: 100.0)
+    _record_source_success("sina", rows=60)
+
+    ranked, notes = _rank_daily_sources_by_health(("tushare", "tencent", "sina"))
+
+    assert ranked == ("tushare", "tencent", "sina")
+    assert notes == []
 
 
 def test_fetch_daily_history_uses_cache_until_ttl(tmp_path, monkeypatch):
@@ -137,6 +241,13 @@ def test_fetch_daily_history_uses_cache_until_ttl(tmp_path, monkeypatch):
 
     assert calls["count"] == 1
     assert list(first["收盘"]) == list(second["收盘"])
+    assert first.attrs["daily_source"] == "akshare"
+    assert second.attrs["daily_source"] == "akshare"
+    assert second.attrs["daily_requested_source"] == "akshare"
+    assert second.attrs["daily_source_order"] == ["akshare"]
+    assert second.attrs["daily_source_order_notes"] == []
+    assert second.attrs["daily_source_health"]["akshare"]["successes"] == 1.0
+    assert second.attrs["daily_source_health"]["akshare"]["last_rows"] == 40.0
     assert len(list((tmp_path / "daily_history").glob("*.json"))) == 1
 
 
@@ -375,6 +486,8 @@ def test_fetch_daily_history_supports_tencent_direct_http(monkeypatch):
     assert list(result["date"]) == ["2026-04-28", "2026-04-29"]
     assert result["close"].iloc[-1] == 10.5
     assert pd.isna(result["amount"].iloc[-1])
+    assert result.attrs["daily_source"] == "tencent"
+    assert result.attrs["daily_requested_source"] == "tencent"
 
 
 def test_fetch_daily_history_auto_uses_tencent_before_wrapper_sources(monkeypatch):
@@ -414,6 +527,84 @@ def test_fetch_daily_history_auto_uses_tencent_before_wrapper_sources(monkeypatc
     assert result["close"].iloc[-1] == 101
 
 
+def test_fetch_daily_history_supports_sina_direct_http(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "data": [
+                        {"day": "2026-04-28", "open": "10.0", "high": "10.5", "low": "9.9", "close": "10.4", "volume": "12345"},
+                        {"day": "2026-04-29", "open": "10.4", "high": "10.6", "low": "10.3", "close": "10.5", "volume": "12300"},
+                    ]
+                }
+            }
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return FakeResponse()
+
+    monkeypatch.setattr("alphasift.daily.requests.get", fake_get)
+
+    result = fetch_daily_history("000001", source="sina", retries=0)
+
+    assert "CN_MarketDataService.getKLineData" in captured["url"]
+    assert captured["params"] == {"symbol": "sz000001", "scale": 240, "ma": "no", "datalen": 120}
+    assert list(result.columns) == ["date", "open", "close", "high", "low", "volume", "amount"]
+    assert list(result["date"]) == ["2026-04-28", "2026-04-29"]
+    assert result["close"].iloc[-1] == 10.5
+
+
+def test_fetch_daily_history_auto_falls_back_from_tencent_to_sina(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        if "fqkline" in url:
+            return FakeResponse({"code": 0, "data": {}})
+        return FakeResponse({
+            "result": {
+                "data": [
+                    {"day": "2026-04-29", "open": "10", "high": "11", "low": "9", "close": "10.5", "volume": "1000"}
+                ]
+            }
+        })
+
+    class FakeAkshare:
+        @staticmethod
+        def stock_zh_a_hist(**kwargs):
+            raise AssertionError("akshare should not be called when sina succeeds")
+
+    monkeypatch.delenv("TUSHARE_TOKEN", raising=False)
+    monkeypatch.delenv("TUSHARE_API_TOKEN", raising=False)
+    monkeypatch.setattr("alphasift.daily.requests.get", fake_get)
+    monkeypatch.setitem(sys.modules, "akshare", FakeAkshare)
+
+    result = fetch_daily_history("000001", source="auto", retries=0)
+
+    assert "fqkline" in calls[0][0]
+    assert "CN_MarketDataService.getKLineData" in calls[1][0]
+    assert result["close"].iloc[-1] == 10.5
+    assert result.attrs["daily_source"] == "sina"
+    assert result.attrs["daily_requested_source"] == "auto"
+    assert result.attrs["source_errors"][0].startswith("tencent after 1 attempts")
+
+
 def test_enrich_daily_features_keeps_successful_rows_when_one_fetch_fails(monkeypatch):
     candidates = pd.DataFrame([
         {"code": "000001", "name": "平安银行"},
@@ -423,10 +614,14 @@ def test_enrich_daily_features_keeps_successful_rows_when_one_fetch_fails(monkey
     def fake_fetch_daily_history(code, **kwargs):
         if code == "600000":
             raise ConnectionError("remote disconnected")
-        return pd.DataFrame({
+        hist = pd.DataFrame({
             "日期": pd.date_range("2026-01-01", periods=80).astype(str),
             "收盘": [10 + i * 0.1 for i in range(80)],
         })
+        hist.attrs["daily_source"] = "akshare"
+        hist.attrs["daily_source_order_notes"] = ["daily source order adjusted by health: akshare"]
+        hist.attrs["daily_source_health"] = {"akshare": {"successes": 1.0}}
+        return hist
 
     monkeypatch.setattr("alphasift.daily.fetch_daily_history", fake_fetch_daily_history)
 
@@ -436,7 +631,16 @@ def test_enrich_daily_features_keeps_successful_rows_when_one_fetch_fails(monkey
     assert len(result.attrs["daily_errors"]) == 1
     assert "600000" in result.attrs["daily_errors"][0]
     assert result.loc[0, "daily_data_points"] == 80
+    assert result.loc[0, "daily_source"] == "akshare"
+    assert result.loc[0, "daily_quality_score"] == 88.0
+    assert result.loc[0, "daily_quality_flags"] == "missing_volume"
+    assert result.attrs["daily_source_counts"] == {"akshare": 1}
+    assert result.attrs["daily_quality_flag_counts"] == {"missing_volume": 1, "fetch_failed": 1}
+    assert result.attrs["daily_source_order_notes"] == ["daily source order adjusted by health: akshare"]
+    assert result.attrs["daily_source_health"] == {"akshare": {"successes": 1.0}}
     assert pd.isna(result.loc[1, "daily_data_points"])
+    assert result.loc[1, "daily_quality_score"] == 0.0
+    assert result.loc[1, "daily_quality_flags"] == "fetch_failed"
 
 
 def test_enrich_daily_features_fetches_rows_concurrently_preserving_index(monkeypatch):

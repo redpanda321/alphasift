@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 from alphasift.config import Config
-from alphasift.pipeline import _sort_screened_candidates, screen
+from alphasift.pipeline import _daily_source_health_notes, _sort_screened_candidates, screen
 from alphasift.strategy import ScreeningConfig
 
 
@@ -50,6 +50,20 @@ def test_pipeline_enriches_daily_features_for_daily_strategy(monkeypatch):
             enriched.at[idx, "rsi_status"] = "neutral"
             enriched.at[idx, "volume_ratio_20d"] = 1.0 if is_target else 1.8
             enriched.at[idx, "pullback_to_ma20_pct"] = 4 if is_target else 12
+            enriched.at[idx, "volatility_20d_pct"] = 25 if is_target else 60
+            enriched.at[idx, "max_drawdown_20d_pct"] = -5 if is_target else -18
+            enriched.at[idx, "atr_20_pct"] = 3 if is_target else 9
+            enriched.at[idx, "daily_quality_score"] = 100 if is_target else 70
+            enriched.at[idx, "daily_quality_flags"] = "" if is_target else "fallback_errors"
+            enriched.at[idx, "daily_source"] = "tencent"
+        enriched.attrs["daily_success_count"] = len(enriched)
+        enriched.attrs["daily_source_counts"] = {"tencent": 2}
+        enriched.attrs["daily_quality_flag_counts"] = {"fallback_errors": 1}
+        enriched.attrs["daily_source_order_notes"] = ["daily source order adjusted by health: tencent,sina"]
+        enriched.attrs["daily_source_health"] = {
+            "sina": {"failures": 0.0, "total_failures": 1.0, "last_rows": 30.0, "disabled": False},
+            "tencent": {"failures": 2.0, "total_failures": 2.0, "last_rows": 0.0, "disabled": True},
+        }
         return enriched
 
     monkeypatch.setattr("alphasift.pipeline.fetch_snapshot_with_fallback", lambda sources, **kwargs: df)
@@ -58,6 +72,7 @@ def test_pipeline_enriches_daily_features_for_daily_strategy(monkeypatch):
     result = screen(
         "shrink_pullback",
         use_llm=False,
+        explain_filters=True,
         config=Config(
             llm_api_key="",
             snapshot_source_priority=["test"],
@@ -70,7 +85,42 @@ def test_pipeline_enriches_daily_features_for_daily_strategy(monkeypatch):
     assert result.after_filter_count == 1
     assert result.picks[0].code == "000001"
     assert result.picks[0].ma_bullish is True
+    assert result.picks[0].volatility_20d_pct == 25
+    assert result.picks[0].max_drawdown_20d_pct == -5
+    assert result.picks[0].atr_20_pct == 3
+    assert result.picks[0].daily_quality_score == 100
+    assert result.picks[0].daily_quality_flags == ""
+    assert result.picks[0].daily_source == "tencent"
     assert any("Daily K-line enrichment attempted 2 candidates" in item for item in result.degradation)
+    assert "Daily K-line sources: tencent=2" in result.degradation
+    assert "Daily K-line quality flags: fallback_errors=1" in result.degradation
+    assert "Daily K-line source ordering: daily source order adjusted by health: tencent,sina" in result.degradation
+    assert any("Daily K-line source health:" in item for item in result.degradation)
+    assert any("tencent disabled,failures=2" in item for item in result.degradation)
+    assert any("sina total_failures=1,last_rows=30" in item for item in result.degradation)
+    assert any("Daily hard-filter rejections:" in item for item in result.degradation)
+    assert any("require_ma_bullish removed 1" in item for item in result.degradation)
+    assert any("Snapshot hard-filter waterfall:" in item for item in result.degradation)
+    assert any("Daily hard-filter waterfall:" in item for item in result.degradation)
+
+
+def test_daily_source_health_notes_prioritize_severe_states_and_limit_noise():
+    notes = _daily_source_health_notes(
+        {
+            "akshare": {"failures": 0, "total_failures": 1, "last_rows": 40, "disabled": False},
+            "baostock": {"failures": 1, "total_failures": 3, "disabled": False},
+            "sina": {"failures": 0, "total_failures": 2, "last_rows": 30, "disabled": False},
+            "tencent": {"failures": 2, "total_failures": 2, "disabled": True},
+            "tushare": {"failures": 0, "total_failures": 0, "disabled": False},
+        },
+        limit=2,
+    )
+
+    assert notes == [
+        "tencent disabled,failures=2",
+        "baostock failures=1",
+        "+2 more",
+    ]
 
 
 def test_pipeline_preserves_degradation_when_hard_filter_empty(monkeypatch):

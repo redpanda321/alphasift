@@ -153,6 +153,19 @@ LLM 输出会经过 JSON 解析、代码覆盖率校验、重复代码/未知代
 
 批量评估会按 `by_shape_status` 和 `by_shape_tag` 聚合，帮助发现某类形态是否反复失效。`evaluate-batch` 还会输出 `portfolio_summary` 和 `portfolio_by_strategy`，把每次 run 当作等权组合，统计组合收益、组合胜率，以及启用价格路径后的组合级平均最大回撤/最大浮盈。
 
+`evaluate-batch` 和 `evaluate-strategies` 的 JSON payload 同时包含 `failure_review`，用于策略研发复盘：
+
+- `summary`：失败样本数、负收益数、缺报价数、失败突破数、严重回撤数、最差收益。
+- `failure_samples`：按严重程度排序的样本，包含 run、策略、代码、收益、LLM tags/catalysts/risks、后置分析标签、形态状态、风险/组合 flags、`event_signals` 和失败原因。
+- `dimensions`：按策略、行业/主题、LLM 催化/风险、后置分析标签、合并事件信号、风险 flag、组合 flag、形态状态、失败原因聚合失败样本。
+- `recommendations`：面向调参和数据检查的下一步建议。
+
+可用 `--failure-samples N` 控制 explain/JSON 中保留的样本数量，`0` 表示只保留聚合和建议。
+
+同一批量评估 payload 还会输出 `event_signal_review`，把 `llm_tags`、`llm_catalysts`、`llm_risks` 和 `post_analysis_tags` 统一成 `tag:`、`catalyst:`、`risk:`、`post:` 四类事件信号。每个信号会给出样本数、胜率、平均/中位/最优/最差收益、失败率和 `prefer` / `avoid` / `watch` 动作建议，方便把后验表现沉淀回策略的 `preferred_event_tags`、`avoided_event_tags` 或 risk profile。
+
+`event_signal_review.strategy_patch_suggestions` 会进一步按策略汇总这些证据，生成可审阅的 `screening.event_profile` YAML 片段和 `append_unique` 字段变更建议。它只输出建议，不会自动改写策略文件；适合先在 UI/PR 中审核，再把稳定信号加入具体策略。
+
 如果启用 `--with-price-path` 或 `EVALUATION_PRICE_PATH_ENABLED=true`，评估会额外抓取候选日 K 路径，并计算：
 
 - `path_end_return_pct`：路径最后一个交易日相对保存价的收益
@@ -187,12 +200,13 @@ LLM 输出会经过 JSON 解析、代码覆盖率校验、重复代码/未知代
 | 异常量比、高换手 | penalty / 可选 veto |
 | 负 PE、高 PB | penalty |
 | 日 K 信号偏弱、MACD 空头、RSI 过热 | penalty |
+| 日 K 数据质量过低、拉取失败、过期缓存或 source fallback | penalty / 可选 veto |
 | LLM 风险标签、低置信度 | penalty |
 | DSA 或其他后置分析器风险标签 | 进入候选风险字段，DSA 自身也会影响后置分数 |
 
 最终输出同时包含 `risk_score`、`risk_level`、`risk_penalty` 和 `risk_flags`，便于后续 agent 或人工复核。
 
-策略 YAML 可以用 `risk_profile` 覆盖风险阈值和扣分点，例如 `chase_change_pct`、`abnormal_volume_ratio`、`high_turnover_rate`、`low_llm_confidence`。这避免把“8% 就算追高”“量比 6 就异常”这类市场风格假设写死在代码里。
+策略 YAML 可以用 `risk_profile` 覆盖风险阈值和扣分点，例如 `chase_change_pct`、`abnormal_volume_ratio`、`high_turnover_rate`、`low_llm_confidence`、`low_daily_quality_score`、`fetch_failed_daily_points`。这避免把“8% 就算追高”“量比 6 就异常”“拉取失败扣多少分”这类市场风格和数据质量假设写死在代码里。
 
 ## 组合分散覆盖层
 

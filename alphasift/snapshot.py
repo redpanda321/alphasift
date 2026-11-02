@@ -8,6 +8,7 @@ This is separate from single-stock realtime quotes.
 import logging
 import json
 import os
+import random
 import threading
 import time
 from datetime import date, datetime, timezone, timedelta
@@ -15,18 +16,24 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from alphasift.source_guard import call_with_timeout, parse_source_timeout_seconds
 
 logger = logging.getLogger(__name__)
 
 _SNAPSHOT_CACHE_VERSION = 1
 _DEFAULT_TUSHARE_HTTP_URL = "http://api.waditu.com"
-_EM_REQUEST_MIN_INTERVAL_SECONDS = 0.25
+_EM_REQUEST_MIN_INTERVAL_SECONDS = 1.0
+_EM_REQUEST_JITTER_SECONDS = 0.3
 _SOURCE_HEALTH_FAILURE_THRESHOLD = 3
 _SOURCE_HEALTH_COOLDOWN_SECONDS = 5 * 60
+_SNAPSHOT_CALL_TIMEOUT_SECONDS = 60.0
 _EM_SESSION: requests.Session | None = None
 _EM_LAST_REQUEST_AT = 0.0
 _EM_LOCK = threading.Lock()
-_SOURCE_HEALTH: dict[str, dict[str, float]] = {}
+_SOURCE_HEALTH: dict[str, dict[str, object]] = {}
 _SOURCE_HEALTH_LOCK = threading.Lock()
 
 
@@ -42,13 +49,13 @@ def fetch_cn_snapshot(source: str = "efinance") -> pd.DataFrame:
     if source == "sina":
         return _fetch_sina()
     elif source == "efinance":
-        return _fetch_efinance()
+        return _call_snapshot_wrapper(_fetch_efinance, source=source)
     elif source == "akshare_em":
-        return _fetch_akshare_em()
+        return _call_snapshot_wrapper(_fetch_akshare_em, source=source)
     elif source == "em_datacenter":
         return _fetch_em_datacenter()
     elif source == "tushare":
-        return _fetch_tushare()
+        return _call_snapshot_wrapper(_fetch_tushare, source=source)
     else:
         raise ValueError(f"Unknown snapshot source: {source}")
 
@@ -87,14 +94,14 @@ def fetch_snapshot_with_fallback(
                 df.attrs["stale"] = False
                 df.attrs["stale_age_hours"] = None
                 _write_last_good_snapshot(fallback_snapshot_path, df)
-                _record_source_success(source)
+                _record_source_success(source, rows=len(df))
                 logger.info("Snapshot fetched from %s: %d rows", source, len(df))
                 return df
             errors.append(f"{source}: returned empty data")
-            _record_source_failure(source)
+            _record_source_failure(source, "returned empty data")
         except Exception as e:
             errors.append(f"{source}: {e}")
-            _record_source_failure(source)
+            _record_source_failure(source, e)
             logger.warning("Snapshot source %s failed: %s", source, e)
 
     cached = _read_last_good_snapshot(
@@ -133,6 +140,21 @@ def _missing_required_columns(df: pd.DataFrame, required_columns: list[str]) -> 
     return missing
 
 
+def _call_snapshot_wrapper(fetcher, *, source: str) -> pd.DataFrame:
+    return call_with_timeout(
+        fetcher,
+        timeout_sec=_snapshot_call_timeout_seconds(),
+        label=f"snapshot source {source}",
+    )
+
+
+def _snapshot_call_timeout_seconds() -> float | None:
+    return parse_source_timeout_seconds(
+        "ALPHASIFT_SNAPSHOT_CALL_TIMEOUT_SEC",
+        default=_SNAPSHOT_CALL_TIMEOUT_SECONDS,
+    )
+
+
 def _source_disabled_reason(source: str) -> str | None:
     now = time.monotonic()
     with _SOURCE_HEALTH_LOCK:
@@ -147,19 +169,59 @@ def _source_disabled_reason(source: str) -> str | None:
         return f"temporarily disabled for {disabled_until - now:.1f}s after repeated failures"
 
 
-def _record_source_success(source: str) -> None:
+def _record_source_success(source: str, *, rows: int | None = None) -> None:
     with _SOURCE_HEALTH_LOCK:
-        _SOURCE_HEALTH.pop(source, None)
+        state = _SOURCE_HEALTH.setdefault(source, {"failures": 0.0, "disabled_until": 0.0})
+        successes = float(state.get("successes", 0.0)) + 1.0
+        state["successes"] = successes
+        state["failures"] = 0.0
+        state["disabled_until"] = 0.0
+        state["last_success_at"] = time.time()
+        if rows is not None:
+            state["last_rows"] = float(rows)
+            previous_avg = float(state.get("avg_rows", rows))
+            state["avg_rows"] = previous_avg + (float(rows) - previous_avg) / successes
 
 
-def _record_source_failure(source: str) -> None:
+def _record_source_failure(source: str, error: object | None = None) -> None:
     now = time.monotonic()
     with _SOURCE_HEALTH_LOCK:
         state = _SOURCE_HEALTH.setdefault(source, {"failures": 0.0, "disabled_until": 0.0})
         failures = float(state.get("failures", 0.0)) + 1.0
         state["failures"] = failures
+        state["total_failures"] = float(state.get("total_failures", 0.0)) + 1.0
+        state["last_failure_at"] = time.time()
+        if error is not None:
+            state["last_error"] = " ".join(str(error).split())
         if failures >= _SOURCE_HEALTH_FAILURE_THRESHOLD:
             state["disabled_until"] = now + _SOURCE_HEALTH_COOLDOWN_SECONDS
+
+
+def snapshot_source_health_snapshot(
+    sources: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, dict[str, float | bool | str]]:
+    """Return in-process snapshot-source health without exposing credentials."""
+    now = time.monotonic()
+    requested = tuple(sources or tuple(_SOURCE_HEALTH))
+    with _SOURCE_HEALTH_LOCK:
+        snapshot: dict[str, dict[str, float | bool | str]] = {}
+        for source in requested:
+            state = dict(_SOURCE_HEALTH.get(source, {}))
+            disabled_until = float(state.get("disabled_until", 0.0))
+            cooldown_remaining = max(disabled_until - now, 0.0)
+            snapshot[source] = {
+                "successes": float(state.get("successes", 0.0)),
+                "failures": float(state.get("failures", 0.0)),
+                "total_failures": float(state.get("total_failures", 0.0)),
+                "last_rows": float(state.get("last_rows", 0.0)),
+                "avg_rows": float(state.get("avg_rows", 0.0)),
+                "disabled": disabled_until > now,
+                "cooldown_remaining_seconds": round(cooldown_remaining, 4),
+                "last_success_at": float(state.get("last_success_at", 0.0)),
+                "last_failure_at": float(state.get("last_failure_at", 0.0)),
+                "last_error": str(state.get("last_error", "")),
+            }
+    return snapshot
 
 
 def _write_last_good_snapshot(
@@ -394,21 +456,54 @@ def _eastmoney_get(url: str, **kwargs) -> requests.Response:
     """GET EastMoney endpoints through one throttled shared session.
 
     EastMoney endpoints are useful but more sensitive to bursty access than
-    lightweight direct sources. Keeping all direct calls behind one session and
-    a small process-wide interval reduces connection churn and accidental
-    request bursts when snapshot fallbacks are exercised repeatedly.
+    lightweight direct sources. Keeping all direct calls behind one retrying
+    session, a process-wide interval, and a little jitter follows the same
+    anti-ban pattern used by a-stock-data's ``em_get`` helper.
     """
     global _EM_LAST_REQUEST_AT, _EM_SESSION
     with _EM_LOCK:
         if _EM_SESSION is None:
-            _EM_SESSION = requests.Session()
+            _EM_SESSION = _build_eastmoney_session()
         elapsed = time.monotonic() - _EM_LAST_REQUEST_AT
-        if elapsed < _EM_REQUEST_MIN_INTERVAL_SECONDS:
-            time.sleep(_EM_REQUEST_MIN_INTERVAL_SECONDS - elapsed)
+        interval = _eastmoney_request_interval_seconds()
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
         response = _EM_SESSION.get(url, **kwargs)
         _EM_LAST_REQUEST_AT = time.monotonic()
     response.raise_for_status()
     return response
+
+
+def _build_eastmoney_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _eastmoney_request_interval_seconds() -> float:
+    min_interval = _float_env(
+        "ALPHASIFT_EASTMONEY_MIN_INTERVAL_SEC",
+        _EM_REQUEST_MIN_INTERVAL_SECONDS,
+    )
+    jitter = _float_env(
+        "ALPHASIFT_EASTMONEY_JITTER_SEC",
+        _EM_REQUEST_JITTER_SECONDS,
+    )
+    return max(min_interval, 0.0) + random.uniform(0.0, max(jitter, 0.0))
+
+
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    return float(value) if value else float(default)
 
 
 def _fetch_tushare() -> pd.DataFrame:
