@@ -4,7 +4,12 @@ import threading
 import pandas as pd
 
 from alphasift.config import Config
-from alphasift.evaluate import evaluate_result_against_snapshot, evaluate_saved_run, evaluate_saved_runs
+from alphasift.evaluate import (
+    evaluate_result_against_snapshot,
+    evaluate_saved_run,
+    evaluate_saved_runs,
+    evaluate_saved_runs_by_windows,
+)
 from alphasift.models import Pick, ScreenResult
 from alphasift.store import (
     list_saved_runs,
@@ -35,6 +40,18 @@ def test_list_saved_runs_reads_only_metadata_until_limit(tmp_path):
         strategy="dual_low",
         market="cn",
         run_id="run_metadata",
+        strategy_version="1.2",
+        strategy_category="value",
+        snapshot_count=3000,
+        after_filter_count=100,
+        snapshot_source="sina",
+        source_errors=["akshare: timeout"],
+        degradation=["used fallback"],
+        llm_ranked=True,
+        llm_coverage=0.75,
+        daily_enriched=True,
+        daily_enrich_count=20,
+        post_analyzers=["scorecard"],
         created_at="2026-04-01T09:30:00",
         picks=[Pick(rank=1, code="000001", name="平安银行", final_score=80, screen_score=80, price=10)],
     )
@@ -44,12 +61,28 @@ def test_list_saved_runs_reads_only_metadata_until_limit(tmp_path):
     runs = list_saved_runs(data_dir=tmp_path, limit=1)
 
     assert runs == [{
+        "schema_version": 3,
         "run_id": "run_metadata",
         "strategy": "dual_low",
         "market": "cn",
+        "strategy_version": "1.2",
+        "strategy_category": "value",
         "created_at": "2026-04-01T09:30:00",
         "picks": 1,
+        "snapshot_count": 3000,
+        "after_filter_count": 100,
+        "snapshot_source": "sina",
+        "source_error_count": 1,
+        "source_errors": ["akshare: timeout"],
+        "degradation_count": 1,
+        "degradation": ["used fallback"],
+        "llm_ranked": True,
+        "llm_coverage": 0.75,
+        "daily_enriched": True,
+        "daily_enrich_count": 20,
+        "post_analyzers": ["scorecard"],
         "path": str(path),
+        "report_path": str(path.with_suffix(".md")),
     }]
 
 
@@ -59,7 +92,9 @@ def test_list_saved_runs_falls_back_to_payload_when_metadata_missing(tmp_path):
             strategy="dual_low",
             market="cn",
             run_id="run_legacy",
-            created_at="2026-04-01T09:30:00",
+            created_at="2026-04-01T08:00:00+08:00",  # before the open: every listed bar is post-entry
+            source_errors=["akshare: disconnected"],
+            degradation=["used stale fallback"],
             picks=[Pick(rank=1, code="000001", name="平安银行", final_score=80, screen_score=80, price=10)],
         ),
         data_dir=tmp_path,
@@ -70,6 +105,13 @@ def test_list_saved_runs_falls_back_to_payload_when_metadata_missing(tmp_path):
 
     assert runs[0]["run_id"] == "run_legacy"
     assert runs[0]["picks"] == 1
+    assert runs[0]["schema_version"] == 1
+    assert runs[0]["strategy_version"] == ""
+    assert runs[0]["source_error_count"] == 1
+    assert runs[0]["source_errors"] == ["akshare: disconnected"]
+    assert runs[0]["degradation_count"] == 1
+    assert runs[0]["degradation"] == ["used stale fallback"]
+    assert runs[0]["report_path"].endswith("run_legacy.md")
 
 
 def test_screen_result_jsonl_contains_run_and_pick_lines():
@@ -188,7 +230,9 @@ def test_evaluate_result_computes_price_path_metrics():
         strategy="dual_low",
         market="cn",
         run_id="run123",
-        created_at="2026-04-01T09:30:00",
+        # Created at the open: the 2026-04-01 bar is partly pre-entry, so only
+        # later bars count toward the path.
+        created_at="2026-04-01T09:30:00+08:00",
         picks=[Pick(rank=1, code="000001", name="平安银行", final_score=80, screen_score=80, price=10)],
     )
     snapshot = pd.DataFrame([{"code": "000001", "price": 11}])
@@ -206,9 +250,9 @@ def test_evaluate_result_computes_price_path_metrics():
 
     pick = result.picks[0]
     assert pick.path_status == "ok"
-    assert pick.path_days == 2
+    assert pick.path_days == 1
     assert pick.path_end_return_pct == 10.0
-    assert pick.max_drawdown_pct == -3.0
+    assert pick.max_drawdown_pct == 0.0
     assert pick.max_runup_pct == 15.0
 
 
@@ -230,7 +274,7 @@ def test_evaluate_saved_runs_aggregates_by_strategy(tmp_path, monkeypatch):
             strategy="dual_low",
             market="cn",
             run_id="run_a",
-            created_at="2026-04-01T09:30:00",
+            created_at="2026-04-01T08:00:00+08:00",  # before the open: every listed bar is post-entry
             picks=[
                 Pick(
                     rank=1,
@@ -254,8 +298,24 @@ def test_evaluate_saved_runs_aggregates_by_strategy(tmp_path, monkeypatch):
             strategy="volume_breakout",
             market="cn",
             run_id="run_b",
-            created_at="2026-04-01T09:30:00",
-            picks=[Pick(rank=1, code="600000", name="浦发银行", final_score=70, screen_score=70, price=20)],
+            created_at="2026-04-01T08:00:00+08:00",  # before the open: every listed bar is post-entry
+            picks=[
+                Pick(
+                    rank=1,
+                    code="600000",
+                    name="浦发银行",
+                    final_score=70,
+                    screen_score=70,
+                    price=20,
+                    llm_tags=["订单催化"],
+                    llm_catalysts=["订单落地"],
+                    llm_risks=["监管问询"],
+                    risk_flags=["高换手"],
+                    portfolio_flags=["题材集中"],
+                    post_analysis_tags=["volume_spike"],
+                    breakout_20d_pct=0.2,
+                )
+            ],
         ),
         data_dir=tmp_path,
     )
@@ -278,6 +338,15 @@ def test_evaluate_saved_runs_aggregates_by_strategy(tmp_path, monkeypatch):
     assert result["summary"]["average_return_pct"] == 0.0
     assert result["by_strategy"]["dual_low"]["average_return_pct"] == 10.0
     assert result["by_strategy"]["volume_breakout"]["average_return_pct"] == -10.0
+    strategy_summaries = result["strategy_summaries"]
+    assert isinstance(strategy_summaries, list)
+    assert isinstance(strategy_summaries[0], dict)
+    assert isinstance(strategy_summaries[1], dict)
+    assert strategy_summaries[0]["strategy"] == "dual_low"
+    assert strategy_summaries[0]["outcome"] == "positive"
+    assert strategy_summaries[0]["shape_status_counts"] == {"breakout_follow_through": 1}
+    assert strategy_summaries[1]["strategy"] == "volume_breakout"
+    assert strategy_summaries[1]["outcome"] == "negative"
     assert result["portfolio_summary"]["evaluated_run_count"] == 2
     assert result["portfolio_summary"]["average_portfolio_return_pct"] == 0.0
     assert result["portfolio_summary"]["portfolio_win_rate"] == 50.0
@@ -286,11 +355,51 @@ def test_evaluate_saved_runs_aggregates_by_strategy(tmp_path, monkeypatch):
     assert result["dimensions"]["by_sector"]["银行"]["average_return_pct"] == 10.0
     assert result["dimensions"]["by_theme"]["低估值修复"]["win_rate"] == 100.0
     assert result["dimensions"]["by_tag"]["价值"]["pick_count"] == 1
+    assert result["dimensions"]["by_llm_catalyst"]["订单落地"]["pick_count"] == 1
+    assert result["dimensions"]["by_llm_risk"]["监管问询"]["average_return_pct"] == -10.0
+    assert result["dimensions"]["by_post_analysis_tag"]["volume_spike"]["pick_count"] == 1
     assert result["dimensions"]["by_risk_flag"]["低波动"]["average_return_pct"] == 10.0
     assert result["dimensions"]["by_holding_period"]["T+20_plus"]["pick_count"] == 2
     assert result["dimensions"]["by_shape_status"]["breakout_follow_through"]["pick_count"] == 1
-    assert result["dimensions"]["by_shape_tag"]["breakout_setup"]["pick_count"] == 1
+    assert result["dimensions"]["by_shape_tag"]["breakout_setup"]["pick_count"] == 2
     assert result["dimensions"]["by_path_status"]["ok"]["pick_count"] == 2
+    event_review = result["event_signal_review"]
+    by_signal = {item["signal"]: item for item in event_review["signals"]}
+    assert event_review["summary"]["signal_count"] >= 5
+    assert by_signal["tag:价值"]["action"] == "prefer"
+    assert by_signal["tag:价值"]["average_return_pct"] == 10.0
+    assert by_signal["risk:监管问询"]["action"] == "avoid"
+    assert by_signal["risk:监管问询"]["failure_count"] == 1
+    assert any("Review avoided-event candidates" in item for item in event_review["recommendations"])
+    patch_by_strategy = {
+        item["strategy"]: item
+        for item in event_review["strategy_patch_suggestions"]
+    }
+    assert event_review["summary"]["patch_suggestion_count"] == 2
+    assert patch_by_strategy["dual_low"]["preferred_event_tags"] == ["价值"]
+    assert "preferred_event_tags" in patch_by_strategy["dual_low"]["yaml_patch"]
+    assert "风险:监管问询" in patch_by_strategy["volume_breakout"]["avoided_event_tags"]
+    assert {
+        "path": "screening.event_profile.avoided_event_tags",
+        "operation": "append_unique",
+        "add": patch_by_strategy["volume_breakout"]["avoided_event_tags"],
+    } in patch_by_strategy["volume_breakout"]["field_changes"]
+    review = result["failure_review"]
+    assert review["summary"]["failure_count"] == 1
+    assert review["summary"]["negative_pick_count"] == 1
+    assert review["summary"]["failed_breakout_count"] == 1
+    assert review["summary"]["severe_drawdown_count"] == 1
+    assert review["failure_samples"][0]["code"] == "600000"
+    assert "negative_return" in review["failure_samples"][0]["failure_reasons"]
+    assert "shape_status:failed_breakout" in review["failure_samples"][0]["failure_reasons"]
+    assert "risk:监管问询" in review["failure_samples"][0]["event_signals"]
+    assert review["dimensions"]["by_event_signal"]["risk:监管问询"]["failure_count"] == 1
+    assert review["dimensions"]["by_llm_risk"]["监管问询"]["failure_count"] == 1
+    assert review["dimensions"]["by_post_analysis_tag"]["volume_spike"]["failure_count"] == 1
+    assert review["dimensions"]["by_risk_flag"]["高换手"]["failure_count"] == 1
+    assert review["dimensions"]["by_portfolio_flag"]["题材集中"]["failure_count"] == 1
+    assert any("Failed breakout samples" in item for item in review["recommendations"])
+    assert any("LLM risk `监管问询`" in item for item in review["recommendations"])
     assert result["summary"]["path_pick_count"] == 2
     assert result["summary"]["average_max_drawdown_pct"] == -7.5
     assert result["cost_bps"] == 0.0
@@ -302,7 +411,7 @@ def test_evaluate_saved_runs_uses_parallel_price_path_fetch_without_order_drift(
             strategy="dual_low",
             market="cn",
             run_id="run_parallel",
-            created_at="2026-04-01T09:30:00",
+            created_at="2026-04-01T08:00:00+08:00",  # before the open: every listed bar is post-entry
             picks=[
                 Pick(rank=1, code="000003", name="招商银行", final_score=90, screen_score=90, price=30),
                 Pick(rank=2, code="000001", name="平安银行", final_score=80, screen_score=80, price=10),
@@ -381,7 +490,7 @@ def test_evaluate_saved_runs_uses_cached_price_paths(tmp_path, monkeypatch):
                 strategy="dual_low",
                 market="cn",
                 run_id=run_id,
-                created_at="2026-04-01T09:30:00",
+                created_at="2026-04-01T08:00:00+08:00",  # before the open: every listed bar is post-entry
                 picks=[
                     Pick(
                         rank=1,
@@ -429,13 +538,98 @@ def test_evaluate_saved_runs_uses_cached_price_paths(tmp_path, monkeypatch):
     assert len(list((tmp_path / "daily_history").glob("*.json"))) == 1
 
 
+def test_evaluate_saved_runs_by_windows_measures_true_t_plus_n_against_benchmark(tmp_path, monkeypatch):
+    # Five post-entry bars. T+3 is complete; T+10 has not elapsed yet.
+    stock_paths = {
+        "000001": [10.0, 11.0, 11.5, 10.2, 11.2],
+        "600000": [20.0, 19.0, 18.0, 18.5, 21.0],
+    }
+
+    def bars(closes):
+        return pd.DataFrame(
+            [
+                {"日期": f"2026-04-0{day}", "收盘": close, "最高": close * 1.02, "最低": close * 0.98}
+                for day, close in enumerate(closes, start=1)
+            ]
+        )
+
+    entry_close = {"000001": 10.0, "600000": 20.0}
+
+    def fake_fetch_daily_history(code, **kwargs):
+        # The entry session (03-31) closes at the pick price.
+        entry = pd.DataFrame([{"日期": "2026-03-31", "收盘": entry_close[code], "最高": entry_close[code], "最低": entry_close[code]}])
+        return pd.concat([entry, bars(stock_paths[code])], ignore_index=True)
+
+    def fake_benchmark(market, *, lookback_days):
+        # Index closes 100 on the entry session (03-31), then +1% by T+3.
+        frame = bars([100.5, 100.8, 101.0, 101.5, 102.0])
+        entry = pd.DataFrame([{"日期": "2026-03-31", "收盘": 100.0, "最高": 100.0, "最低": 100.0}])
+        return pd.concat([entry, frame], ignore_index=True)
+
+    monkeypatch.setattr("alphasift.evaluate.fetch_daily_history", fake_fetch_daily_history)
+    monkeypatch.setattr("alphasift.evaluate._fetch_benchmark_path", fake_benchmark)
+    for run_id, strategy, code, price in (
+        ("run_a", "dual_low", "000001", 10.0),
+        ("run_b", "volume_breakout", "600000", 20.0),
+    ):
+        save_screen_result(
+            ScreenResult(
+                strategy=strategy,
+                market="cn",
+                run_id=run_id,
+                # After the 03-31 close: entry is that close; 04-01 is T+1.
+                created_at="2026-03-31T20:00:00+08:00",
+                picks=[Pick(rank=1, code=code, name=code, final_score=80, screen_score=80, price=price)],
+            ),
+            data_dir=tmp_path,
+        )
+    snapshot = pd.DataFrame([{"code": "000001", "price": 99.0}, {"code": "600000", "price": 99.0}])
+
+    payload = evaluate_saved_runs_by_windows(
+        windows=[3, 10],
+        config=Config(llm_api_key="", data_dir=tmp_path),
+        current_snapshot=snapshot,
+        limit=10,
+        cost_bps=0,
+    )
+
+    assert payload["price_path_window_days"] == [3, 10]
+    dual_low = next(item for item in payload["strategy_summaries"] if item["strategy"] == "dual_low")
+    t3, t10 = dual_low["window_summaries"]
+    # T+3 close 11.5 vs entry 10 -> +15%, independent of today's snapshot price.
+    assert t3["window_days"] == 3
+    assert t3["average_return_pct"] == 15.0
+    assert t3["benchmark"] == "CSI 300"
+    assert t3["average_benchmark_return_pct"] == 1.0
+    assert t3["average_excess_return_pct"] == 14.0
+    assert t3["beat_benchmark_rate"] == 100.0
+    assert t3["pending_count"] == 0
+    # Only five bars exist, so T+10 is pending rather than a return.
+    assert t10["average_return_pct"] is None
+    assert t10["pending_count"] == 1
+    assert t10["evaluated_pick_count"] == 0
+
+    breakout = next(item for item in payload["strategy_summaries"] if item["strategy"] == "volume_breakout")
+    assert breakout["window_summaries"][0]["average_return_pct"] == -10.0
+    assert breakout["window_summaries"][0]["average_excess_return_pct"] == -11.0
+
+    # Reviews are kept per window: the T+3 loser is a failure there, while
+    # at T+10 every pick is still pending and nothing has failed yet.
+    assert payload["review_window_days"] == 3
+    reviews = {item["window_days"]: item for item in payload["window_reviews"]}
+    assert sorted(reviews) == [3, 10]
+    assert reviews[3]["failure_review"]["summary"]["failure_count"] >= 1
+    assert reviews[10]["failure_review"]["summary"]["failure_count"] == 0
+    assert payload["failure_review"] == reviews[3]["failure_review"]
+
+
 def test_evaluate_saved_runs_filters_strategy_before_loading_runs(tmp_path):
     matching_path = save_screen_result(
         ScreenResult(
             strategy="dual_low",
             market="cn",
             run_id="run_matching",
-            created_at="2026-04-01T09:30:00",
+            created_at="2026-04-01T08:00:00+08:00",  # before the open: every listed bar is post-entry
             picks=[Pick(rank=1, code="000001", name="平安银行", final_score=80, screen_score=80, price=10)],
         ),
         data_dir=tmp_path,

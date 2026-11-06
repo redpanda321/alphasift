@@ -48,16 +48,25 @@ alphasift/
 
 ## 数据源边界
 
-支持四种 A 股全市场快照数据源，自动按优先级降级。未显式设置 `SNAPSHOT_SOURCE_PRIORITY` 时，无 Tushare token 默认链路是 `efinance` -> `akshare_em` -> `em_datacenter`；有 token 默认链路是 `tushare` -> `efinance` -> `akshare_em` -> `em_datacenter`。
+支持五种 A 股全市场快照数据源，自动按优先级降级。未显式设置 `SNAPSHOT_SOURCE_PRIORITY` 时，无 Tushare token 默认链路是 `sina` -> `efinance` -> `akshare_em` -> `em_datacenter`；有 token 默认链路是 `tushare` -> `sina` -> `efinance` -> `akshare_em` -> `em_datacenter`。
 
 | 数据源 | 接口 | 特点 |
 |--------|------|------|
+| `sina` | vip.stock.finance.sina.com.cn | 直连全市场源，含 PE/PB/换手率/市值字段 |
 | `efinance` | push2.eastmoney.com | 实时推送，交易时段最快 |
 | `akshare_em` | 82.push2.eastmoney.com | 实时推送，备选 |
 | `em_datacenter` | data.eastmoney.com | 选股器 API，非交易时段可用 |
 | `tushare` | Tushare Pro `daily` + `daily_basic` | 最近交易日数据，需 `TUSHARE_TOKEN`，非实时 |
 
-周末或节假日 push2 接口不可用时，会自动降级到 `em_datacenter`。如果某个数据源缺少当前策略必需字段，例如 PB，系统会跳过该源继续尝试后续来源。所有实时源失败时可回退到 last-good 快照，并通过 `fallback_used/stale/stale_age_hours/source_errors` 暴露质量语义；如设置 `SNAPSHOT_FALLBACK_MAX_AGE_HOURS`，超过该年龄的缓存不会被使用。
+周末或节假日 push2 接口不可用时，会自动降级到 `em_datacenter`。如果某个数据源超时、不可用或缺少当前策略必需字段，例如 PB，系统会跳过该源继续尝试后续来源。AlphaSift 对 efinance、AkShare、Baostock、Tushare、yfinance 这类 wrapper 源增加 caller-side timeout，并继续通过 source-health 熔断、daily history cache 和 snapshot last-good cache 暴露 `fallback_used/stale/stale_age_hours/source_errors` 等质量语义；如设置 `SNAPSHOT_FALLBACK_MAX_AGE_HOURS`，超过该年龄的缓存不会被使用。
+
+## 参考项目取舍
+
+- [`simonlin1212/a-stock-data`](https://github.com/simonlin1212/a-stock-data)：明确优先使用通达信/腾讯等低封禁源，东财只用于独有数据，并对东财直连请求做共享 session、串行限流、随机抖动和重试。AlphaSift 已采用直接 HTTP 源优先、wrapper 超时、东财共享重试会话与 `ALPHASIFT_EASTMONEY_*` 限流参数。
+- [`akfamily/akshare`](https://github.com/akfamily/akshare)：覆盖面广、调用简单，但官方说明强调数据风险和接口可能变动。AlphaSift 保留 AkShare 作为备源或可选 provider，不再让它成为唯一关键路径。
+- [`microsoft/qlib`](https://github.com/microsoft/qlib)：强调本地数据准备、数据健康检查和可重复研究 workflow。AlphaSift 对应补上 `doctor data-sources`、source-health JSON、daily quality flags、saved-run/evaluate 闭环。
+- [`ricequant/rqalpha`](https://github.com/ricequant/rqalpha) 与 [`zvtvz/zvt`](https://github.com/zvtvz/zvt)：都把数据层/策略层解耦，支持扩展 provider 或本地持久化后再选股。AlphaSift 保持策略 YAML、数据源 fallback、last-good cache 与上层 DSA/API 解耦，而不是把某个免费源写死成强依赖。
+- [`freqtrade/freqtrade`](https://github.com/freqtrade/freqtrade)：把 strategy 列表、backtesting、参数优化和 WebUI/状态展示做成核心使用路径。AlphaSift 不做交易 bot，但策略目录需要提供机器可读能力描述，方便 CLI、Web UI、DSA 或通知助手按数据依赖和风格选择策略。
 
 ## 已知限制
 
@@ -72,11 +81,11 @@ alphasift/
 
 对照同类智能投研项目，AlphaSift 后续优先补这些能力：
 
-- **数据可靠性**：已补 `tushare` 兜底；下一步做多源字段对账、数据新鲜度标记、异常值报告和缓存命中可视化。
-- **事件归因闭环**：把新闻、公告、资金流的事件标签纳入 `evaluate-batch` 统计，区分哪些事件真的改善后验表现。
+- **数据可靠性**：已补 `tushare` 兜底、wrapper 调用超时、source-health 熔断、`health_summary` 聚合、`freshness_summary` 新鲜度/缓存状态摘要、`--compare-snapshot-sources` 多源字段/代码交集对账、snapshot `quality_summary` 字段异常报告、last-good/stale fallback，以及基于 saved-run 元数据的 `/data-source-history` 错误率/降级率/fallback 率聚合；下一步做缓存命中趋势可视化。
+- **事件归因闭环**：已把 LLM tags/catalysts/risks、后置分析标签和合并事件信号纳入 `evaluate-batch/evaluate-strategies` 的维度统计、`failure_review` 与 `event_signal_review`，用于区分哪些事件信号在成功/失败样本中反复出现，并给出 prefer/avoid/watch 动作建议。
 - **回测边界**：在现有 T+N 评估上继续补持仓约束、调仓周期、逐日权益曲线和复权处理；完整量化研究可对接 Qlib 或 Backtrader。
-- **Agent 产物**：把一次选股运行输出为稳定的 Markdown/JSON 报告包，便于被通知助手、Web UI 或 MCP/HTTP 服务消费。
-- **策略研发**：增加策略 profile 模板、参数版本对比和失败样本复盘，让 YAML 策略迭代更可控。
+- **Agent 产物**：已补 `alphasift overview --json/--explain`、`alphasift report <run_id>` 和 `alphasift serve` 只读本地 JSON API，可把策略分组、策略筛选 facets、策略卡片、策略准备度、saved-run 历史摘要、数据源历史、数据源健康、最近运行、next actions 和单次选股运行输出为稳定 payload，便于被通知助手、Web UI 或 MCP/HTTP 服务消费；下一步补报告模板和更完整的 UI 审批流。
+- **策略研发**：已补 `alphasift strategies --json/--explain`、`strategies --compare`、`strategies --templates/--template`、`evaluate-batch/evaluate-strategies` 的 `failure_review`/`event_signal_review`、策略风格属性、策略数据依赖、必需 snapshot/daily 字段、单策略/全策略 `doctor data-sources --strategy/--all-strategies` 预检、`strategy_readiness_summary`、活跃过滤/因子权重/profile 元数据，以及 `low_volatility_quality` 防守型质量策略；事件胜率建议已能输出策略级 `screening.event_profile` YAML patch 建议。下一步可把这些建议接入 UI 审批或生成候选策略变体。
 
 ## 实测记录
 

@@ -580,26 +580,16 @@ def _parse_ranking_response(response: str, candidates: list[Pick]) -> list[Pick]
 
 def _parse_ranking_response_detail(response: str, candidates: list[Pick]) -> RankingParseResult:
     """Parse LLM response and return diagnostics."""
-    import re
-
     errors: list[str] = []
-    # Extract JSON array from response (may be wrapped in markdown code block)
-    cleaned = re.sub(r"```(?:json)?\s*", "", response)
-    stripped = cleaned.strip()
-    if stripped.startswith("["):
-        start = cleaned.find("[")
-        end = cleaned.rfind("]") + 1
-    else:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}") + 1
-    if start < 0 or end <= start:
-        errors.append("no_json_found")
-        logger.warning("No JSON object or array found in LLM response")
+    if not response or not response.strip():
+        errors.append("empty_response")
+        logger.warning("Empty LLM ranking response")
         return RankingParseResult(candidates, 0.0, errors)
 
-    raw_json = cleaned[start:end]
-    parsed = _try_parse_json_lenient(raw_json, errors)
+    parsed = _extract_ranking_json(response, errors)
     if parsed is None:
+        errors.append("no_json_found")
+        logger.warning("No JSON object or array found in LLM response")
         return RankingParseResult(candidates, 0.0, errors)
     if isinstance(parsed, dict):
         items = parsed.get("ranked", [])
@@ -715,6 +705,98 @@ def _try_parse_json_lenient(raw: str, errors: list[str]):
     errors.append(f"json_decode_error:{first_error}")
     logger.warning("Failed to parse LLM ranking JSON: %s", first_error)
     return None
+
+
+def _extract_ranking_json(response: str, errors: list[str]):
+    """Extract ranking JSON from common LLM response shapes."""
+    for raw in _iter_json_payloads(response):
+        parsed = _try_parse_json_lenient(raw, errors)
+        if _looks_like_ranking_payload(parsed):
+            return parsed
+
+    partial = _extract_partial_ranking_array(response, errors)
+    if partial is not None:
+        return partial
+    return None
+
+
+def _looks_like_ranking_payload(value: object) -> bool:
+    if isinstance(value, dict):
+        return isinstance(value.get("ranked"), list)
+    if isinstance(value, list):
+        return any(isinstance(item, dict) and "code" in item for item in value)
+    return False
+
+
+def _iter_json_payloads(response: str):
+    """Yield likely JSON payload substrings in priority order."""
+    import re
+
+    yielded: set[str] = set()
+    fence_pattern = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.DOTALL)
+    for match in fence_pattern.finditer(response):
+        payload = match.group(1).strip()
+        if payload and payload not in yielded:
+            yielded.add(payload)
+            yield payload
+
+    cleaned = fence_pattern.sub(lambda match: match.group(1), response)
+    for payload in _balanced_json_values(cleaned):
+        if payload not in yielded:
+            yielded.add(payload)
+            yield payload
+
+
+def _balanced_json_values(text: str) -> list[str]:
+    """Return balanced top-level JSON object/array substrings."""
+    values: list[str] = []
+    stack: list[str] = []
+    start: int | None = None
+    in_string = False
+    escaped = False
+    pairs = {"{": "}", "[": "]"}
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char in pairs:
+            if not stack:
+                start = index
+            stack.append(pairs[char])
+            continue
+        if char in ("}", "]") and stack:
+            expected = stack.pop()
+            if char != expected:
+                stack.clear()
+                start = None
+                continue
+            if not stack and start is not None:
+                values.append(text[start : index + 1])
+                start = None
+    return values
+
+
+def _extract_partial_ranking_array(response: str, errors: list[str]):
+    """Recover a ranked list from multiple JSON objects in a noisy response."""
+    items = []
+    item_errors: list[str] = []
+    for raw in _balanced_json_values(response):
+        parsed = _try_parse_json_lenient(raw, item_errors)
+        if isinstance(parsed, dict) and "code" in parsed:
+            items.append(parsed)
+    if not items:
+        return None
+    errors.append("json_repaired:partial_array")
+    return {"ranked": items}
 
 
 def _call_litellm_router(

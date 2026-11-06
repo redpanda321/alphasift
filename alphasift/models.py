@@ -3,7 +3,8 @@
 
 from typing import Any
 from dataclasses import dataclass, field
-from datetime import datetime
+
+from alphasift.timeutil import now_iso
 
 
 @dataclass
@@ -12,6 +13,9 @@ class HardFilterConfig:
     price_min: float | None = None
     price_max: float | None = None
     amount_min: float | None = None
+    # Estimated daily traded value in USD (current price x 10-day average
+    # volume, 3-month if missing); comparable across markets.
+    avg_amount_usd_min: float | None = None
     market_cap_min: float | None = None
     market_cap_max: float | None = None
     pe_ttm_min: float | None = None
@@ -40,6 +44,12 @@ class HardFilterConfig:
     pullback_to_ma20_pct_max: float | None = None
     consolidation_days_20d_min: int | None = None
     consolidation_days_20d_max: int | None = None
+    volatility_20d_pct_min: float | None = None
+    volatility_20d_pct_max: float | None = None
+    max_drawdown_20d_pct_min: float | None = None
+    max_drawdown_20d_pct_max: float | None = None
+    atr_20_pct_min: float | None = None
+    atr_20_pct_max: float | None = None
 
 
 @dataclass
@@ -60,6 +70,18 @@ class ScreeningConfig:
 
 
 @dataclass
+class StrategyStyle:
+    """Human/UI-facing strategy style metadata."""
+
+    risk_profile: str = ""
+    holding_period: str = ""
+    execution_style: str = ""
+    market_regime: list[str] = field(default_factory=list)
+    capital_profile: str = ""
+    ui_badge: str = ""
+
+
+@dataclass
 class Strategy:
     name: str
     display_name: str
@@ -67,6 +89,7 @@ class Strategy:
     version: str = "1"
     category: str = "trend"
     tags: list[str] = field(default_factory=list)
+    style: StrategyStyle = field(default_factory=StrategyStyle)
     screening: ScreeningConfig = field(default_factory=ScreeningConfig)
 
 
@@ -80,6 +103,14 @@ class StrategyInfo:
     category: str
     tags: list[str]
     market_scope: list[str]
+    requires_daily_features: bool = False
+    data_requirements: list[str] = field(default_factory=list)
+    required_snapshot_fields: list[str] = field(default_factory=list)
+    required_daily_fields: list[str] = field(default_factory=list)
+    active_filters: list[str] = field(default_factory=list)
+    factor_weights: dict[str, float] = field(default_factory=dict)
+    profile_keys: dict[str, list[str]] = field(default_factory=dict)
+    style: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -158,6 +189,12 @@ class Pick:
     lower_low_count: int | None = None
     bottom_divergence: bool | None = None
     lifecycle_reasons: list[str] = field(default_factory=list)
+    volatility_20d_pct: float | None = None
+    max_drawdown_20d_pct: float | None = None
+    atr_20_pct: float | None = None
+    daily_quality_score: float | None = None
+    daily_quality_flags: str = ""
+    daily_source: str = ""
     factor_scores: dict[str, float] = field(default_factory=dict)
     llm_confidence: float | None = None
     llm_sector: str = ""
@@ -227,7 +264,7 @@ class ScreenResult:
     portfolio_diversity_enabled: bool = True
     portfolio_concentration_notes: list[str] = field(default_factory=list)
     saved_path: str = ""
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    created_at: str = field(default_factory=now_iso)
 
 
 @dataclass
@@ -243,6 +280,9 @@ class PickEvaluation:
     llm_sector: str = ""
     llm_theme: str = ""
     llm_tags: list[str] = field(default_factory=list)
+    llm_catalysts: list[str] = field(default_factory=list)
+    llm_risks: list[str] = field(default_factory=list)
+    post_analysis_tags: list[str] = field(default_factory=list)
     risk_level: str = ""
     risk_flags: list[str] = field(default_factory=list)
     portfolio_flags: list[str] = field(default_factory=list)
@@ -253,6 +293,10 @@ class PickEvaluation:
     path_end_return_pct: float | None = None
     max_drawdown_pct: float | None = None
     max_runup_pct: float | None = None
+    # Set only for fixed-horizon (T+N) evaluation.
+    horizon_days: int | None = None
+    benchmark_return_pct: float | None = None
+    excess_return_pct: float | None = None
 
 
 @dataclass
@@ -261,7 +305,7 @@ class EvaluationResult:
     strategy: str
     market: str
     created_at: str
-    evaluated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    evaluated_at: str = field(default_factory=now_iso)
     elapsed_days: int | None = None
     snapshot_source: str = ""
     source_errors: list[str] = field(default_factory=list)
@@ -272,3 +316,9 @@ class EvaluationResult:
     missing_codes: list[str] = field(default_factory=list)
     degradation: list[str] = field(default_factory=list)
     saved_path: str = ""
+    # Fixed-horizon (T+N) evaluation against the market benchmark.
+    horizon_days: int | None = None
+    benchmark: str = ""
+    benchmark_return_pct: float | None = None
+    average_excess_return_pct: float | None = None
+    pending_count: int = 0

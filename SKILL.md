@@ -1,25 +1,25 @@
 ---
 name: alphasift
-description: "自动选股 Skill。Use when: 用户要按策略筛选 A 股、列出可用策略、运行双低/放量突破等选股，或保存运行并做 T+N 后验评估。通过 alphasift CLI 或 Python 接口输出候选股票列表。"
+description: "全市场选股 Skill。Use when: 用户要按策略筛选 A 股、美股、港股、日股、韩股、台股或印度股票，列出可用策略，运行双低/放量突破/全球低估值等选股，或保存运行并做 T+N 后验评估。通过 alphasift CLI 或 Python 接口输出候选股票列表。"
 ---
 
 # alphasift — 自动选股 Skill
 
-按策略筛选、评分并排序 A 股候选股票。
+按策略筛选、评分并排序候选股票：A 股，以及美股、港股、日本、韩国、台湾、印度。
 
 定位：全市场候选发现与横向排序引擎。它站在 `daily_stock_analysis` 这类单股深度分析服务上游；DSA 只是可选 L3 后置分析器，不是主筛选依赖。
 
 ## Use When
 
 - 用户要列出当前可用策略
-- 用户要按 `dual_low`、`volume_breakout` 这类策略筛选 A 股
+- 用户要按 `dual_low`、`volume_breakout` 这类策略筛选 A 股，或用 `global_value` 筛选其他市场
 - 用户要拿到结构化 JSON 结果，供后续 agent 继续分析
 - 用户要保存选股运行，并在之后用最新快照评估结果
 - 用户第一次接触本项目，想用 `alphasift quickstart` 一键看到全市场→候选→排名的最小闭环
 
 ## Preconditions
 
-- 当前只支持 `market="cn"`
+- 默认 `market="cn"`；`market` 也可以是 `us` / `hk` / `jp` / `kr` / `tw` / `in`（Yahoo 筛选器快照 + yfinance 日 K，代码为 Yahoo 代码如 `0700.HK`；无 hotspot/board_heat/tushare/候选级新闻等 A 股专属数据），需使用 `market_scope` 包含该市场的策略：`global_value`（us/hk/jp/kr/tw/in）或 `us_momentum_quality`（us）。韩国 PE/PB 来自 Naver Finance
 - 需要先在仓库根目录安装包：`pip install -e .`
 - 如需 LLM 排序，可设置 `LITELLM_MODEL`、`LLM_CHANNELS`、`LITELLM_CONFIG` 或旧变量 `LLM_API_KEY/LLM_MODEL/LLM_BASE_URL`
 - 可直接复用 `daily_stock_analysis` 的 LiteLLM 配置字段，包括 `OPENAI_*`、`GEMINI_*`、`DEEPSEEK_API_KEY`、`OLLAMA_API_BASE`
@@ -175,4 +175,5 @@ evaluate_saved_runs(limit=20)
 - `industry-cache` 会缓存行业/概念映射和板块热度字段，并写入 history sidecar；后续加载映射时可回填板块热度滚动趋势、持续性、降温和状态字段，供 LLM 上下文与 `theme_heat` 因子使用
 - 组合分散层优先使用 LLM 返回的行业/主题标签，也可回退到候选 `industry` 字段；两者都缺失时不会改变规则分数
 - L3 后置分析器只在最终候选上运行，不参与全市场初筛；本地 `scorecard` 默认启用，DSA 只是其中一个可追加后端
-- T+N 评估基于保存价和评估时最新快照价，不等同完整复权回测；可扣减交易成本并输出突破/回踩形态后验标签；`--with-price-path` 会额外估算最大回撤和最大浮盈
+- `evaluate-strategies --window 5,10,20` 按入场后第 N 个交易日收盘计算 T+N 收益，并与市场基准指数对比输出超额收益；未满 N 日的记为 pending
+- 不带窗口的 T+N 评估基于保存价和评估时最新快照价，不等同完整复权回测；可扣减交易成本并输出突破/回踩形态后验标签；`--with-price-path` 会额外估算最大回撤和最大浮盈

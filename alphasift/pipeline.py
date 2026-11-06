@@ -12,7 +12,14 @@ from alphasift.candidate_context import collect_candidate_context
 from alphasift.context import build_llm_context
 from alphasift.daily import enrich_daily_features
 from alphasift.dsa_provider import apply_dsa_provider_context
-from alphasift.filter import apply_hard_filters, requires_daily_features, without_daily_filters
+from alphasift.markets import get_market, latest_settled_close
+from alphasift.filter import (
+    apply_hard_filters,
+    hard_filter_rejection_summary,
+    hard_filter_waterfall,
+    requires_daily_features,
+    without_daily_filters,
+)
 from alphasift.industry import enrich_industry_concepts
 from alphasift.lifecycle import enrich_lifecycle_features
 from alphasift.freshness import latest_completed_session
@@ -26,7 +33,11 @@ from alphasift.normalize import (
 )
 from alphasift.post_analysis import normalize_post_analyzers, run_post_analyzers
 from alphasift.ranker import rank_candidates_with_metadata
-from alphasift.risk import apply_portfolio_overlay, apply_risk_overlay
+from alphasift.risk import (
+    PORTFOLIO_DIVERSITY_SKIPPED_NOTE,
+    apply_portfolio_overlay,
+    apply_risk_overlay,
+)
 from alphasift.scorer import compute_screen_scores, factor_score_columns
 from alphasift.snapshot import fetch_snapshot_with_fallback
 from alphasift.strategy import load_all_strategies
@@ -52,6 +63,7 @@ def screen(
     post_analysis_max_picks: int | None = None,
     daily_enrich: bool | None = None,
     daily_enrich_max_candidates: int | None = None,
+    explain_filters: bool = False,
     deep_analysis: bool = False,
     deep_analysis_max_picks: int | None = None,
     context: dict[str, object] | None = None,
@@ -61,7 +73,8 @@ def screen(
 
     Args:
         strategy: Strategy name (matches a YAML file in strategies/).
-        market: Market scope, currently only "cn".
+        market: Market id from ``alphasift.markets`` (cn, us, hk, jp, kr, tw, in). A strategy must declare the
+            market in its own market_scope to be runnable against it.
         max_output: Override max output count from strategy.
         use_llm: Whether to use LLM for L2 ranking.
         llm_context: Optional market/news/theme context supplied to the LLM ranker.
@@ -76,6 +89,7 @@ def screen(
         post_analysis_max_picks: Override max number of picks sent to post analyzers.
         daily_enrich: Whether to enrich shortlisted candidates with daily K-line features.
         daily_enrich_max_candidates: Max candidates to enrich after snapshot filtering.
+        explain_filters: Whether to include sequential hard-filter waterfall diagnostics.
         deep_analysis: Backward-compatible alias for post_analyzers=["dsa"].
         deep_analysis_max_picks: Backward-compatible max-picks alias for DSA.
         context: Optional host runtime context. DSA may provide LLM settings and
@@ -88,8 +102,7 @@ def screen(
     if config is None:
         config = Config.from_env()
 
-    if market not in ("cn", "us"):
-        raise ValueError(f"Unsupported market: {market!r} (supported: cn, us)")
+    market = get_market(market).id
 
     run_id = uuid.uuid4().hex[:12]
     degradation: list[str] = []
@@ -132,6 +145,7 @@ def screen(
         fallback_snapshot_path=None if lifecycle_requested else config.fallback_snapshot_path,
         fallback_max_age_hours=config.snapshot_fallback_max_age_hours,
         market=market,
+        source_health_path=config.source_health_path,
     )
     snapshot_retrieved_at = pd.Timestamp.now(tz="UTC").isoformat()
     if lifecycle_requested and (snapshot_df.attrs.get("fallback_used") or snapshot_df.attrs.get("stale")):
@@ -153,6 +167,12 @@ def screen(
         else config.industry_provider
     )
     effective_industry_provider = str(effective_industry_provider or "none").strip().lower()
+    if market != "cn" and effective_industry_provider not in {"", "none", "off", "false"}:
+        # Board providers (akshare / eastmoney) only know A-share codes.
+        degradation.append(
+            f"Industry provider {effective_industry_provider} skipped: A-share only (market={market})"
+        )
+        effective_industry_provider = "none"
     if effective_industry_map_files or effective_industry_provider not in {"", "none", "off", "false"}:
         snapshot_df, industry_notes = enrich_industry_concepts(
             snapshot_df,
@@ -163,9 +183,28 @@ def screen(
             provider_cache_ttl_hours=config.industry_provider_cache_ttl_hours,
         )
         degradation.extend(f"Industry/concepts enrichment: {item}" for item in industry_notes)
+    elif (
+        market == "cn"
+        and config.industry_auto_backfill
+        and _industry_coverage(snapshot_df) < _INDUSTRY_BACKFILL_MIN_COVERAGE
+    ):
+        # Routine backfill is not a degradation; only report it when the run
+        # still lacks industry labels afterwards.
+        snapshot_df, industry_notes = enrich_industry_concepts(
+            snapshot_df,
+            provider="eastmoney",
+            provider_cache_dir=config.industry_provider_cache_dir,
+        )
+        if _industry_coverage(snapshot_df) < _INDUSTRY_BACKFILL_MIN_COVERAGE:
+            degradation.extend(f"Industry auto-backfill: {item}" for item in industry_notes)
+        else:
+            for item in industry_notes:
+                logger.info("Industry auto-backfill: %s", item)
     snapshot_count = len(snapshot_df)
     snapshot_source = str(snapshot_df.attrs.get("snapshot_source", ""))
     source_errors = [str(item) for item in snapshot_df.attrs.get("source_errors", [])]
+    for item in snapshot_df.attrs.get("source_order_notes", []):
+        logger.info("%s", item)
     degradation.extend(f"Snapshot source fallback: {item}" for item in source_errors)
     if bool(snapshot_df.attrs.get("fallback_used")):
         stale_age = snapshot_df.attrs.get("stale_age_hours")
@@ -178,6 +217,13 @@ def screen(
 
     # 3. L1 hard filter. If a strategy needs daily features, first apply only
     # snapshot-safe filters, then enrich a narrowed candidate pool.
+    if explain_filters:
+        snapshot_waterfall = hard_filter_waterfall(snapshot_df, snapshot_filters)
+        if snapshot_waterfall:
+            degradation.append(
+                "Snapshot hard-filter waterfall: "
+                + _format_filter_waterfall(snapshot_waterfall)
+            )
     df = apply_hard_filters(snapshot_df, snapshot_filters)
     after_filter_count = len(df)
 
@@ -232,29 +278,74 @@ def screen(
         provisional = _sort_screened_candidates(compute_screen_scores(df, screening), screening)
         enrich_count = min(daily_limit, len(provisional))
         daily_candidates = provisional.head(enrich_count)
+        # config.daily_source's "auto" chain (tushare/tencent/sina/akshare/baostock)
+        # is CN-only and cannot resolve Yahoo symbols, so default non-CN runs to
+        # the yfinance adapter unless the caller explicitly configured a source.
+        effective_daily_source = (
+            "yfinance" if market != "cn" and config.daily_source in ("auto", "")
+            else config.daily_source
+        )
         try:
             enriched = enrich_daily_features(
                 daily_candidates,
                 max_rows=enrich_count,
                 lookback_days=config.daily_lookback_days,
-                source=config.daily_source,
+                source=effective_daily_source,
                 fetch_retries=config.daily_fetch_retries,
                 max_workers=config.daily_fetch_max_workers,
+                cache_policy=lambda: _screening_daily_cache_kwargs(config, market),
             )
             daily_enriched = True
             daily_errors = [str(item) for item in enriched.attrs.get("daily_errors", [])]
             daily_enrich_count = int(enriched.attrs.get("daily_success_count", len(enriched)))
+            daily_source_counts = dict(enriched.attrs.get("daily_source_counts", {}) or {})
+            daily_quality_flag_counts = dict(enriched.attrs.get("daily_quality_flag_counts", {}) or {})
+            daily_source_order_notes = [str(item) for item in enriched.attrs.get("daily_source_order_notes", [])]
+            daily_source_health_notes = _daily_source_health_notes(
+                dict(enriched.attrs.get("daily_source_health", {}) or {})
+            )
             degradation.append(
                 f"Daily K-line enrichment attempted {enrich_count} candidates, "
                 f"succeeded {daily_enrich_count} of {after_filter_count} snapshot-filtered candidates"
             )
+            if daily_source_counts:
+                source_summary = ", ".join(
+                    f"{name}={count}" for name, count in sorted(daily_source_counts.items())
+                )
+                degradation.append(f"Daily K-line sources: {source_summary}")
+            if daily_quality_flag_counts:
+                flag_summary = ", ".join(
+                    f"{name}={count}" for name, count in sorted(daily_quality_flag_counts.items())
+                )
+                degradation.append(f"Daily K-line quality flags: {flag_summary}")
+            if daily_source_order_notes:
+                degradation.append("Daily K-line source ordering: " + " | ".join(daily_source_order_notes[:3]))
+            if daily_source_health_notes:
+                degradation.append("Daily K-line source health: " + "; ".join(daily_source_health_notes))
             if daily_errors:
                 sample = " | ".join(daily_errors[:5])
                 suffix = f" | +{len(daily_errors) - 5} more" if len(daily_errors) > 5 else ""
                 degradation.append(f"Daily K-line enrichment row errors: {sample}{suffix}")
             if daily_needed:
+                if explain_filters:
+                    daily_waterfall = hard_filter_waterfall(enriched, screening.hard_filters)
+                    if daily_waterfall:
+                        degradation.append(
+                            "Daily hard-filter waterfall: "
+                            + _format_filter_waterfall(daily_waterfall)
+                        )
+                daily_filter_rejections = hard_filter_rejection_summary(
+                    enriched,
+                    screening.hard_filters,
+                    limit=6,
+                )
                 df = apply_hard_filters(enriched, screening.hard_filters)
                 after_filter_count = len(df)
+                if daily_filter_rejections:
+                    degradation.append(
+                        "Daily hard-filter rejections: "
+                        + "; ".join(daily_filter_rejections)
+                    )
             else:
                 df = enriched
         except Exception as exc:
@@ -321,7 +412,12 @@ def screen(
             if collect_llm_candidate_context is None
             else collect_llm_candidate_context
         )
-        if should_collect_candidate_context:
+        if should_collect_candidate_context and market != "cn":
+            # News/announcement/fund-flow providers are A-share (EastMoney) only.
+            degradation.append(
+                f"Candidate context skipped: providers support market cn only (market={market})"
+            )
+        elif should_collect_candidate_context:
             candidate_context_rows, candidate_context_errors = collect_candidate_context(
                 df_top,
                 max_rows=(
@@ -428,6 +524,8 @@ def screen(
             concentration_penalty=config.portfolio_concentration_penalty,
             profile=screening.portfolio_profile,
         )
+        if PORTFOLIO_DIVERSITY_SKIPPED_NOTE in portfolio_concentration_notes:
+            degradation.append(PORTFOLIO_DIVERSITY_SKIPPED_NOTE)
 
     # 10. Trim to max_output
     picks = picks[:output_count]
@@ -555,6 +653,12 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             lower_low_count=_safe_int(row.get("lower_low_count")),
             bottom_divergence=_safe_bool(row.get("bottom_divergence")),
             lifecycle_reasons=list(row.get("lifecycle_reasons") or []),
+            volatility_20d_pct=_safe_float(row.get("volatility_20d_pct")),
+            max_drawdown_20d_pct=_safe_float(row.get("max_drawdown_20d_pct")),
+            atr_20_pct=_safe_float(row.get("atr_20_pct")),
+            daily_quality_score=_safe_float(row.get("daily_quality_score")),
+            daily_quality_flags=_safe_text(row.get("daily_quality_flags")),
+            daily_source=_safe_text(row.get("daily_source")),
             factor_scores=factor_scores,
         ))
     return picks
@@ -585,12 +689,38 @@ def _sort_screened_candidates(df: pd.DataFrame, screening=None) -> pd.DataFrame:
     return df.sort_values(sort_columns, ascending=ascending, kind="mergesort")
 
 
+def _screening_daily_cache_kwargs(config: Config, market: str) -> dict[str, object]:
+    """Daily-history cache settings for screening.
+
+    After the latest close has settled, a history fetched since then that
+    reaches that session cannot change before the next open, so it is
+    reused. During the session (and just before the open) nothing is read
+    as fresh or written: a partial-day bar must not reach evaluation, which
+    shares the cache. If every source fails, the last cached history is
+    still used, flagged ``stale_cache``. Called per fetch, so a batch that
+    runs across the open switches over.
+    """
+    if config.daily_history_cache_dir is None:
+        return {"cache_dir": None}
+    settled = latest_settled_close(market)
+    if settled is None:
+        return {"cache_dir": config.daily_history_cache_dir, "cache_ttl_seconds": 0.0, "cache_write": False}
+    session, elapsed = settled
+    return {
+        "cache_dir": config.daily_history_cache_dir,
+        "cache_ttl_seconds": min(elapsed, float(config.daily_history_cache_ttl_hours) * 3600.0),
+        "cache_min_last_date": session,
+    }
+
+
 def _required_snapshot_columns(filters) -> list[str]:
     columns: list[str] = []
     if filters.exclude_st:
         columns.append("name")
     if filters.amount_min is not None:
         columns.append("amount")
+    if filters.avg_amount_usd_min is not None:
+        columns.append("avg_amount_usd")
     if filters.price_min is not None or filters.price_max is not None:
         columns.append("price")
     if filters.market_cap_min is not None or filters.market_cap_max is not None:
@@ -621,5 +751,85 @@ def _event_source_weights(event_profile: dict[str, object]) -> dict[str, float] 
     return result or None
 
 
+def _daily_source_health_notes(health: dict[str, object], *, limit: int = 4) -> list[str]:
+    source_states: list[tuple[tuple[int, float, float, str], str, dict[object, object]]] = []
+    for source, raw_state in health.items():
+        if not isinstance(raw_state, dict):
+            continue
+        failures = _safe_float(raw_state.get("failures")) or 0.0
+        total_failures = _safe_float(raw_state.get("total_failures")) or 0.0
+        disabled = bool(raw_state.get("disabled"))
+        if not disabled and failures <= 0 and total_failures <= 0:
+            continue
+        severity_key = (
+            0 if disabled else 1 if failures > 0 else 2,
+            -failures,
+            -total_failures,
+            str(source),
+        )
+        source_states.append((severity_key, str(source), raw_state))
+
+    notes: list[str] = []
+    for _severity_key, source, raw_state in sorted(source_states):
+        failures = _safe_float(raw_state.get("failures")) or 0.0
+        total_failures = _safe_float(raw_state.get("total_failures")) or 0.0
+        disabled = bool(raw_state.get("disabled"))
+        last_rows = _safe_float(raw_state.get("last_rows")) or 0.0
+        parts: list[str] = []
+        if disabled:
+            parts.append("disabled")
+        if failures > 0:
+            parts.append(f"failures={failures:g}")
+        elif total_failures > 0:
+            parts.append(f"total_failures={total_failures:g}")
+        if last_rows > 0:
+            parts.append(f"last_rows={last_rows:g}")
+        if parts:
+            notes.append(f"{source} " + ",".join(parts))
+        if len(notes) >= limit:
+            break
+    hidden_count = len(source_states) - len(notes)
+    if hidden_count > 0:
+        notes.append(f"+{hidden_count} more")
+    return notes
+
+
+def _format_filter_waterfall(steps: list[dict[str, object]], *, limit: int = 8) -> str:
+    parts: list[str] = []
+    for step in steps[:limit]:
+        text = (
+            f"{step.get('filter')} {step.get('before')}->{step.get('after')} "
+            f"removed={step.get('removed')}"
+        )
+        samples = step.get("samples")
+        if isinstance(samples, list) and samples:
+            sample_names = [
+                str(item.get("name") or item.get("code") or item.get("value") or "")
+                for item in samples
+                if isinstance(item, dict)
+            ]
+            sample_names = [item for item in sample_names if item]
+            if sample_names:
+                text += f" samples={','.join(sample_names[:3])}"
+        if step.get("suggestion"):
+            text += f" next={step.get('suggestion')}"
+        parts.append(text)
+    hidden = len(steps) - len(parts)
+    if hidden > 0:
+        parts.append(f"+{hidden} more")
+    return "; ".join(parts)
+
+
 def _safe_text(v: object) -> str:
     return safe_text(v, max_len=120)
+
+
+_INDUSTRY_BACKFILL_MIN_COVERAGE = 0.5
+
+
+def _industry_coverage(df: pd.DataFrame) -> float:
+    """Share of snapshot rows that carry a non-empty industry label."""
+    if df.empty or "industry" not in df.columns:
+        return 0.0
+    labels = df["industry"].fillna("").astype(str).str.strip()
+    return float((labels != "").mean())

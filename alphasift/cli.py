@@ -12,7 +12,9 @@ from pathlib import Path
 
 from alphasift.audit import audit_project
 from alphasift.config import Config
-from alphasift.evaluate import evaluate_saved_run, evaluate_saved_runs
+from alphasift.doctor import doctor_data_sources, write_doctor_report
+from alphasift.dsa import check_dsa_readiness
+from alphasift.evaluate import evaluate_saved_run, evaluate_saved_runs, evaluate_saved_runs_by_windows
 from alphasift.hotspot import (
     append_hotspot_history,
     discover_hotspots,
@@ -21,15 +23,30 @@ from alphasift.hotspot import (
     save_hotspots_json,
 )
 from alphasift.industry import fetch_akshare_board_map, save_industry_map
+from alphasift.overview import build_overview
+from alphasift.performance_history import build_strategy_performance_summary
 from alphasift.pipeline import screen
+from alphasift.report import (
+    build_run_report_payload,
+    render_run_report_markdown,
+    report_payload_to_json,
+    write_run_report,
+)
+from alphasift.server import serve_api
 from alphasift.store import (
     evaluation_result_to_jsonl,
     list_saved_runs,
+    load_screen_result,
     save_evaluation_result,
     save_screen_result,
     screen_result_to_jsonl,
 )
-from alphasift.strategy import list_strategies
+from alphasift.strategy import compare_strategies, list_strategies, match_strategies
+from alphasift.strategy_templates import (
+    get_strategy_template,
+    list_strategy_templates,
+    render_strategy_template,
+)
 
 
 def main():
@@ -49,7 +66,10 @@ def main():
     # screen
     sp = sub.add_parser("screen", help="执行选股")
     sp.add_argument("strategy", help="策略名称")
-    sp.add_argument("--market", default="cn")
+    sp.add_argument(
+        "--market", default="cn",
+        help="市场：cn（A 股）、us、hk、jp、kr、tw、in；非 A 股通过 Yahoo 筛选器获取快照",
+    )
     sp.add_argument("--max-output", type=int, default=None)
     sp.add_argument("--no-llm", action="store_true", help="不使用 LLM 排序")
     sp.add_argument(
@@ -140,6 +160,7 @@ def main():
         default=None,
         help="日 K 增强最多处理的候选数",
     )
+    sp.add_argument("--explain-filters", action="store_true", help="输出 hard filter waterfall 诊断")
     sp.add_argument("--save-run", action="store_true", help="保存本次运行到 ALPHASIFT_DATA_DIR/runs")
     sp.add_argument("--output", default=None, help="额外写出结果到指定路径")
     sp.add_argument("--jsonl", action="store_true", help="以 JSONL 输出")
@@ -151,7 +172,28 @@ def main():
     cross.add_argument("--output", required=True)
 
     # strategies
-    sub.add_parser("strategies", help="列出可用策略")
+    stp = sub.add_parser("strategies", help="列出可用策略")
+    stp.add_argument("--json", action="store_true", help="以 JSON 输出完整策略目录元数据")
+    stp.add_argument("--explain", action="store_true", help="输出包含数据依赖和主要因子的可读策略目录")
+    stp.add_argument("--compare", nargs=2, metavar=("BASE", "TARGET"), help="对比两套策略的风格、依赖、硬筛和权重")
+    stp.add_argument("--templates", action="store_true", help="列出可复用的策略编写模板")
+    stp.add_argument("--template", default=None, help="输出指定策略模板 YAML")
+    stp.add_argument("--risk-profile", default=None, help="按风险风格匹配：defensive / balanced / aggressive")
+    stp.add_argument("--holding-period", default=None, help="按持有周期匹配：short_term / swing / watchlist")
+    stp.add_argument("--execution-style", default=None, help="按执行风格匹配，例如 mean_reversion / breakout")
+    stp.add_argument("--market-regime", action="append", default=None, help="按行情环境匹配，可重复或逗号分隔")
+    stp.add_argument("--capital-profile", default=None, help="按流动性/容量风格匹配")
+    stp.add_argument("--data-requirement", action="append", default=None, help="按数据依赖匹配，可重复或逗号分隔")
+    stp.add_argument("--tag", action="append", default=None, help="按策略标签匹配，可重复或逗号分隔")
+    stp.add_argument("--category", default=None, help="按策略分类匹配")
+    stp.add_argument(
+        "--daily-required",
+        choices=["any", "true", "false"],
+        default="any",
+        help="按是否依赖日 K 特征匹配",
+    )
+    stp.add_argument("--strict", action="store_true", help="只返回满足全部匹配条件的策略")
+    stp.add_argument("--limit", type=int, default=None, help="最多返回 N 个策略匹配结果")
 
     # evaluate
     ep = sub.add_parser("evaluate", help="用最新快照评估已保存的选股结果")
@@ -170,6 +212,7 @@ def main():
     ebp = sub.add_parser("evaluate-batch", help="批量评估最近保存的选股结果并按策略聚合")
     ebp.add_argument("--limit", type=int, default=20, help="最多评估最近 N 个 run")
     ebp.add_argument("--strategy", default=None, help="只评估指定策略")
+    ebp.add_argument("--market", default="cn", help="只评估指定市场的 run（cn / us / hk / jp / kr / tw / in），批量共用一个快照，市场必须一致")
     ebp.add_argument("--output", default=None, help="额外写出批量评估 JSON 到指定路径")
     ebp.add_argument("--json", action="store_true", help="以 JSON 输出")
     ebp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
@@ -178,10 +221,86 @@ def main():
     ebp.add_argument("--failed-breakout-pct", type=float, default=None, help="突破失败判定的最高收益百分比")
     ebp.add_argument("--with-price-path", action="store_true", help="额外抓取日 K 路径，计算最大回撤和最大浮盈")
     ebp.add_argument("--price-path-lookback-days", type=int, default=None, help="价格路径日 K 回看天数")
+    ebp.add_argument("--failure-samples", type=int, default=5, help="失败样本复盘最多展示 N 条，0 表示只输出聚合")
+
+    # performance
+    pp = sub.add_parser("performance", help="汇总已保存 evaluation 的策略后验表现")
+    pp.add_argument("--limit", type=int, default=100, help="最多读取最近 N 个已保存 evaluation")
+    pp.add_argument("--strategy", default=None, help="只汇总指定策略")
+    pp.add_argument("--json", action="store_true", help="以 JSON 输出")
+    pp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
+
+    # evaluate-strategies
+    esp = sub.add_parser("evaluate-strategies", help="生成策略级评估 summary")
+    esp.add_argument("--limit", type=int, default=20, help="最多评估最近 N 个 run")
+    esp.add_argument("--strategy", default=None, help="只评估指定策略")
+    esp.add_argument("--market", default="cn", help="只评估指定市场的 run（cn / us / hk / jp / kr / tw / in），批量共用一个快照，市场必须一致")
+    esp.add_argument("--output", default=None, help="额外写出策略评估 JSON 到指定路径")
+    esp.add_argument("--json", action="store_true", help="以 JSON 输出")
+    esp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
+    esp.add_argument("--cost-bps", type=float, default=None, help="评估收益扣除的往返成本，单位 bps")
+    esp.add_argument("--follow-through-pct", type=float, default=None, help="突破延续判定的最低收益百分比")
+    esp.add_argument("--failed-breakout-pct", type=float, default=None, help="突破失败判定的最高收益百分比")
+    esp.add_argument("--with-price-path", action="store_true", help="额外抓取日 K 路径，计算最大回撤和最大浮盈")
+    esp.add_argument("--price-path-lookback-days", type=int, default=None, help="价格路径日 K 回看天数")
+    esp.add_argument("--failure-samples", type=int, default=5, help="失败样本复盘最多展示 N 条，0 表示只输出聚合")
+    esp.add_argument(
+        "--window",
+        default=None,
+        help=(
+            "逗号分隔的 T+N 交易日窗口，例如 5,10,20：按入场后第 N 个交易日收盘计算收益，"
+            "并与所在市场基准指数同期收益对比；未满 N 日的记为 pending。和 --price-path-lookback-days 互斥"
+        ),
+    )
 
     # runs
     rp = sub.add_parser("runs", help="列出已保存的运行")
     rp.add_argument("--limit", type=int, default=20)
+    rp.add_argument("--strategy", default=None, help="只列出指定策略的运行")
+    rp.add_argument("--json", action="store_true", help="以 JSON 输出完整运行元数据")
+
+    # overview
+    op = sub.add_parser("overview", help="输出 UI/agent 总览：策略、数据源健康和最近运行")
+    op.add_argument("--strategy", default=None, help="聚焦指定策略，同时过滤最近运行")
+    op.add_argument("--runs-limit", type=int, default=5, help="最近运行最多返回 N 条")
+    op.add_argument("--live-data-check", action="store_true", help="执行真实数据源 smoke check；默认只读健康状态")
+    op.add_argument("--risk-profile", default=None, help="推荐策略风险风格：defensive / balanced / aggressive")
+    op.add_argument("--holding-period", default=None, help="推荐策略持有周期：short_term / swing / watchlist")
+    op.add_argument("--execution-style", default=None, help="推荐策略执行风格，例如 mean_reversion / breakout")
+    op.add_argument("--market-regime", action="append", default=None, help="推荐策略行情环境，可重复或逗号分隔")
+    op.add_argument("--capital-profile", default=None, help="推荐策略流动性/容量风格")
+    op.add_argument("--data-requirement", action="append", default=None, help="推荐策略数据依赖，可重复或逗号分隔")
+    op.add_argument("--tag", action="append", default=None, help="推荐策略标签，可重复或逗号分隔")
+    op.add_argument("--category", default=None, help="推荐策略分类")
+    op.add_argument(
+        "--daily-required",
+        choices=["any", "true", "false"],
+        default="any",
+        help="按是否依赖日 K 特征推荐策略",
+    )
+    op.add_argument("--strict", action="store_true", help="只推荐满足全部策略偏好的候选")
+    op.add_argument("--match-limit", type=int, default=5, help="最多返回 N 个策略推荐")
+    op.add_argument("--output", default=None, help="额外写出 overview JSON")
+    op.add_argument("--json", action="store_true", help="以 JSON 输出")
+    op.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
+
+    # serve
+    svp = sub.add_parser("serve", help="启动只读本地 JSON API，供 UI/agent 消费")
+    svp.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
+    svp.add_argument("--port", type=int, default=8765, help="监听端口，默认 8765")
+
+    # report
+    rep = sub.add_parser("report", help="把已保存运行生成为 Markdown/JSON 报告")
+    rep.add_argument("run", help="run_id 或保存的 run JSON 文件路径")
+    rep.add_argument("--output", default=None, help="写出报告路径；默认打印到 stdout")
+    rep.add_argument("--json", action="store_true", help="输出 UI/agent 可消费的 JSON payload")
+    rep.add_argument("--max-picks", type=int, default=10, help="报告中最多展示前 N 只候选")
+    rep.add_argument("--evaluate", action="store_true", help="生成报告前附带最新 T+N 评估")
+    rep.add_argument("--cost-bps", type=float, default=None, help="评估收益扣除的往返成本，单位 bps")
+    rep.add_argument("--follow-through-pct", type=float, default=None, help="突破延续判定的最低收益百分比")
+    rep.add_argument("--failed-breakout-pct", type=float, default=None, help="突破失败判定的最高收益百分比")
+    rep.add_argument("--with-price-path", action="store_true", help="附带评估时抓取日 K 路径")
+    rep.add_argument("--price-path-lookback-days", type=int, default=None, help="价格路径日 K 回看天数")
 
     # industry-cache
     icp = sub.add_parser("industry-cache", help="刷新行业/概念映射缓存文件")
@@ -222,6 +341,32 @@ def main():
     # audit
     ap = sub.add_parser("audit", help="评估项目能力、策略配置覆盖和已知短板")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出")
+
+    # doctor
+    dp = sub.add_parser("doctor", help="诊断运行环境和数据源")
+    doctor_sub = dp.add_subparsers(dest="doctor_command")
+    dsp = doctor_sub.add_parser("data-sources", help="诊断 snapshot / daily 数据源状态")
+    dsp.add_argument("--snapshot-source", action="append", default=None, help="snapshot 来源，可重复或逗号分隔")
+    dsp.add_argument("--daily-source", default=None, help="daily K 来源，默认使用 DAILY_SOURCE/config")
+    dsp.add_argument("--daily-code", default="000001", help="daily K smoke test 股票代码，默认 000001；非 A 股默认用该市场的代表性股票")
+    dsp.add_argument(
+        "--market", default=None,
+        help="诊断的市场：cn / us / hk / jp / kr / tw / in；默认 cn，若 --strategy 不支持 cn 则取其第一个市场",
+    )
+    dsp.add_argument("--strategy", default=None, help="按指定策略的必需 snapshot/daily 字段做数据源预检")
+    dsp.add_argument("--all-strategies", action="store_true", help="按所有策略的字段并集做数据源覆盖矩阵")
+    dsp.add_argument("--compare-snapshot-sources", action="store_true", help="逐个检查 snapshot 源字段覆盖和代码交集")
+    dsp.add_argument("--no-live", action="store_true", help="只输出配置和内存 health，不发起网络取数")
+    dsp.add_argument("--no-daily", action="store_true", help="跳过 daily K smoke test")
+    dsp.add_argument("--output", default=None, help="额外写出 JSON 诊断报告")
+    dsp.add_argument("--json", action="store_true", help="以 JSON 输出")
+    dsp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
+    drp = doctor_sub.add_parser("dsa-readiness", help="诊断可选 DSA 分析服务可用性")
+    drp.add_argument("--api-url", default=None, help="DSA base URL 或 analyze endpoint；默认读取 DSA_API_URL")
+    drp.add_argument("--timeout-sec", type=float, default=5.0, help="readiness probe 超时秒数")
+    drp.add_argument("--output", default=None, help="额外写出 JSON 诊断报告")
+    drp.add_argument("--json", action="store_true", help="以 JSON 输出")
+    drp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
 
     # quickstart
     qp = sub.add_parser(
@@ -267,6 +412,7 @@ def main():
             post_analysis_max_picks=args.post_analysis_max_picks,
             daily_enrich=args.daily_enrich,
             daily_enrich_max_candidates=args.daily_enrich_max_candidates,
+            explain_filters=args.explain_filters,
             deep_analysis=args.deep_analysis,
             deep_analysis_max_picks=args.deep_analysis_max_picks,
             config=config,
@@ -283,13 +429,78 @@ def main():
             print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
 
     elif args.command == "strategies":
-        for s in list_strategies():
-            tags = ",".join(s.tags)
-            suffix = f" tags={tags}" if tags else ""
-            print(
-                f"  {s.name:<25} {s.display_name:<10} "
-                f"v{s.version:<5} [{s.category}] {s.description}{suffix}"
+        if args.templates and args.template:
+            parser.error("--templates cannot be combined with --template")
+        if args.templates:
+            templates = list_strategy_templates()
+            if args.json:
+                print(json.dumps(templates, ensure_ascii=False, indent=2))
+            elif args.explain:
+                print(_format_strategy_templates_explain(templates))
+            else:
+                for item in templates:
+                    tags = ",".join(str(value) for value in item.get("tags", []) or [])
+                    suffix = f" tags={tags}" if tags else ""
+                    print(
+                        f"  {str(item.get('name', '')):<28} {str(item.get('display_name', '')):<10} "
+                        f"[{str(item.get('category', '-'))}] {str(item.get('description', ''))}{suffix}"
+                    )
+        elif args.template:
+            try:
+                template = get_strategy_template(args.template, include_yaml=True)
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.json:
+                print(json.dumps(template, ensure_ascii=False, indent=2))
+            elif args.explain:
+                print(_format_strategy_template_explain(template))
+            else:
+                print(render_strategy_template(args.template), end="")
+        elif args.compare:
+            try:
+                payload = compare_strategies(args.compare[0], args.compare[1])
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(_format_strategy_compare_explain(payload))
+        elif _has_strategy_match_args(args):
+            criteria = _strategy_match_criteria_from_args(args)
+            matches = match_strategies(
+                risk_profile=args.risk_profile or "",
+                holding_period=args.holding_period or "",
+                execution_style=args.execution_style or "",
+                market_regime=_split_csv_args(args.market_regime) or [],
+                capital_profile=args.capital_profile or "",
+                data_requirements=_split_csv_args(args.data_requirement) or [],
+                tags=_split_csv_args(args.tag) or [],
+                category=args.category or "",
+                daily_required=_parse_daily_required(args.daily_required),
+                strict=args.strict,
+                limit=args.limit,
             )
+            if args.json:
+                print(json.dumps(matches, ensure_ascii=False, indent=2))
+            elif args.explain:
+                print(_format_strategy_matches_explain(matches, criteria=criteria))
+            else:
+                for item in matches:
+                    print(_format_strategy_match_line(item))
+        else:
+            strategies = list_strategies()
+            if args.json:
+                print(json.dumps([asdict(item) for item in strategies], ensure_ascii=False, indent=2))
+            elif args.explain:
+                print(_format_strategies_explain(strategies))
+            else:
+                for s in strategies:
+                    tags = ",".join(s.tags)
+                    suffix = f" tags={tags}" if tags else ""
+                    print(
+                        f"  {s.name:<25} {s.display_name:<10} "
+                        f"v{s.version:<5} [{s.category}] {s.description}{suffix}"
+                    )
 
     elif args.command == "evaluate":
         config = Config.from_env()
@@ -319,6 +530,7 @@ def main():
             config=config,
             limit=args.limit,
             strategy=args.strategy,
+            market=args.market,
             cost_bps=args.cost_bps,
             follow_through_pct=args.follow_through_pct,
             failed_breakout_pct=args.failed_breakout_pct,
@@ -336,13 +548,149 @@ def main():
         else:
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
+    elif args.command == "performance":
+        config = Config.from_env()
+        payload = build_strategy_performance_summary(
+            data_dir=config.data_dir,
+            limit=args.limit,
+            strategy=args.strategy,
+        )
+        if args.explain and not args.json:
+            print(_format_performance_summary_explain(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    elif args.command == "evaluate-strategies":
+        config = Config.from_env()
+        try:
+            windows = _parse_window_list(args.window)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if windows and args.price_path_lookback_days is not None:
+            parser.error("--window is incompatible with --price-path-lookback-days for this command")
+
+        if windows:
+            result = evaluate_saved_runs_by_windows(
+                windows=windows,
+                config=config,
+                limit=args.limit,
+                strategy=args.strategy,
+                market=args.market,
+                cost_bps=args.cost_bps,
+                follow_through_pct=args.follow_through_pct,
+                failed_breakout_pct=args.failed_breakout_pct,
+                failure_sample_limit=args.failure_samples,
+            )
+        else:
+            result = evaluate_saved_runs(
+                config=config,
+                limit=args.limit,
+                strategy=args.strategy,
+                market=args.market,
+                cost_bps=args.cost_bps,
+                follow_through_pct=args.follow_through_pct,
+                failed_breakout_pct=args.failed_breakout_pct,
+                with_price_path=args.with_price_path or None,
+                price_path_lookback_days=args.price_path_lookback_days,
+                failure_sample_limit=args.failure_samples,
+            )
+        payload = {
+            "evaluated_at": result.get("evaluated_at"),
+            "snapshot_source": result.get("snapshot_source"),
+            "source_errors": result.get("source_errors", []),
+            "limit": result.get("limit"),
+            "strategy_filter": result.get("strategy_filter", ""),
+            "cost_bps": result.get("cost_bps"),
+            "with_price_path": result.get("with_price_path"),
+            "price_path_window_days": result.get("price_path_window_days", []),
+            "strategy_summaries": result.get("strategy_summaries", []),
+            "event_signal_review": result.get("event_signal_review", {}),
+            "failure_review": result.get("failure_review", {}),
+        }
+        if result.get("window_reviews"):
+            payload["review_window_days"] = result.get("review_window_days")
+            payload["window_reviews"] = result.get("window_reviews", [])
+        if args.output:
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.output).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        if args.explain or not args.json:
+            print(_format_evaluate_strategies_explain(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+
     elif args.command == "runs":
         config = Config.from_env()
-        for item in list_saved_runs(data_dir=config.data_dir, limit=args.limit):
+        runs = list_saved_runs(data_dir=config.data_dir, limit=args.limit, strategy=args.strategy)
+        if args.json:
+            print(json.dumps(runs, ensure_ascii=False, indent=2))
+            return
+        for item in runs:
             print(
                 f"{item['run_id']:<14} {item['strategy']:<20} "
-                f"{item['created_at']:<26} picks={item['picks']} {item['path']}"
+                f"v{item.get('strategy_version') or '-':<5} "
+                f"{item['created_at']:<26} picks={item['picks']} "
+                f"source={item.get('snapshot_source') or '-'} "
+                f"daily={item.get('daily_enriched')} "
+                f"degraded={item.get('degradation_count', 0)} "
+                f"{item['path']}"
             )
+
+    elif args.command == "overview":
+        config = Config.from_env()
+        payload = build_overview(
+            config,
+            strategy_name=args.strategy,
+            runs_limit=args.runs_limit,
+            live_data_check=args.live_data_check,
+            strategy_match=_overview_strategy_match_from_args(args),
+            match_limit=args.match_limit,
+        )
+        if args.output:
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.output).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        if args.explain:
+            print(_format_overview_explain(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    elif args.command == "serve":
+        config = Config.from_env()
+        serve_api(config, host=args.host, port=args.port)
+
+    elif args.command == "report":
+        config = Config.from_env()
+        try:
+            run = load_screen_result(args.run, data_dir=config.data_dir)
+        except FileNotFoundError as exc:
+            parser.error(str(exc))
+        evaluation = None
+        if args.evaluate:
+            evaluation = evaluate_saved_run(
+                args.run,
+                config=config,
+                cost_bps=args.cost_bps,
+                follow_through_pct=args.follow_through_pct,
+                failed_breakout_pct=args.failed_breakout_pct,
+                with_price_path=args.with_price_path or None,
+                price_path_lookback_days=args.price_path_lookback_days,
+            )
+        payload = build_run_report_payload(
+            run,
+            evaluation=evaluation,
+            max_picks=args.max_picks,
+        )
+        if args.output:
+            write_run_report(args.output, payload, json_output=args.json)
+        elif args.json:
+            print(report_payload_to_json(payload))
+        else:
+            print(render_run_report_markdown(payload), end="")
 
     elif args.command == "industry-cache":
         mapping, notes = fetch_akshare_board_map(max_boards=args.max_boards)
@@ -470,6 +818,45 @@ def main():
         else:
             print(_format_audit_explain(result))
 
+    elif args.command == "doctor":
+        config = Config.from_env()
+        if args.doctor_command == "data-sources":
+            try:
+                result = doctor_data_sources(
+                    config,
+                    snapshot_sources=_split_csv_args(args.snapshot_source) or None,
+                    daily_source=args.daily_source,
+                    daily_code=args.daily_code,
+                    run_live=not args.no_live,
+                    check_daily=not args.no_daily,
+                    strategy_name=args.strategy,
+                    all_strategies=args.all_strategies,
+                    compare_snapshot_sources=args.compare_snapshot_sources,
+                    market=args.market,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.output:
+                write_doctor_report(args.output, result)
+            if args.json or not args.explain:
+                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                print(_format_data_sources_doctor_explain(result.to_dict()))
+        elif args.doctor_command == "dsa-readiness":
+            result = check_dsa_readiness(
+                args.api_url if args.api_url is not None else config.dsa_api_url,
+                timeout_sec=args.timeout_sec,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            if args.json or not args.explain:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(_format_dsa_readiness_explain(result))
+        else:
+            parser.error("doctor requires a subcommand, e.g. doctor data-sources")
+
     elif args.command == "quickstart":
         _run_quickstart(strategy=args.strategy, max_output=args.max_output)
 
@@ -532,6 +919,449 @@ def _run_quickstart(*, strategy: str = "dual_low", max_output: int = 5) -> None:
     print("   alphasift screen <strategy> --save-run    # 保存运行")
     print("   alphasift evaluate <run_id> --explain     # T+N 评估")
     print("   alphasift strategies                      # 完整策略列表")
+
+
+def _overview_strategy_match_from_args(args) -> dict[str, object]:
+    daily_required = _parse_daily_required(args.daily_required)
+    return {
+        "risk_profile": args.risk_profile or "",
+        "holding_period": args.holding_period or "",
+        "execution_style": args.execution_style or "",
+        "market_regime": _split_csv_args(args.market_regime) or [],
+        "capital_profile": args.capital_profile or "",
+        "data_requirements": _split_csv_args(args.data_requirement) or [],
+        "tags": _split_csv_args(args.tag) or [],
+        "category": args.category or "",
+        "daily_required": daily_required,
+        "strict": bool(args.strict),
+    }
+
+
+def _format_overview_explain(payload: dict) -> str:
+    summary = payload.get("summary", {}) or {}
+    data_sources = payload.get("data_sources", {}) or {}
+    health = data_sources.get("health_summary", {}) or {}
+    freshness = data_sources.get("freshness_summary", {}) or {}
+    lines = [
+        (
+            f"overview generated_at={payload.get('generated_at')} "
+            f"strategies={summary.get('strategy_count')} "
+            f"daily_strategies={summary.get('daily_strategy_count')} "
+            f"runs={summary.get('recent_run_count')} "
+            f"matches={summary.get('strategy_match_count')} "
+            f"data_status={summary.get('data_source_status')} "
+            f"live_check={summary.get('live_data_check')}"
+        ),
+    ]
+    if health.get("snapshot"):
+        lines.append(_format_source_health_summary("snapshot_health", health["snapshot"]))
+    if health.get("daily"):
+        lines.append(_format_source_health_summary("daily_health", health["daily"]))
+    if freshness:
+        lines.append(_format_freshness_summary(freshness))
+    source_history = payload.get("data_source_history") or {}
+    if source_history.get("run_count"):
+        lines.append(_format_data_source_history_summary(source_history))
+    performance = payload.get("performance_summary") or {}
+    if performance.get("evaluation_count"):
+        lines.append(_format_performance_summary_line(performance))
+    groups = payload.get("strategy_groups", {}) or {}
+    for title, key in (
+        ("categories", "by_category"),
+        ("risk_profiles", "by_risk_profile"),
+        ("holding_periods", "by_holding_period"),
+        ("data_requirements", "by_data_requirement"),
+    ):
+        group_text = _format_overview_groups(groups.get(key, []) or [])
+        if group_text:
+            lines.append(f"{title}={group_text}")
+    matches = payload.get("strategy_matches", []) or []
+    if matches:
+        lines.append("strategy_matches:")
+        for item in matches:
+            lines.append(_format_strategy_match_line(item))
+    runs = payload.get("recent_runs", []) or []
+    if runs:
+        lines.append("recent_runs:")
+        for item in runs:
+            lines.append(
+                f"- {item.get('run_id')} strategy={item.get('strategy')} "
+                f"picks={item.get('picks')} source={item.get('snapshot_source') or '-'} "
+                f"degraded={item.get('degradation_count', 0)}"
+            )
+    actions = payload.get("next_actions", []) or []
+    if actions:
+        lines.append("next_actions=" + " | ".join(str(item) for item in actions))
+    return "\n".join(lines)
+
+
+def _format_overview_groups(groups: list[dict[str, object]], *, limit: int = 6) -> str:
+    if not groups:
+        return ""
+    shown = groups[:limit]
+    text = ",".join(f"{item.get('name')}:{item.get('count')}" for item in shown)
+    if len(groups) > limit:
+        text += f",+{len(groups) - limit}"
+    return text
+
+
+def _format_data_source_history_summary(summary: dict) -> str:
+    values = summary.get("summary") or {}
+    watchlist = summary.get("watchlist") or []
+    return (
+        "source_history="
+        f"runs={summary.get('run_count', 0)} "
+        f"sources={summary.get('source_count', 0)} "
+        f"status={values.get('stability_status', 'unknown')} "
+        f"score={values.get('stability_score', '-')} "
+        f"source_error_rate={values.get('source_error_rate', 0.0)} "
+        f"degradation_rate={values.get('degradation_rate', 0.0)} "
+        f"fallback_rate={values.get('fallback_rate', 0.0)} "
+        f"watchlist={len(watchlist)}"
+    )
+
+
+def _format_performance_summary_line(payload: dict) -> str:
+    values = payload.get("summary") or {}
+    leaderboard = payload.get("leaderboard") or []
+    return (
+        "performance="
+        f"evaluations={payload.get('evaluation_count', 0)} "
+        f"strategies={payload.get('strategy_count', 0)} "
+        f"outcome={values.get('outcome', 'insufficient_data')} "
+        f"score={_display_value(values.get('performance_score'))} "
+        f"avg_return={_display_value(values.get('average_return_pct'))} "
+        f"win_rate={_display_value(values.get('win_rate'))} "
+        f"leaderboard={len(leaderboard)}"
+    )
+
+
+def _format_performance_summary_explain(payload: dict) -> str:
+    lines = [_format_performance_summary_line(payload)]
+    rows = payload.get("leaderboard") or []
+    if rows:
+        lines.append("performance_leaderboard strategy evals score outcome avg_return win_rate latest_run")
+        for item in rows[:10]:
+            lines.append(
+                f"  {item.get('strategy')} "
+                f"{item.get('evaluation_count', 0)} "
+                f"{_display_value(item.get('performance_score'))} "
+                f"{item.get('outcome', '-')} "
+                f"{_display_value(item.get('average_return_pct'))} "
+                f"{_display_value(item.get('win_rate'))} "
+                f"{item.get('latest_run_id', '-')}"
+            )
+    actions = (payload.get("summary") or {}).get("next_actions") or []
+    if actions:
+        lines.append("performance_next_actions=" + " | ".join(str(item) for item in actions))
+    return "\n".join(lines)
+
+
+def _display_value(value: object) -> object:
+    return "-" if value is None else value
+
+
+def _format_strategies_explain(strategies) -> str:
+    lines = [f"strategies={len(strategies)}"]
+    for strategy in strategies:
+        factors = _format_top_factor_weights(strategy.factor_weights)
+        data = ",".join(strategy.data_requirements) or "-"
+        filters = ",".join(strategy.active_filters[:8]) or "-"
+        extra_filters = len(strategy.active_filters) - 8
+        if extra_filters > 0:
+            filters = f"{filters},+{extra_filters}"
+        profiles = ",".join(strategy.profile_keys) or "-"
+        tags = ",".join(strategy.tags) or "-"
+        style = _format_strategy_style(strategy.style)
+        required_fields = _format_required_strategy_fields(
+            strategy.required_snapshot_fields,
+            strategy.required_daily_fields,
+        )
+        lines.append(
+            f"{strategy.name:<24} v{strategy.version:<5} [{strategy.category:<9}] "
+            f"data={data:<32} daily_required={strategy.requires_daily_features!s:<5} "
+            f"style={style:<40} factors={factors:<42} filters={filters} profiles={profiles} tags={tags}"
+        )
+        if required_fields:
+            lines.append(f"  required_fields={required_fields}")
+        lines.append(f"  {strategy.display_name}: {strategy.description}")
+    return "\n".join(lines)
+
+
+def _format_strategy_templates_explain(templates: list[dict[str, object]]) -> str:
+    lines = [f"strategy_templates={len(templates)}"]
+    for template in templates:
+        style = template.get("style", {})
+        if not isinstance(style, dict):
+            style = {}
+        tags = ",".join(str(value) for value in template.get("tags", []) or []) or "-"
+        data = ",".join(str(value) for value in template.get("data_requirements", []) or []) or "-"
+        lines.append(
+            f"{str(template.get('name', '')):<28} [{str(template.get('category', '-')):<9}] "
+            f"data={data:<28} style={_format_strategy_style(style):<40} tags={tags}"
+        )
+        lines.append(f"  {template.get('display_name')}: {template.get('description')}")
+        notes = template.get("notes", []) or []
+        for note in notes:
+            lines.append(f"  note={note}")
+    return "\n".join(lines)
+
+
+def _format_strategy_template_explain(template: dict[str, object]) -> str:
+    style = template.get("style", {})
+    if not isinstance(style, dict):
+        style = {}
+    data = ",".join(str(value) for value in template.get("data_requirements", []) or []) or "-"
+    lines = [
+        f"strategy_template={template.get('name')} display_name={template.get('display_name')}",
+        (
+            f"category={template.get('category')} data={data} "
+            f"style={_format_strategy_style(style)}"
+        ),
+        f"description={template.get('description')}",
+    ]
+    notes = template.get("notes", []) or []
+    for note in notes:
+        lines.append(f"note={note}")
+    lines.append("---")
+    lines.append(str(template.get("yaml") or ""))
+    return "\n".join(lines)
+
+
+def _format_strategy_compare_explain(payload: dict[str, object]) -> str:
+    base = payload.get("base", {}) or {}
+    target = payload.get("target", {}) or {}
+    summary = payload.get("summary", {}) or {}
+    differences = payload.get("differences", {}) or {}
+    lines = [
+        (
+            f"strategy_compare base={base.get('name')} v{base.get('version')} "
+            f"target={target.get('name')} v{target.get('version')} "
+            f"changed_sections={','.join(summary.get('changed_sections', []) or []) or '-'} "
+            f"change_count={summary.get('change_count', 0)}"
+        )
+    ]
+    notes = summary.get("compatibility_notes", []) or []
+    if notes:
+        lines.append("compatibility_notes=" + " | ".join(str(item) for item in notes))
+    for section in (
+        "identity",
+        "tags",
+        "style",
+        "data_requirements",
+        "required_snapshot_fields",
+        "required_daily_fields",
+        "active_filters",
+        "hard_filter_values",
+        "factor_weights",
+        "profile_keys",
+    ):
+        text = _format_diff_section(differences.get(section, {}))
+        if text:
+            lines.append(f"{section}: {text}")
+    return "\n".join(lines)
+
+
+def _format_diff_section(diff: object) -> str:
+    if not isinstance(diff, dict):
+        return ""
+    parts = []
+    for key in ("added", "removed"):
+        value = diff.get(key)
+        if value:
+            parts.append(f"{key}={_compact_diff_value(value)}")
+    changed = diff.get("changed")
+    if changed:
+        parts.append("changed=" + _compact_changed_values(changed))
+    nested_parts = []
+    for key, value in diff.items():
+        if key in {"added", "removed", "changed", "shared"}:
+            continue
+        if isinstance(value, dict):
+            nested = _format_diff_section(value)
+            if nested:
+                nested_parts.append(f"{key}[{nested}]")
+    parts.extend(nested_parts)
+    return " ".join(parts)
+
+
+def _compact_changed_values(changed: object, *, limit: int = 8) -> str:
+    if not isinstance(changed, dict):
+        return _compact_diff_value(changed)
+    items = []
+    for idx, (key, value) in enumerate(changed.items()):
+        if idx >= limit:
+            items.append(f"+{len(changed) - limit}")
+            break
+        if isinstance(value, dict) and "base" in value and "target" in value:
+            base = _compact_diff_value(value.get("base"))
+            target = _compact_diff_value(value.get("target"))
+            if "delta" in value:
+                items.append(f"{key}:{base}->{target}({value.get('delta'):+g})")
+            else:
+                items.append(f"{key}:{base}->{target}")
+        else:
+            items.append(f"{key}:{_compact_diff_value(value)}")
+    return ",".join(items)
+
+
+def _compact_diff_value(value: object, *, limit: int = 8) -> str:
+    if isinstance(value, list):
+        shown = [str(item) for item in value[:limit]]
+        if len(value) > limit:
+            shown.append(f"+{len(value) - limit}")
+        return ",".join(shown)
+    if isinstance(value, dict):
+        items = []
+        for idx, (key, item) in enumerate(value.items()):
+            if idx >= limit:
+                items.append(f"+{len(value) - limit}")
+                break
+            items.append(f"{key}:{item}")
+        return ",".join(items)
+    return str(value)
+
+
+def _has_strategy_match_args(args) -> bool:
+    return any((
+        bool(args.risk_profile),
+        bool(args.holding_period),
+        bool(args.execution_style),
+        bool(args.market_regime),
+        bool(args.capital_profile),
+        bool(args.data_requirement),
+        bool(args.tag),
+        bool(args.category),
+        args.daily_required != "any",
+        bool(args.strict),
+        args.limit is not None,
+    ))
+
+
+def _strategy_match_criteria_from_args(args) -> dict[str, object]:
+    criteria: dict[str, object] = {}
+    for attr in ("risk_profile", "holding_period", "execution_style", "capital_profile", "category"):
+        value = getattr(args, attr)
+        if value:
+            criteria[attr] = value
+    for attr, key in (
+        ("market_regime", "market_regime"),
+        ("data_requirement", "data_requirements"),
+        ("tag", "tags"),
+    ):
+        value = _split_csv_args(getattr(args, attr)) or []
+        if value:
+            criteria[key] = value
+    daily_required = _parse_daily_required(args.daily_required)
+    if daily_required is not None:
+        criteria["daily_required"] = daily_required
+    if args.strict:
+        criteria["strict"] = True
+    if args.limit is not None:
+        criteria["limit"] = args.limit
+    return criteria
+
+
+def _parse_daily_required(value: str) -> bool | None:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def _format_strategy_matches_explain(matches: list[dict[str, object]], *, criteria: dict[str, object]) -> str:
+    lines = [
+        f"strategy_matches={len(matches)} criteria={_format_match_criteria(criteria)}",
+    ]
+    if not matches:
+        return "\n".join(lines)
+    lines.append("score strategy category style data daily matched missing")
+    for item in matches:
+        lines.append(_format_strategy_match_line(item))
+    return "\n".join(lines)
+
+
+def _format_strategy_match_line(item: dict[str, object]) -> str:
+    style = item.get("style", {})
+    if not isinstance(style, dict):
+        style = {}
+    data = ",".join(str(value) for value in item.get("data_requirements", []) or []) or "-"
+    matched = _format_match_tokens(item.get("matched", []) or [])
+    missing = _format_match_tokens(item.get("missing", []) or [])
+    return (
+        f"{float(item.get('score', 0.0)):>4.1f} "
+        f"{str(item.get('name', '')):<24} "
+        f"{str(item.get('category', '-')):<9} "
+        f"style={_format_strategy_style(style):<40} "
+        f"data={data:<32} "
+        f"daily={str(item.get('requires_daily_features', False)):<5} "
+        f"matched={matched} missing={missing}"
+    )
+
+
+def _format_match_criteria(criteria: dict[str, object]) -> str:
+    if not criteria:
+        return "-"
+    parts = []
+    for key, value in criteria.items():
+        if isinstance(value, list):
+            value_text = ",".join(str(item) for item in value)
+        else:
+            value_text = str(value).lower() if isinstance(value, bool) else str(value)
+        parts.append(f"{key}={value_text}")
+    return ";".join(parts)
+
+
+def _format_match_tokens(values: object, *, limit: int = 6) -> str:
+    if not isinstance(values, list):
+        return "-"
+    shown = [str(item) for item in values[:limit]]
+    if not shown:
+        return "-"
+    suffix = f",+{len(values) - limit}" if len(values) > limit else ""
+    return ",".join(shown) + suffix
+
+
+def _format_top_factor_weights(weights: dict[str, float], *, limit: int = 4) -> str:
+    if not weights:
+        return "-"
+    ordered = sorted(weights.items(), key=lambda item: (-float(item[1]), item[0]))[:limit]
+    return ",".join(f"{name}:{float(value):.2f}" for name, value in ordered)
+
+
+def _format_strategy_style(style: dict[str, object]) -> str:
+    if not style:
+        return "-"
+    regime = ",".join(str(item) for item in style.get("market_regime", []) or [])
+    parts = [
+        str(style.get("risk_profile") or "-"),
+        str(style.get("holding_period") or "-"),
+        str(style.get("execution_style") or "-"),
+    ]
+    if regime:
+        parts.append(regime)
+    return "/".join(parts)
+
+
+def _format_required_strategy_fields(
+    snapshot_fields: list[str],
+    daily_fields: list[str],
+    *,
+    limit: int = 8,
+) -> str:
+    groups = []
+    if snapshot_fields:
+        groups.append(f"snapshot[{_format_limited_csv(snapshot_fields, limit=limit)}]")
+    if daily_fields:
+        groups.append(f"daily_k[{_format_limited_csv(daily_fields, limit=limit)}]")
+    return " ".join(groups)
+
+
+def _format_limited_csv(values: list[str], *, limit: int) -> str:
+    shown = values[:limit]
+    suffix = f",+{len(values) - limit}" if len(values) > limit else ""
+    return ",".join(shown) + suffix
 
 
 def _format_screen_explain(result) -> str:
@@ -633,6 +1463,9 @@ def _format_evaluation_batch_explain(result: dict) -> str:
     for title, key in (
         ("top_sectors", "by_sector"),
         ("top_themes", "by_theme"),
+        ("top_llm_catalysts", "by_llm_catalyst"),
+        ("top_llm_risks", "by_llm_risk"),
+        ("top_post_tags", "by_post_analysis_tag"),
         ("top_risk_flags", "by_risk_flag"),
         ("shape_status", "by_shape_status"),
         ("shape_tags", "by_shape_tag"),
@@ -642,7 +1475,217 @@ def _format_evaluation_batch_explain(result: dict) -> str:
         items = _top_dimension_items(dimensions.get(key, {}))
         if items:
             lines.append(f"{title}=" + " | ".join(items))
+    lines.extend(_format_event_signal_review_explain(result.get("event_signal_review", {})))
+    lines.extend(_format_failure_review_explain(result.get("failure_review", {})))
     return "\n".join(lines)
+
+
+def _format_evaluate_strategies_explain(result: dict) -> str:
+    lines = [
+        (
+            f"evaluated_at={result.get('evaluated_at')} "
+            f"source={result.get('snapshot_source') or '-'} "
+            f"limit={result.get('limit')} strategy_filter={result.get('strategy_filter') or '-'} "
+            f"price_path={result.get('with_price_path')} cost_bps={result.get('cost_bps')}"
+        ),
+    ]
+    if result.get("price_path_window_days"):
+        windows = ",".join(f"{item}d" for item in result.get("price_path_window_days", []))
+        lines.append(f"windows={windows}")
+    if result.get("strategy_summaries", []) and isinstance(result.get("strategy_summaries"), list):
+        sample = result["strategy_summaries"][0]
+        if isinstance(sample, dict) and sample.get("window_summaries") is not None:
+            lines.append(
+                "strategy windows T+N: ret=avg return, bench=benchmark, excess=ret-bench, "
+                "beat=% picks beating benchmark, win, dd, runup, pending, missing"
+            )
+        else:
+            lines.append(
+                "strategy runs picks avg_return median_return win_rate max_dd max_runup outcome shapes"
+            )
+    if result.get("source_errors"):
+        lines.append("source_errors=" + " | ".join(result["source_errors"]))
+    for item in result.get("strategy_summaries", []):
+        windows = item.get("window_summaries")
+        if windows:
+            line_parts = [
+                f"{item.get('strategy'):<20} "
+                f"{item.get('window_count', len(windows))!s:>3}w "
+            ]
+            for window in windows:
+                window_days = window.get("window_days", "-")
+                line_parts.append(
+                    (
+                        f"T+{window_days}:"
+                        f"ret={window.get('average_return_pct')!s} "
+                        f"bench={window.get('average_benchmark_return_pct')!s} "
+                        f"excess={window.get('average_excess_return_pct')!s} "
+                        + _format_partial_benchmark(window)
+                        + f"beat={window.get('beat_benchmark_rate')!s} "
+                        f"win={window.get('win_rate')!s} "
+                        f"dd={window.get('average_max_drawdown_pct')!s} "
+                        f"runup={window.get('average_max_runup_pct')!s} "
+                        f"f={window.get('failed_breakout_count', 0)} "
+                        f"t={window.get('breakout_follow_through_count', 0)} "
+                        f"pending={window.get('pending_count', 0)} "
+                        f"m={window.get('missing_count', 0)}"
+                        + (
+                            f" bench_error={window['benchmark_errors'][0]}"
+                            if window.get("benchmark_errors") else ""
+                        )
+                        + "; "
+                    )
+                )
+            lines.append("".join(line_parts).strip())
+        else:
+            shapes = item.get("shape_status_counts", {}) or {}
+            shape_text = ",".join(f"{name}:{count}" for name, count in sorted(shapes.items())) or "-"
+            lines.append(
+                f"{item.get('strategy'):<20} {item.get('run_count'):<4} {item.get('pick_count'):<5} "
+                f"{item.get('average_return_pct')!s:<10} {item.get('median_return_pct')!s:<13} "
+                f"{item.get('win_rate')!s:<8} {item.get('average_max_drawdown_pct')!s:<8} "
+                f"{item.get('average_max_runup_pct')!s:<9} {item.get('outcome'):<17} {shape_text}"
+            )
+    window_reviews = result.get("window_reviews")
+    if isinstance(window_reviews, list) and window_reviews:
+        for review in window_reviews:
+            if not isinstance(review, dict):
+                continue
+            lines.append(f"-- T+{review.get('window_days')} reviews --")
+            lines.extend(_format_event_signal_review_explain(review.get("event_signal_review", {}), limit=5))
+            lines.extend(_format_failure_review_explain(review.get("failure_review", {}), include_samples=False))
+        return "\n".join(lines)
+    lines.extend(_format_event_signal_review_explain(result.get("event_signal_review", {}), limit=5))
+    lines.extend(_format_failure_review_explain(result.get("failure_review", {}), include_samples=False))
+    return "\n".join(lines)
+
+
+def _format_partial_benchmark(window: dict) -> str:
+    """When only some picks have benchmark data, bench/excess cover just
+    those picks; show how many and their own average return."""
+    evaluated = int(window.get("evaluated_pick_count") or 0)
+    matched = int(window.get("benchmark_pick_count") or 0)
+    if not evaluated or matched >= evaluated:
+        return ""
+    return f"bench_n={matched}/{evaluated} matched_ret={window.get('average_matched_return_pct')!s} "
+
+
+def _format_event_signal_review_explain(
+    review: object,
+    *,
+    limit: int = 8,
+) -> list[str]:
+    if not isinstance(review, dict) or not review:
+        return []
+    summary = review.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+    lines = [
+        (
+            "event_signal_review "
+            f"signals={summary.get('signal_count', 0)} "
+            f"occurrences={summary.get('signal_occurrence_count', 0)} "
+            f"positive={summary.get('positive_signal_count', 0)} "
+            f"negative={summary.get('negative_signal_count', 0)} "
+            f"mixed={summary.get('mixed_signal_count', 0)} "
+            f"patches={summary.get('patch_suggestion_count', 0)}"
+        )
+    ]
+    signals = review.get("signals", [])
+    if isinstance(signals, list) and signals:
+        lines.append("event_signals signal action picks avg_return win_rate failures codes")
+        for item in signals[:limit]:
+            if not isinstance(item, dict):
+                continue
+            codes = ",".join(str(value) for value in item.get("sample_codes", [])[:3]) or "-"
+            lines.append(
+                f"{str(item.get('signal') or ''):<28} {str(item.get('action') or ''):<16} "
+                f"{item.get('pick_count')!s:<5} {item.get('average_return_pct')!s:<10} "
+                f"{item.get('win_rate')!s:<8} {item.get('failure_count')!s:<8} {codes}"
+            )
+    patch_suggestions = review.get("strategy_patch_suggestions", [])
+    if isinstance(patch_suggestions, list) and patch_suggestions:
+        lines.append("event_signal_strategy_patches strategy prefer avoid evidence")
+        for item in patch_suggestions[:limit]:
+            if not isinstance(item, dict):
+                continue
+            preferred = ",".join(str(value) for value in item.get("preferred_event_tags", [])[:3])
+            avoided = ",".join(str(value) for value in item.get("avoided_event_tags", [])[:3])
+            evidence_items = item.get("evidence", [])
+            if not isinstance(evidence_items, list):
+                evidence_items = []
+            evidence = ",".join(
+                str(value.get("signal", ""))
+                for value in evidence_items[:3]
+                if isinstance(value, dict)
+            )
+            lines.append(
+                f"{str(item.get('strategy') or ''):<20} "
+                f"{preferred or '-':<28} {avoided or '-':<32} {evidence or '-'}"
+            )
+    recommendations = review.get("recommendations", [])
+    if isinstance(recommendations, list) and recommendations:
+        lines.append("event_signal_next_actions=" + " | ".join(str(item) for item in recommendations))
+    return lines
+
+
+def _format_failure_review_explain(
+    review: object,
+    *,
+    include_samples: bool = True,
+) -> list[str]:
+    if not isinstance(review, dict) or not review:
+        return []
+    summary = review.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+    lines = [
+        (
+            "failure_review "
+            f"failures={summary.get('failure_count', 0)} "
+            f"shown={summary.get('shown_failure_count', 0)} "
+            f"negative={summary.get('negative_pick_count', 0)} "
+            f"missing={summary.get('missing_count', 0)} "
+            f"failed_breakout={summary.get('failed_breakout_count', 0)} "
+            f"severe_drawdown={summary.get('severe_drawdown_count', 0)} "
+            f"worst_return={summary.get('worst_return_pct')}"
+        )
+    ]
+    dimensions = review.get("dimensions", {})
+    if isinstance(dimensions, dict):
+        for title, key in (
+            ("failure_strategies", "by_strategy"),
+            ("failure_reasons", "by_failure_reason"),
+            ("failure_event_signals", "by_event_signal"),
+            ("failure_llm_risks", "by_llm_risk"),
+            ("failure_risk_flags", "by_risk_flag"),
+            ("failure_shapes", "by_shape_status"),
+        ):
+            items = _top_failure_dimension_items(dimensions.get(key, {}))
+            if items:
+                lines.append(f"{title}=" + " | ".join(items))
+    if include_samples:
+        samples = review.get("failure_samples", [])
+        if isinstance(samples, list) and samples:
+            lines.append("failure_samples run strategy rank code return status reasons")
+            for item in samples:
+                if not isinstance(item, dict):
+                    continue
+                reason_values = item.get("failure_reasons", [])
+                if not isinstance(reason_values, list):
+                    reason_values = []
+                reasons = ",".join(str(value) for value in reason_values[:4]) or "-"
+                ret = item.get("return_pct")
+                ret_text = "-" if ret is None else f"{float(ret):.2f}%"
+                lines.append(
+                    f"{str(item.get('run_id') or ''):<16} {str(item.get('strategy') or ''):<20} "
+                    f"{item.get('rank')!s:<4} {str(item.get('code') or ''):<8} "
+                    f"{ret_text:<8} {str(item.get('status') or ''):<10} {reasons}"
+                )
+    recommendations = review.get("recommendations", [])
+    if isinstance(recommendations, list) and recommendations:
+        lines.append("failure_next_actions=" + " | ".join(str(item) for item in recommendations))
+    return lines
 
 
 def _format_hotspots_explain(hotspots: list, *, provider: str = "") -> str:
@@ -747,6 +1790,31 @@ def _top_dimension_items(items: dict, *, limit: int = 5) -> list[str]:
     ]
 
 
+def _top_failure_dimension_items(items: object, *, limit: int = 5) -> list[str]:
+    if not isinstance(items, dict):
+        return []
+    ranked = sorted(
+        (
+            (str(label), stats)
+            for label, stats in items.items()
+            if isinstance(stats, dict)
+        ),
+        key=lambda item: (
+            -int(item[1].get("failure_count", 0) or 0),
+            item[1].get("worst_return_pct") is None,
+            float(item[1].get("worst_return_pct") or 0),
+            item[0],
+        ),
+    )
+    return [
+        (
+            f"{label}:n={stats.get('failure_count')},"
+            f"avg={stats.get('average_return_pct')},worst={stats.get('worst_return_pct')}"
+        )
+        for label, stats in ranked[:limit]
+    ]
+
+
 def _fmt_pct(value: float | None) -> str:
     return "-" if value is None else f"{float(value):.2f}%"
 
@@ -791,6 +1859,182 @@ def _format_audit_explain(result: dict) -> str:
     for item in result.get("next_priorities", []):
         lines.append(f"- {item}")
     return "\n".join(lines)
+
+
+def _format_data_sources_doctor_explain(result: dict) -> str:
+    snapshot = result.get("snapshot", {}) or {}
+    daily = result.get("daily", {}) or {}
+    config = result.get("config", {}) or {}
+    lines = [
+        f"status={result.get('status')} generated_at={result.get('generated_at')}",
+        (
+            "snapshot "
+            f"status={snapshot.get('status')} source={snapshot.get('source') or '-'} "
+            f"rows={snapshot.get('rows', 0)} fallback={snapshot.get('fallback_used')} "
+            f"stale={snapshot.get('stale')} sources={','.join(snapshot.get('sources') or [])}"
+        ),
+    ]
+    strategy = result.get("strategy_requirements") or {}
+    if strategy:
+        if strategy.get("mode") == "all":
+            lines.append(
+                f"strategy_scope=all count={strategy.get('strategy_count')} "
+                f"daily_required_count={strategy.get('daily_strategy_count')} "
+                f"data={','.join(strategy.get('data_requirements') or [])}"
+            )
+        else:
+            lines.append(
+                f"strategy={strategy.get('strategy')} category={strategy.get('category')} "
+                f"data={','.join(strategy.get('data_requirements') or [])} "
+                f"daily_required={strategy.get('requires_daily_features')}"
+            )
+    if snapshot.get("required_fields"):
+        lines.append("snapshot_required=" + ",".join(str(item) for item in snapshot.get("required_fields") or []))
+    if snapshot.get("missing_fields"):
+        lines.append("snapshot_missing=" + ",".join(str(item) for item in snapshot.get("missing_fields") or []))
+    if snapshot.get("errors"):
+        lines.append("snapshot_errors=" + " | ".join(str(item) for item in snapshot.get("errors") or []))
+    quality = snapshot.get("quality_summary") or {}
+    if quality:
+        anomalies = ",".join(str(item) for item in (quality.get("anomalies") or [])[:6]) or "-"
+        lines.append(
+            f"snapshot_quality status={quality.get('status')} "
+            f"anomalies={anomalies}"
+        )
+    health_summary = result.get("health_summary") or {}
+    snapshot_health = health_summary.get("snapshot") or {}
+    if snapshot_health:
+        lines.append(_format_source_health_summary("snapshot_health", snapshot_health))
+    freshness = result.get("freshness_summary") or {}
+    if freshness:
+        lines.append(_format_freshness_summary(freshness))
+    readiness = result.get("strategy_readiness_summary") or {}
+    if readiness:
+        lines.append(_format_strategy_readiness_summary(readiness))
+    reconciliation = result.get("snapshot_reconciliation") or {}
+    if reconciliation:
+        lines.extend(_format_snapshot_reconciliation_explain(reconciliation))
+    if daily:
+        lines.append(
+            "daily "
+            f"status={daily.get('status')} source={daily.get('source') or '-'} "
+            f"rows={daily.get('rows', 0)} stale={daily.get('stale')} "
+            f"code={config.get('daily_code') or '-'} requested={config.get('daily_source') or '-'}"
+        )
+        if daily.get("required_fields"):
+            lines.append("daily_required=" + ",".join(str(item) for item in daily.get("required_fields") or []))
+        if daily.get("missing_fields"):
+            lines.append("daily_missing=" + ",".join(str(item) for item in daily.get("missing_fields") or []))
+        if daily.get("errors"):
+            lines.append("daily_errors=" + " | ".join(str(item) for item in daily.get("errors") or []))
+        daily_health = health_summary.get("daily") or {}
+        if daily_health:
+            lines.append(_format_source_health_summary("daily_health", daily_health))
+    lines.append(f"tushare_configured={config.get('tushare_configured')} live_checks={config.get('live_checks')}")
+    recommendations = result.get("recommendations") or []
+    if recommendations:
+        lines.append("recommendations=" + " | ".join(str(item) for item in recommendations))
+    coverage = result.get("strategy_coverage") or []
+    if coverage:
+        lines.append("strategy_coverage:")
+        for item in coverage:
+            parts = [
+                f"- {item.get('strategy')} status={item.get('status')}",
+                f"category={item.get('category')}",
+                f"data={','.join(item.get('data_requirements') or [])}",
+                f"snapshot_fields={len(item.get('required_snapshot_fields') or [])}",
+                f"daily_fields={len(item.get('required_daily_fields') or [])}",
+            ]
+            if item.get("snapshot_missing_fields"):
+                parts.append("snapshot_missing=" + ",".join(item.get("snapshot_missing_fields") or []))
+            if item.get("daily_missing_fields"):
+                parts.append("daily_missing=" + ",".join(item.get("daily_missing_fields") or []))
+            lines.append(" ".join(parts))
+    return "\n".join(lines)
+
+
+def _format_strategy_readiness_summary(summary: dict) -> str:
+    return (
+        "strategy_readiness "
+        f"ready={summary.get('ready_strategy_count', 0)} "
+        f"attention={summary.get('attention_strategy_count', 0)} "
+        f"unchecked={summary.get('unchecked_strategy_count', 0)} "
+        f"daily_required={summary.get('daily_strategy_count', 0)}"
+    )
+
+
+def _format_source_health_summary(label: str, summary: dict) -> str:
+    return (
+        f"{label} "
+        f"available={summary.get('available_source_count', 0)} "
+        f"healthy={_join_or_dash(summary.get('healthy_sources') or [])} "
+        f"failing={_join_or_dash(summary.get('failing_sources') or [])} "
+        f"disabled={_join_or_dash(summary.get('disabled_sources') or [])} "
+        f"never_seen={_join_or_dash(summary.get('never_seen_sources') or [])} "
+        f"errors={summary.get('error_count', 0)}"
+    )
+
+
+def _format_snapshot_reconciliation_explain(reconciliation: dict) -> list[str]:
+    summary = reconciliation.get("summary", {}) or {}
+    lines = [
+        (
+            "snapshot_reconciliation "
+            f"status={reconciliation.get('status')} "
+            f"baseline={reconciliation.get('baseline_source') or '-'} "
+            f"sources={summary.get('source_count', 0)} "
+            f"ok={summary.get('ok_source_count', 0)} "
+            f"degraded={summary.get('degraded_source_count', 0)} "
+            f"failed={summary.get('failed_source_count', 0)}"
+        )
+    ]
+    sources = reconciliation.get("sources", []) or []
+    if sources:
+        lines.append("snapshot_sources source status rows overlap missing quality errors")
+        for item in sources:
+            missing = _join_or_dash(item.get("missing_fields") or [])
+            errors = _join_or_dash(item.get("errors") or [])
+            overlap = item.get("overlap_with_baseline_ratio")
+            overlap_text = "-" if overlap is None else f"{float(overlap):.2f}"
+            lines.append(
+                f"{str(item.get('source') or ''):<16} {str(item.get('status') or ''):<9} "
+                f"{item.get('rows', 0)!s:<6} {overlap_text:<7} "
+                f"{missing:<24} {str(item.get('quality_status') or '-'):<8} {errors}"
+            )
+    warnings = summary.get("warnings", []) or []
+    if warnings:
+        lines.append("snapshot_reconciliation_warnings=" + " | ".join(str(item) for item in warnings))
+    return lines
+
+
+def _format_freshness_summary(summary: dict) -> str:
+    snapshot = summary.get("snapshot", {}) or {}
+    daily = summary.get("daily", {}) or {}
+    warnings = summary.get("warnings", []) or []
+    return (
+        "freshness "
+        f"fresh_enough={summary.get('fresh_enough')} "
+        f"snapshot={snapshot.get('data_state', '-')}:{snapshot.get('cache_state', '-')} "
+        f"daily={daily.get('data_state', '-')}:{daily.get('cache_state', '-')} "
+        f"fallbacks={summary.get('fallback_family_count', 0)} "
+        f"stale={summary.get('stale_family_count', 0)} "
+        f"unchecked={summary.get('not_checked_family_count', 0)} "
+        f"warnings={_join_or_dash(warnings)}"
+    )
+
+
+def _join_or_dash(values: list[str]) -> str:
+    return ",".join(str(item) for item in values) if values else "-"
+
+
+def _format_dsa_readiness_explain(result: dict) -> str:
+    return "\n".join([
+        (
+            f"dsa status={result.get('status')} available={result.get('available')} "
+            f"endpoint={result.get('endpoint') or '-'} http_status={result.get('http_status')}"
+        ),
+        f"error={result.get('error') or '-'}",
+    ])
 
 
 def _write_industry_cache_metadata(
@@ -921,6 +2165,28 @@ def _apply_env_file_args(env_files: list[str] | None) -> None:
     items = [item for item in existing.split(os.pathsep) if item]
     items.extend(env_files)
     os.environ["ALPHASIFT_ENV_FILES"] = os.pathsep.join(items)
+
+
+def _parse_window_list(raw: str | None) -> list[int] | None:
+    if raw is None:
+        return None
+    values: list[int] = []
+    seen: set[int] = set()
+    for item in str(raw).split(","):
+        token = item.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except ValueError as exc:
+            raise ValueError(f"Invalid --window value: {token}") from exc
+        if value <= 0:
+            raise ValueError("--window values must be positive integers")
+        if value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return sorted(values)
 
 
 def _split_csv_args(values: list[str] | None) -> list[str] | None:

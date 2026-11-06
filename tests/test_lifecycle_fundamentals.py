@@ -1,12 +1,16 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from alphasift.lifecycle_fundamentals import legacy_functions, score_candidate
 
 
 def ranker():
-    return legacy_functions(Path('data/rank_fundamental_top50.py'), ('clip', 'rank'),
+    path = Path('data/rank_fundamental_top50.py')
+    if not path.exists():
+        pytest.skip('Optional legacy ranking script is not present in this repository')
+    return legacy_functions(path, ('clip', 'rank'),
                             dict(pd=pd, asof=pd.Timestamp('2026-09-05'), translation={}))['rank']
 
 
