@@ -41,6 +41,17 @@ class SnapshotFieldMissingError(ValueError):
     """Raised when a configured hard filter cannot be evaluated safely."""
 
 
+def _not_st_mask(names: pd.Series) -> pd.Series:
+    """True for rows that are not A-share ST / delisting names.
+
+    ST / 退市 tags are an A-share naming convention. Only apply them to names
+    with CJK characters so tickers like COST or STERIS survive.
+    """
+    text = names.astype("string")
+    has_cjk = text.str.contains(r"[\u4e00-\u9fff]", na=False)
+    return ~(has_cjk & text.str.contains(r"ST|退", na=False))
+
+
 def apply_hard_filters(df: pd.DataFrame, filters: HardFilterConfig) -> pd.DataFrame:
     """Filter snapshot DataFrame by hard conditions. Returns filtered copy."""
     result = df.copy()
@@ -55,10 +66,11 @@ def apply_hard_filters(df: pd.DataFrame, filters: HardFilterConfig) -> pd.DataFr
             raise SnapshotFieldMissingError(
                 "Missing required snapshot column for exclude_st filter: name"
             )
-        mask &= ~result[name_col].str.contains(r"ST|退", na=False)
+        mask &= _not_st_mask(result[name_col])
 
     # Numeric filters — each is optional
     mask = _filter_min(result, mask, ["amount", "成交额"], filters.amount_min)
+    mask = _filter_min(result, mask, ["avg_amount_usd"], filters.avg_amount_usd_min)
     mask = _filter_min(result, mask, ["price", "最新价", "现价"], filters.price_min)
     mask = _filter_max(result, mask, ["price", "最新价", "现价"], filters.price_max)
     mask = _filter_min(result, mask, ["total_mv", "总市值"], filters.market_cap_min)
@@ -128,7 +140,7 @@ def hard_filter_rejection_summary(
             raise SnapshotFieldMissingError(
                 "Missing required snapshot column for exclude_st filter: name"
             )
-        record("exclude_st", mask & ~df[name_col].str.contains(r"ST|退", na=False))
+        record("exclude_st", mask & _not_st_mask(df[name_col]))
 
     def record_min(label: str, columns: list[str], value: float | None) -> None:
         if value is not None:
@@ -139,6 +151,7 @@ def hard_filter_rejection_summary(
             record(label, _filter_max(df, mask, columns, value))
 
     record_min("amount_min", ["amount", "成交额"], filters.amount_min)
+    record_min("avg_amount_usd_min", ["avg_amount_usd"], filters.avg_amount_usd_min)
     record_min("price_min", ["price", "最新价", "现价"], filters.price_min)
     record_max("price_max", ["price", "最新价", "现价"], filters.price_max)
     record_min("market_cap_min", ["total_mv", "总市值"], filters.market_cap_min)
@@ -228,7 +241,7 @@ def hard_filter_waterfall(
             raise SnapshotFieldMissingError(
                 "Missing required snapshot column for exclude_st filter: name"
             )
-        record("exclude_st", mask & ~df[name_col].str.contains(r"ST|退", na=False), [name_col])
+        record("exclude_st", mask & _not_st_mask(df[name_col]), [name_col])
 
     def record_min(label: str, columns: list[str], value: float | None) -> None:
         if value is not None:
@@ -239,6 +252,7 @@ def hard_filter_waterfall(
             record(label, _filter_max(df, mask, columns, value), columns)
 
     record_min("amount_min", ["amount", "成交额"], filters.amount_min)
+    record_min("avg_amount_usd_min", ["avg_amount_usd"], filters.avg_amount_usd_min)
     record_min("price_min", ["price", "最新价", "现价"], filters.price_min)
     record_max("price_max", ["price", "最新价", "现价"], filters.price_max)
     record_min("market_cap_min", ["total_mv", "总市值"], filters.market_cap_min)

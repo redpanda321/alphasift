@@ -26,6 +26,7 @@ def test_disabled_strategies_are_not_listed():
     assert "oversold_reversal" in strategies
     assert "quality_value" in strategies
     assert "shrink_pullback" in strategies
+    assert "us_momentum_quality" in strategies
     assert "volume_breakout" in strategies
 
 
@@ -37,11 +38,14 @@ def test_list_strategies_returns_enabled_strategies_only():
         "blue_chip_income",
         "capital_heat",
         "dual_low",
+        "global_value",
+        "lifecycle_ah",
         "low_volatility_quality",
         "momentum_quality",
         "oversold_reversal",
         "quality_value",
         "shrink_pullback",
+        "us_momentum_quality",
         "volume_breakout",
     ]
 
@@ -50,7 +54,8 @@ def test_dual_low_strategy_uses_dynamic_snapshot_signals():
     strat = load_strategy(Path("strategies/dual_low.yaml"))
     screening = strat.screening
 
-    assert strat.version == "1.2"
+    assert strat.version == "1.3"
+    assert screening.portfolio_profile["mode"] == "hard_cap"
     assert "dynamic_signal" in strat.tags
     assert screening.hard_filters.pe_ttm_min == 0
     assert screening.hard_filters.pb_min == 0
@@ -69,7 +74,12 @@ def test_builtin_strategy_factor_weights_are_normalized_and_diversified():
     for strat in strategies.values():
         weights = strat.screening.factor_weights
         assert sum(weights.values()) == pytest.approx(1.0), strat.name
-        assert len([factor for factor, weight in weights.items() if weight > 0]) >= 4, strat.name
+        if strat.screening.lifecycle_profile:
+            # The lifecycle factor is itself a documented multi-component
+            # A/H score built from price position, pivots, momentum and volume.
+            assert weights == {"lifecycle": 1.0}
+        else:
+            assert len([factor for factor, weight in weights.items() if weight > 0]) >= 4, strat.name
 
     for name in ("dual_low", "quality_value"):
         weights = strategies[name].screening.factor_weights

@@ -49,6 +49,8 @@ def load_screen_result(run_ref: str | Path, *, data_dir: Path) -> ScreenResult:
         if isinstance(item, dict)
     ]
     filtered = {key: value for key, value in data.items() if key in result_fields}
+    # Runs without a market predate multi-market support and were A-share.
+    filtered["market"] = filtered.get("market") or "cn"
     loaded = ScreenResult(**filtered)
     loaded.saved_path = str(path)
     return loaded
@@ -79,6 +81,7 @@ def list_saved_runs(
     data_dir: Path,
     limit: int = 20,
     strategy: str | None = None,
+    market: str | None = None,
 ) -> list[dict[str, object]]:
     runs_dir = data_dir / "runs"
     if not runs_dir.is_dir():
@@ -92,6 +95,8 @@ def list_saved_runs(
         if metadata is None:
             continue
         if strategy and metadata.get("strategy") != strategy:
+            continue
+        if market and metadata.get("market") != market:
             continue
         items.append(metadata)
         if len(items) >= limit:
@@ -166,7 +171,7 @@ def _normalize_run_metadata(data: dict, path: Path) -> dict[str, object]:
         "schema_version": int(_metadata_value(data, "schema_version", 1) or 1),
         "run_id": data.get("run_id", path.stem),
         "strategy": data.get("strategy", ""),
-        "market": data.get("market", ""),
+        "market": data.get("market") or "cn",
         "strategy_version": data.get("strategy_version", ""),
         "strategy_category": data.get("strategy_category", ""),
         "created_at": data.get("created_at", ""),

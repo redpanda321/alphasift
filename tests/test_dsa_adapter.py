@@ -46,6 +46,7 @@ def test_screen_returns_stable_dsa_contract(monkeypatch):
             snapshot_count=100,
             after_filter_count=3,
             run_id="run123",
+            snapshot_source="yahoo_screen",
             llm_ranked=True,
             llm_coverage=1.0,
             llm_market_view="market ok",
@@ -86,6 +87,7 @@ def test_screen_returns_stable_dsa_contract(monkeypatch):
     assert calls[0][1]["context"] is context
     assert payload["contract_version"] == "1"
     assert payload["run_id"] == "run123"
+    assert payload["snapshot_source"] == "yahoo_screen"
     assert payload["llm_ranked"] is True
     assert payload["llm_coverage"] == 1.0
     assert payload["candidate_count"] == 1

@@ -42,20 +42,20 @@ def test_pipeline_enriches_daily_features_for_daily_strategy(monkeypatch):
         enriched = frame.copy()
         for idx, row in enriched.iterrows():
             is_target = row["code"] == "000001"
-            enriched.at[idx, "ma_bullish"] = is_target
-            enriched.at[idx, "price_above_ma20"] = True
-            enriched.at[idx, "signal_score"] = 72 if is_target else 80
-            enriched.at[idx, "change_60d"] = 12 if is_target else 10
-            enriched.at[idx, "macd_status"] = "bullish"
-            enriched.at[idx, "rsi_status"] = "neutral"
-            enriched.at[idx, "volume_ratio_20d"] = 1.0 if is_target else 1.8
-            enriched.at[idx, "pullback_to_ma20_pct"] = 4 if is_target else 12
-            enriched.at[idx, "volatility_20d_pct"] = 25 if is_target else 60
-            enriched.at[idx, "max_drawdown_20d_pct"] = -5 if is_target else -18
-            enriched.at[idx, "atr_20_pct"] = 3 if is_target else 9
-            enriched.at[idx, "daily_quality_score"] = 100 if is_target else 70
-            enriched.at[idx, "daily_quality_flags"] = "" if is_target else "fallback_errors"
-            enriched.at[idx, "daily_source"] = "tencent"
+            enriched.loc[idx, "ma_bullish"] = is_target
+            enriched.loc[idx, "price_above_ma20"] = True
+            enriched.loc[idx, "signal_score"] = 72 if is_target else 80
+            enriched.loc[idx, "change_60d"] = 12 if is_target else 10
+            enriched.loc[idx, "macd_status"] = "bullish"
+            enriched.loc[idx, "rsi_status"] = "neutral"
+            enriched.loc[idx, "volume_ratio_20d"] = 1.0 if is_target else 1.8
+            enriched.loc[idx, "pullback_to_ma20_pct"] = 4 if is_target else 12
+            enriched.loc[idx, "volatility_20d_pct"] = 25 if is_target else 60
+            enriched.loc[idx, "max_drawdown_20d_pct"] = -5 if is_target else -18
+            enriched.loc[idx, "atr_20_pct"] = 3 if is_target else 9
+            enriched.loc[idx, "daily_quality_score"] = 100 if is_target else 70
+            enriched.loc[idx, "daily_quality_flags"] = "" if is_target else "fallback_errors"
+            enriched.loc[idx, "daily_source"] = "tencent"
         enriched.attrs["daily_success_count"] = len(enriched)
         enriched.attrs["daily_source_counts"] = {"tencent": 2}
         enriched.attrs["daily_quality_flag_counts"] = {"fallback_errors": 1}
@@ -231,3 +231,95 @@ def test_sort_screened_candidates_keeps_default_tie_breakers_without_weights():
     sorted_df = _sort_screened_candidates(df, ScreeningConfig())
 
     assert list(sorted_df["code"]) == ["300001", "000001", "600000"]
+
+
+def test_screening_reuses_daily_history_only_outside_the_session(monkeypatch, tmp_path):
+    from datetime import date
+
+    import alphasift.pipeline as pipeline
+
+    df = pd.DataFrame(
+        [{"code": "000001", "name": "平安银行", "price": 10.0, "change_pct": 1.0, "amount": 5e8,
+          "volume_ratio": 1.0, "turnover_rate": 1.0, "total_mv": 2e11, "circ_mv": 2e11,
+          "pe_ratio": 5.0, "pb_ratio": 0.6, "industry": "银行"}]
+    )
+    policies = []
+
+    def fake_enrich(frame, **kwargs):
+        policies.append(kwargs["cache_policy"])
+        raise RuntimeError("stop after recording the cache policy")
+
+    monkeypatch.setattr(pipeline, "fetch_snapshot_with_fallback", lambda sources, **kwargs: df)
+    monkeypatch.setattr(pipeline, "enrich_daily_features", fake_enrich)
+    config = Config(
+        llm_api_key="",
+        snapshot_source_priority=["test"],
+        strategies_dir=Path("strategies"),
+        risk_enabled=False,
+        daily_history_cache_dir=tmp_path,
+        daily_history_cache_ttl_hours=24,
+    )
+    try:
+        screen("shrink_pullback", use_llm=False, config=config)
+    except RuntimeError:
+        pass
+    policy = policies[0]
+    session = date(2026, 11, 4)
+
+    # The policy is evaluated per fetch, so a batch crossing the open switches.
+    monkeypatch.setattr(pipeline, "latest_settled_close", lambda market: (session, 3600.0))
+    assert policy() == {"cache_dir": tmp_path, "cache_ttl_seconds": 3600.0, "cache_min_last_date": session}
+    monkeypatch.setattr(pipeline, "latest_settled_close", lambda market: (session, 3 * 86400.0))
+    assert policy()["cache_ttl_seconds"] == 24 * 3600.0  # capped by config
+    # In session: nothing fresh is read and nothing is written; stale fallback stays possible.
+    monkeypatch.setattr(pipeline, "latest_settled_close", lambda market: None)
+    assert policy() == {"cache_dir": tmp_path, "cache_ttl_seconds": 0.0, "cache_write": False}
+
+
+def test_in_session_fetch_never_writes_but_can_fall_back_to_stale_cache(monkeypatch, tmp_path):
+    import alphasift.daily as daily
+
+    def tencent(code, *, lookback_days):
+        return pd.DataFrame([{"日期": "2026-11-03", "收盘": 10.0}, {"日期": "2026-11-04", "收盘": 10.4}])
+
+    monkeypatch.setattr(daily, "_fetch_daily_tencent", tencent)
+    in_session = dict(source="tencent", retries=0, cache_dir=tmp_path, cache_ttl_seconds=0.0, cache_write=False)
+
+    daily.fetch_daily_history("000001", **in_session)
+    assert list(tmp_path.glob("*.json")) == []  # the partial-day bar was not cached
+
+    # After the close it is cached; in the next session, with the source down,
+    # that history is used and flagged stale.
+    daily.fetch_daily_history("000001", source="tencent", retries=0, cache_dir=tmp_path, cache_ttl_seconds=3600)
+
+    def down(code, *, lookback_days):
+        raise RuntimeError("501")
+
+    monkeypatch.setattr(daily, "_fetch_daily_tencent", down)
+    stale = daily.fetch_daily_history("000001", **in_session)
+    assert stale.attrs.get("daily_stale") is True
+
+def test_cached_history_that_misses_the_latest_session_is_refetched(monkeypatch, tmp_path):
+    from datetime import date
+
+    import alphasift.daily as daily
+
+    calls = []
+
+    def fake_tencent(code, *, lookback_days):
+        calls.append(code)
+        last = "2026-11-04" if len(calls) > 1 else "2026-11-03"  # first fetch: vendor not published yet
+        return pd.DataFrame(
+            [{"日期": "2026-11-02", "收盘": 10.0}, {"日期": "2026-11-03", "收盘": 10.5}, {"日期": last, "收盘": 11.0}]
+        ).drop_duplicates("日期")
+
+    monkeypatch.setattr(daily, "_fetch_daily_tencent", fake_tencent)
+    kwargs = dict(source="tencent", retries=0, cache_dir=tmp_path, cache_ttl_seconds=3600)
+
+    daily.fetch_daily_history("000001", **kwargs, cache_min_last_date=date(2026, 11, 4))
+    second = daily.fetch_daily_history("000001", **kwargs, cache_min_last_date=date(2026, 11, 4))
+    third = daily.fetch_daily_history("000001", **kwargs, cache_min_last_date=date(2026, 11, 4))
+
+    assert len(calls) == 2  # the cache lacking 11-04 was not reused; the complete one was
+    assert str(second["日期"].iloc[-1]) == "2026-11-04"
+    assert str(third["日期"].iloc[-1]) == "2026-11-04"

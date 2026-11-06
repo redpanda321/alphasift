@@ -66,7 +66,10 @@ def main():
     # screen
     sp = sub.add_parser("screen", help="执行选股")
     sp.add_argument("strategy", help="策略名称")
-    sp.add_argument("--market", default="cn")
+    sp.add_argument(
+        "--market", default="cn",
+        help="市场：cn（A 股）、us、hk、jp、kr、tw、in；非 A 股通过 Yahoo 筛选器获取快照",
+    )
     sp.add_argument("--max-output", type=int, default=None)
     sp.add_argument("--no-llm", action="store_true", help="不使用 LLM 排序")
     sp.add_argument(
@@ -163,6 +166,11 @@ def main():
     sp.add_argument("--jsonl", action="store_true", help="以 JSONL 输出")
     sp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
 
+    cross = sub.add_parser("lifecycle-crosscheck", help="5-year/full-history A/B/C/D/E/F/G/H comparison")
+    cross.add_argument("--market", choices=["cn", "us"], required=True)
+    cross.add_argument("--symbols", default=None)
+    cross.add_argument("--output", required=True)
+
     # strategies
     stp = sub.add_parser("strategies", help="列出可用策略")
     stp.add_argument("--json", action="store_true", help="以 JSON 输出完整策略目录元数据")
@@ -204,6 +212,7 @@ def main():
     ebp = sub.add_parser("evaluate-batch", help="批量评估最近保存的选股结果并按策略聚合")
     ebp.add_argument("--limit", type=int, default=20, help="最多评估最近 N 个 run")
     ebp.add_argument("--strategy", default=None, help="只评估指定策略")
+    ebp.add_argument("--market", default="cn", help="只评估指定市场的 run（cn / us / hk / jp / kr / tw / in），批量共用一个快照，市场必须一致")
     ebp.add_argument("--output", default=None, help="额外写出批量评估 JSON 到指定路径")
     ebp.add_argument("--json", action="store_true", help="以 JSON 输出")
     ebp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
@@ -225,6 +234,7 @@ def main():
     esp = sub.add_parser("evaluate-strategies", help="生成策略级评估 summary")
     esp.add_argument("--limit", type=int, default=20, help="最多评估最近 N 个 run")
     esp.add_argument("--strategy", default=None, help="只评估指定策略")
+    esp.add_argument("--market", default="cn", help="只评估指定市场的 run（cn / us / hk / jp / kr / tw / in），批量共用一个快照，市场必须一致")
     esp.add_argument("--output", default=None, help="额外写出策略评估 JSON 到指定路径")
     esp.add_argument("--json", action="store_true", help="以 JSON 输出")
     esp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
@@ -237,7 +247,10 @@ def main():
     esp.add_argument(
         "--window",
         default=None,
-        help="用逗号分隔多个窗口对价格路径进行滚动回看，例如 5,10,20；和 --price-path-lookback-days 互斥",
+        help=(
+            "逗号分隔的 T+N 交易日窗口，例如 5,10,20：按入场后第 N 个交易日收盘计算收益，"
+            "并与所在市场基准指数同期收益对比；未满 N 日的记为 pending。和 --price-path-lookback-days 互斥"
+        ),
     )
 
     # runs
@@ -335,7 +348,11 @@ def main():
     dsp = doctor_sub.add_parser("data-sources", help="诊断 snapshot / daily 数据源状态")
     dsp.add_argument("--snapshot-source", action="append", default=None, help="snapshot 来源，可重复或逗号分隔")
     dsp.add_argument("--daily-source", default=None, help="daily K 来源，默认使用 DAILY_SOURCE/config")
-    dsp.add_argument("--daily-code", default="000001", help="daily K smoke test 股票代码，默认 000001")
+    dsp.add_argument("--daily-code", default="000001", help="daily K smoke test 股票代码，默认 000001；非 A 股默认用该市场的代表性股票")
+    dsp.add_argument(
+        "--market", default=None,
+        help="诊断的市场：cn / us / hk / jp / kr / tw / in；默认 cn，若 --strategy 不支持 cn 则取其第一个市场",
+    )
     dsp.add_argument("--strategy", default=None, help="按指定策略的必需 snapshot/daily 字段做数据源预检")
     dsp.add_argument("--all-strategies", action="store_true", help="按所有策略的字段并集做数据源覆盖矩阵")
     dsp.add_argument("--compare-snapshot-sources", action="store_true", help="逐个检查 snapshot 源字段覆盖和代码交集")
@@ -362,7 +379,14 @@ def main():
     args = parser.parse_args()
     _apply_env_file_args(args.env_file)
 
-    if args.command == "screen":
+    if args.command == "lifecycle-crosscheck":
+        from alphasift.lifecycle_crosscheck import main as crosscheck_main
+        cross_args = ["--market", args.market, "--output", args.output]
+        if args.symbols:
+            cross_args.extend(["--symbols", args.symbols])
+        crosscheck_main(cross_args)
+
+    elif args.command == "screen":
         config = Config.from_env()
         if args.no_post_analysis and (args.post_analyzer or args.deep_analysis):
             parser.error("--no-post-analysis cannot be combined with --post-analyzer or --deep-analysis")
@@ -488,7 +512,6 @@ def main():
             failed_breakout_pct=args.failed_breakout_pct,
             with_price_path=args.with_price_path or None,
             price_path_lookback_days=args.price_path_lookback_days,
-            failure_sample_limit=args.failure_samples,
         )
         if args.save:
             save_evaluation_result(result, data_dir=config.data_dir)
@@ -507,6 +530,7 @@ def main():
             config=config,
             limit=args.limit,
             strategy=args.strategy,
+            market=args.market,
             cost_bps=args.cost_bps,
             follow_through_pct=args.follow_through_pct,
             failed_breakout_pct=args.failed_breakout_pct,
@@ -551,6 +575,7 @@ def main():
                 config=config,
                 limit=args.limit,
                 strategy=args.strategy,
+                market=args.market,
                 cost_bps=args.cost_bps,
                 follow_through_pct=args.follow_through_pct,
                 failed_breakout_pct=args.failed_breakout_pct,
@@ -561,6 +586,7 @@ def main():
                 config=config,
                 limit=args.limit,
                 strategy=args.strategy,
+                market=args.market,
                 cost_bps=args.cost_bps,
                 follow_through_pct=args.follow_through_pct,
                 failed_breakout_pct=args.failed_breakout_pct,
@@ -581,6 +607,9 @@ def main():
             "event_signal_review": result.get("event_signal_review", {}),
             "failure_review": result.get("failure_review", {}),
         }
+        if result.get("window_reviews"):
+            payload["review_window_days"] = result.get("review_window_days")
+            payload["window_reviews"] = result.get("window_reviews", [])
         if args.output:
             Path(args.output).parent.mkdir(parents=True, exist_ok=True)
             Path(args.output).write_text(
@@ -803,6 +832,7 @@ def main():
                     strategy_name=args.strategy,
                     all_strategies=args.all_strategies,
                     compare_snapshot_sources=args.compare_snapshot_sources,
+                    market=args.market,
                 )
             except ValueError as exc:
                 parser.error(str(exc))
@@ -1456,7 +1486,7 @@ def _format_evaluate_strategies_explain(result: dict) -> str:
             f"evaluated_at={result.get('evaluated_at')} "
             f"source={result.get('snapshot_source') or '-'} "
             f"limit={result.get('limit')} strategy_filter={result.get('strategy_filter') or '-'} "
-            f"price_path={result.get('with_price_path')}"
+            f"price_path={result.get('with_price_path')} cost_bps={result.get('cost_bps')}"
         ),
     ]
     if result.get("price_path_window_days"):
@@ -1465,7 +1495,10 @@ def _format_evaluate_strategies_explain(result: dict) -> str:
     if result.get("strategy_summaries", []) and isinstance(result.get("strategy_summaries"), list):
         sample = result["strategy_summaries"][0]
         if isinstance(sample, dict) and sample.get("window_summaries") is not None:
-            lines.append("strategy windows avg_return median_return win_rate max_dd max_runup failed_follow missing")
+            lines.append(
+                "strategy windows T+N: ret=avg return, bench=benchmark, excess=ret-bench, "
+                "beat=% picks beating benchmark, win, dd, runup, pending, missing"
+            )
         else:
             lines.append(
                 "strategy runs picks avg_return median_return win_rate max_dd max_runup outcome shapes"
@@ -1483,14 +1516,24 @@ def _format_evaluate_strategies_explain(result: dict) -> str:
                 window_days = window.get("window_days", "-")
                 line_parts.append(
                     (
-                        f"{window_days}d:" 
+                        f"T+{window_days}:"
                         f"ret={window.get('average_return_pct')!s} "
+                        f"bench={window.get('average_benchmark_return_pct')!s} "
+                        f"excess={window.get('average_excess_return_pct')!s} "
+                        + _format_partial_benchmark(window)
+                        + f"beat={window.get('beat_benchmark_rate')!s} "
                         f"win={window.get('win_rate')!s} "
                         f"dd={window.get('average_max_drawdown_pct')!s} "
                         f"runup={window.get('average_max_runup_pct')!s} "
                         f"f={window.get('failed_breakout_count', 0)} "
                         f"t={window.get('breakout_follow_through_count', 0)} "
-                        f"m={window.get('missing_count', 0)}; "
+                        f"pending={window.get('pending_count', 0)} "
+                        f"m={window.get('missing_count', 0)}"
+                        + (
+                            f" bench_error={window['benchmark_errors'][0]}"
+                            if window.get("benchmark_errors") else ""
+                        )
+                        + "; "
                     )
                 )
             lines.append("".join(line_parts).strip())
@@ -1503,9 +1546,28 @@ def _format_evaluate_strategies_explain(result: dict) -> str:
                 f"{item.get('win_rate')!s:<8} {item.get('average_max_drawdown_pct')!s:<8} "
                 f"{item.get('average_max_runup_pct')!s:<9} {item.get('outcome'):<17} {shape_text}"
             )
+    window_reviews = result.get("window_reviews")
+    if isinstance(window_reviews, list) and window_reviews:
+        for review in window_reviews:
+            if not isinstance(review, dict):
+                continue
+            lines.append(f"-- T+{review.get('window_days')} reviews --")
+            lines.extend(_format_event_signal_review_explain(review.get("event_signal_review", {}), limit=5))
+            lines.extend(_format_failure_review_explain(review.get("failure_review", {}), include_samples=False))
+        return "\n".join(lines)
     lines.extend(_format_event_signal_review_explain(result.get("event_signal_review", {}), limit=5))
     lines.extend(_format_failure_review_explain(result.get("failure_review", {}), include_samples=False))
     return "\n".join(lines)
+
+
+def _format_partial_benchmark(window: dict) -> str:
+    """When only some picks have benchmark data, bench/excess cover just
+    those picks; show how many and their own average return."""
+    evaluated = int(window.get("evaluated_pick_count") or 0)
+    matched = int(window.get("benchmark_pick_count") or 0)
+    if not evaluated or matched >= evaluated:
+        return ""
+    return f"bench_n={matched}/{evaluated} matched_ret={window.get('average_matched_return_pct')!s} "
 
 
 def _format_event_signal_review_explain(

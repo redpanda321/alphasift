@@ -3,7 +3,8 @@
 
 from typing import Any
 from dataclasses import dataclass, field
-from datetime import datetime
+
+from alphasift.timeutil import now_iso
 
 
 @dataclass
@@ -12,6 +13,9 @@ class HardFilterConfig:
     price_min: float | None = None
     price_max: float | None = None
     amount_min: float | None = None
+    # Estimated daily traded value in USD (current price x 10-day average
+    # volume, 3-month if missing); comparable across markets.
+    avg_amount_usd_min: float | None = None
     market_cap_min: float | None = None
     market_cap_max: float | None = None
     pe_ttm_min: float | None = None
@@ -60,6 +64,7 @@ class ScreeningConfig:
     portfolio_profile: dict[str, Any] = field(default_factory=dict)
     scorecard_profile: dict[str, Any] = field(default_factory=dict)
     event_profile: dict[str, Any] = field(default_factory=dict)
+    lifecycle_profile: dict[str, Any] = field(default_factory=dict)
     ranking_hints: str = ""
     max_output: int = 5
 
@@ -152,6 +157,38 @@ class Pick:
     body_pct: float | None = None
     pullback_to_ma20_pct: float | None = None
     consolidation_days_20d: int | None = None
+    a_score: float | None = None
+    h_score: float | None = None
+    a_eligible: bool | None = None
+    h_eligible: bool | None = None
+    fundamental_risk_status: str = "unverified"
+    data_source: str = ""
+    data_granularity: str = ""
+    max_drawdown_pct: float | None = None
+    max_drawdown_from_d_pct: float | None = None
+    distance_post_d_low_pct: float | None = None
+    atr14_pct: float | None = None
+    history_sessions: int | None = None
+    lifecycle_stage: str = ""
+    lifecycle_action: str = ""
+    data_as_of: str = ""
+    history_start: str = ""
+    history_scope: str = ""
+    history_retrieved_at: str = ""
+    snapshot_price: float | None = None
+    data_timestamp: str = ""
+    low_52w: float | None = None
+    distance_52w_low_pct: float | None = None
+    cycle_high: float | None = None
+    cycle_high_date: str = ""
+    drawdown_from_cycle_high_pct: float | None = None
+    distance_cycle_low_pct: float | None = None
+    distance_3y_low_pct: float | None = None
+    prior_runup_pct: float | None = None
+    lower_high_count: int | None = None
+    lower_low_count: int | None = None
+    bottom_divergence: bool | None = None
+    lifecycle_reasons: list[str] = field(default_factory=list)
     volatility_20d_pct: float | None = None
     max_drawdown_20d_pct: float | None = None
     atr_20_pct: float | None = None
@@ -200,6 +237,10 @@ class Pick:
 class ScreenResult:
     strategy: str
     market: str
+    scan_started_at: str = ""
+    snapshot_retrieved_at: str = ""
+    expected_daily_session: str = ""
+    freshness_policy: str = ""
     strategy_version: str = ""
     strategy_category: str = ""
     snapshot_count: int = 0
@@ -223,7 +264,7 @@ class ScreenResult:
     portfolio_diversity_enabled: bool = True
     portfolio_concentration_notes: list[str] = field(default_factory=list)
     saved_path: str = ""
-    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    created_at: str = field(default_factory=now_iso)
 
 
 @dataclass
@@ -252,6 +293,10 @@ class PickEvaluation:
     path_end_return_pct: float | None = None
     max_drawdown_pct: float | None = None
     max_runup_pct: float | None = None
+    # Set only for fixed-horizon (T+N) evaluation.
+    horizon_days: int | None = None
+    benchmark_return_pct: float | None = None
+    excess_return_pct: float | None = None
 
 
 @dataclass
@@ -260,7 +305,7 @@ class EvaluationResult:
     strategy: str
     market: str
     created_at: str
-    evaluated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    evaluated_at: str = field(default_factory=now_iso)
     elapsed_days: int | None = None
     snapshot_source: str = ""
     source_errors: list[str] = field(default_factory=list)
@@ -271,3 +316,9 @@ class EvaluationResult:
     missing_codes: list[str] = field(default_factory=list)
     degradation: list[str] = field(default_factory=list)
     saved_path: str = ""
+    # Fixed-horizon (T+N) evaluation against the market benchmark.
+    horizon_days: int | None = None
+    benchmark: str = ""
+    benchmark_return_pct: float | None = None
+    average_excess_return_pct: float | None = None
+    pending_count: int = 0
