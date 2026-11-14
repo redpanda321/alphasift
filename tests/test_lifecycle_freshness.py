@@ -95,3 +95,35 @@ def test_pipeline_disables_snapshot_fallback_on_every_run(
         assert result.freshness_policy == "network_refresh_completed_daily"
     assert len(calls) == 2
     assert all(c["fallback_snapshot_path"] is None for c in calls)
+
+
+def test_lifecycle_prefetched_snapshot_requires_explicit_validation(monkeypatch):
+    calls = []
+
+    def fetch(*args, **kwargs):
+        calls.append(kwargs)
+        return pd.DataFrame([{"code": "A", "name": "A", "price": 10.0, "amount": 0.0}])
+
+    monkeypatch.setattr("alphasift.pipeline.fetch_snapshot_with_fallback", fetch)
+    supplied = fetch()
+    config = Config()
+
+    # The track-record caller has already validated the market session.
+    result = screen(
+        "lifecycle_ah", market="us", config=config, use_llm=False,
+        snapshot_df=supplied, allow_snapshot_refetch=False,
+    )
+    assert result.freshness_policy == "prefetched_validated_snapshot"
+    assert len(calls) == 1
+
+    supplied.attrs["stale"] = True
+    with pytest.raises(RuntimeError, match="fresh snapshot"):
+        screen(
+            "lifecycle_ah", market="us", config=config, use_llm=False,
+            snapshot_df=supplied, allow_snapshot_refetch=False,
+        )
+
+    supplied.attrs.pop("stale")
+    result = screen("lifecycle_ah", market="us", config=config, use_llm=False, snapshot_df=supplied)
+    assert result.freshness_policy == "network_refresh_completed_daily"
+    assert len(calls) == 2
