@@ -145,7 +145,8 @@ def main(base=Path("data"), report_only=False):
     if flat:
         with stem.with_suffix('.csv').open('w', encoding='utf-8-sig', newline='') as stream:
             writer = csv.DictWriter(stream, fieldnames=sorted(set().union(*(r.keys() for r in flat))))
-            writer.writeheader(); writer.writerows(flat)
+            writer.writeheader()
+            writer.writerows(flat)
     print(json.dumps(dict(scope=len(scored), selected=len(chosen), eligible=sum(r['eligible'] for r in scored),
                           markets=dict(Counter(r['market'] for r in chosen)), groups=len(groups)), ensure_ascii=False), flush=True)
 

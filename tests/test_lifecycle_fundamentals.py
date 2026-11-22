@@ -33,19 +33,22 @@ def test_currency_scale_invariance_and_weights():
 
 
 def test_missing_cashflow_is_not_zero_or_eligible():
-    f = fixture(); f['free_cash_flow'] = None
+    f = fixture()
+    f['free_cash_flow'] = None
     assert not score_candidate(dict(score=100), f, ranker())['eligible']
 
 
 def test_financial_company_needs_specialized_review():
-    f = fixture(); f['financial_company'] = True
+    f = fixture()
+    f['financial_company'] = True
     r = score_candidate(dict(score=100), f, ranker())
     assert not r['eligible'] and '资本充足率' in r['exclusion']
 
 
 def test_stale_and_negative_cashflow_excluded():
     for key, value in [('balance_period', '2024-12-31'), ('free_cash_flow', -1)]:
-        f = fixture(); f[key] = value
+        f = fixture()
+        f[key] = value
         assert not score_candidate(dict(score=100), f, ranker())['eligible']
 
 
