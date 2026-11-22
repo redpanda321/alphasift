@@ -1,0 +1,114 @@
+name: CN daily data pack
+
+# Build and update the CN unadjusted daily pack (`daily.npz`, `meta.csv.gz`,
+# `manifest.json`) inside private GitHub Actions cache (`actions/cache`) only,
+# without publishing raw market data to public GitHub Releases.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "update (incremental with backfill fallback) or backfill (fresh 250d build)"
+        required: false
+        type: string
+        default: "update"
+      days:
+        description: "Window length in trading days"
+        required: false
+        type: string
+        default: "250"
+      trade_date:
+        description: "Optional target trade date (YYYY-MM-DD)"
+        required: false
+        type: string
+        default: ""
+      source:
+        description: "Historical source (auto, yfinance, baostock, daily)"
+        required: false
+        type: string
+        default: "auto"
+    secrets:
+      TICKPLUS_API_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "update (incremental with backfill fallback) or backfill (fresh 250d build)"
+        type: choice
+        options: [update, backfill]
+        default: update
+      days:
+        description: "Window length in trading days"
+        required: false
+        default: "250"
+      trade_date:
+        description: "Optional target trade date (YYYY-MM-DD)"
+        required: false
+        default: ""
+      source:
+        description: "Historical source (auto, yfinance, baostock, daily)"
+        type: choice
+        options: [auto, yfinance, baostock, daily]
+        default: auto
+
+permissions:
+  contents: read
+
+concurrency:
+  group: data-pack-cn
+  cancel-in-progress: false
+
+jobs:
+  publish-pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      ALPHASIFT_PACK_DIR: ${{ github.workspace }}/pack
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install -e .
+
+      - name: Restore and save CN daily pack in private Actions cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.ALPHASIFT_PACK_DIR }}
+          key: cn-daily-pack-${{ github.run_id }}
+          restore-keys: |
+            cn-daily-pack-
+
+      - name: Build or update CN daily pack
+        env:
+          TICKPLUS_API_KEY: ${{ secrets.TICKPLUS_API_KEY }}
+          INPUT_MODE: ${{ inputs.mode || 'update' }}
+          INPUT_DAYS: ${{ inputs.days || '250' }}
+          INPUT_SOURCE: ${{ inputs.source || 'auto' }}
+          INPUT_TRADE_DATE: ${{ inputs.trade_date || '' }}
+        run: |
+          set -euo pipefail
+          mode="$INPUT_MODE"
+          days="$INPUT_DAYS"
+          source="$INPUT_SOURCE"
+          trade_date="$INPUT_TRADE_DATE"
+          if [ "$mode" = "update" ] && [ ! -f "$ALPHASIFT_PACK_DIR/manifest.json" ]; then
+            mode="backfill"
+          fi
+          extra_args=(--days "$days" --source "$source")
+          if [ -n "$trade_date" ]; then
+            extra_args+=(--trade-date "$trade_date")
+          fi
+          python scripts/build_pack.py "$mode" "${extra_args[@]}"
+          rm -rf "$ALPHASIFT_PACK_DIR/.backfill"
+          doc_args=(--pack-dir "$ALPHASIFT_PACK_DIR" --explain --strict-pack)
+          if [ -n "$trade_date" ]; then
+            doc_args+=(--trade-date "$trade_date" --require-fresh)
+          fi
+          alphasift doctor radar "${doc_args[@]}"

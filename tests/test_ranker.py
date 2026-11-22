@@ -1,15 +1,19 @@
 import json
-import sys
-import types
+from unittest.mock import Mock
 
+import pytest
+import requests
+
+from alphasift.config import Config
+from alphasift.llm_client import LLMClientError
 from alphasift.models import Pick
 from alphasift.ranker import (
-    _build_litellm_attempts,
     _build_ranking_prompt,
     _call_llm,
     _parse_ranking_response,
     _parse_ranking_response_detail,
     rank_candidates,
+    rank_candidates_with_metadata,
 )
 
 
@@ -207,90 +211,163 @@ def test_rank_candidates_blends_screen_and_llm_scores(monkeypatch):
     assert ranked[1].final_score == 72.0
 
 
-def test_call_llm_sets_generation_bounds_and_disables_sdk_retries(monkeypatch):
-    captured = {}
+def _chat_response(content: str, status: int = 200) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status
+    body = {"choices": [{"message": {"content": content}}]} if status == 200 else {"error": {"message": content}}
+    response._content = json.dumps(body).encode()
+    return response
 
-    class FakeMessage:
-        content = '{"ranked": []}'
 
-    class FakeChoice:
-        message = FakeMessage()
-
-    class FakeResponse:
-        choices = [FakeChoice()]
-
-    fake_litellm = types.ModuleType("litellm")
-
-    def fake_completion(**kwargs):
-        captured.update(kwargs)
-        return FakeResponse()
-
-    setattr(fake_litellm, "completion", fake_completion)
-    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+def test_call_llm_sends_chat_completion_with_generation_bounds(monkeypatch):
+    post = Mock(return_value=_chat_response('{"ranked": []}'))
+    monkeypatch.setattr("alphasift.llm_client.requests.post", post)
 
     response = _call_llm(
         "prompt",
         api_key="key",
         model="openai/local-model",
-        base_url="http://localhost:8000/v1",
+        base_url="http://localhost:8000/v1/",
+        temperature=0.3,
         timeout_sec=7,
         max_tokens=321,
     )
 
     assert response == '{"ranked": []}'
-    assert captured["timeout"] == 7
-    assert captured["max_tokens"] == 321
-    assert captured["num_retries"] == 0
+    post.assert_called_once_with(
+        "http://localhost:8000/v1/chat/completions",
+        headers={"Authorization": "Bearer key"},
+        json={
+            "model": "local-model",
+            "messages": [{"role": "user", "content": "prompt"}],
+            "temperature": 0.3,
+            "max_tokens": 321,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=7,
+        allow_redirects=False,
+    )
 
 
-def test_call_llm_does_not_retry_without_json_mode_on_timeout(monkeypatch):
-    calls = []
-    fake_litellm = types.ModuleType("litellm")
+@pytest.mark.parametrize("fail_after_json_retry", [False, True])
+def test_call_llm_does_not_retry_same_attempt_without_json_mode_on_timeout(monkeypatch, fail_after_json_retry):
+    responses = [_chat_response("unsupported response_format", 400)] if fail_after_json_retry else []
+    post = Mock(side_effect=[*responses, requests.Timeout("Request timed out")])
+    monkeypatch.setattr("alphasift.llm_client.requests.post", post)
 
-    def fake_completion(**kwargs):
-        calls.append(kwargs)
-        raise TimeoutError("APITimeoutError - Request timed out")
-
-    setattr(fake_litellm, "completion", fake_completion)
-    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
-
-    try:
+    with pytest.raises(LLMClientError, match="timed out") as error:
         _call_llm(
             "prompt",
             api_key="key",
             model="openai/local-model",
             base_url="http://localhost:8000/v1",
             json_mode=True,
-            fallback_models=["openai/backup-model"],
         )
-    except TimeoutError:
-        pass
 
-    assert len(calls) == 1
-    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert error.value.timed_out
+    assert post.call_count == len(responses) + 1
+    assert post.call_args_list[0].kwargs["json"]["response_format"] == {"type": "json_object"}
 
 
-def test_build_litellm_attempts_uses_matching_channel_keys():
-    attempts = _build_litellm_attempts(
-        "openai/deepseek-chat",
-        api_key="fallback-key",
-        base_url="https://fallback.example/v1",
-        channels=[
-            {
-                "name": "primary",
-                "protocol": "openai",
-                "base_url": "https://api.deepseek.com/v1",
-                "api_keys": ["key1", "key2"],
-                "models": ["deepseek-chat"],
-                "enabled": True,
-            }
-        ],
+def test_call_llm_retries_same_attempt_without_json_mode(monkeypatch):
+    post = Mock(
+        side_effect=[
+            _chat_response("unsupported response_format json_object", 400),
+            _chat_response('{"ranked": []}'),
+        ]
+    )
+    monkeypatch.setattr("alphasift.llm_client.requests.post", post)
+
+    result = _call_llm(
+        "prompt",
+        api_key="key",
+        model="openai/local-model",
+        base_url="http://localhost:8000/v1",
+        fallback_models=["openai/backup"],
+        max_tokens=None,
     )
 
-    assert attempts[0]["api_key"] == "key1"
-    assert attempts[0]["api_base"] == "https://api.deepseek.com/v1"
-    assert attempts[1]["api_key"] == "key2"
-    assert attempts[-1]["api_key"] == "fallback-key"
+    first, second = post.call_args_list
+    assert result == '{"ranked": []}'
+    assert first.args == second.args
+    first_payload = first.kwargs.pop("json")
+    second_payload = second.kwargs.pop("json")
+    assert first.kwargs == second.kwargs
+    assert first_payload.pop("response_format") == {"type": "json_object"}
+    assert first_payload == second_payload
+    assert "max_tokens" not in second_payload
+
+
+@pytest.mark.parametrize("retries", [0, 1])
+def test_ranker_retries_low_coverage_up_to_configured_limit(monkeypatch, retries):
+    post = Mock(
+        side_effect=[
+            _chat_response('{"ranked": []}'),
+            _chat_response('{"ranked": [{"code": "000001"}]}'),
+        ]
+    )
+    monkeypatch.setattr("alphasift.llm_client.requests.post", post)
+    monkeypatch.setenv("LLM_MAX_RETRIES", str(retries))
+    picks = [Pick(rank=1, code="000001", name="平安银行", screen_score=80, final_score=80)]
+    result = rank_candidates_with_metadata(
+        picks,
+        "",
+        "key",
+        "openai/test",
+        "https://gateway.test/v1",
+        max_retries=Config.from_env().llm_max_retries,
+        json_mode=False,
+    )
+
+    assert result.ranked is bool(retries)
+    assert post.call_count == retries + 1
+    assert all("response_format" not in call.kwargs["json"] for call in post.call_args_list)
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_ranker_degrades_on_http_error_or_timeout_without_leaking_keys(monkeypatch, caplog, timeout):
+    key = "private-example-api-key"
+    upstream = "sk-different-private-upstream-key"
+    if timeout:
+        post = Mock(side_effect=requests.Timeout(f"Request for {key} and {upstream} timed out"))
+    else:
+        post = Mock(return_value=_chat_response(f"Bad bearer {key} for upstream {upstream}", 401))
+    monkeypatch.setattr("alphasift.llm_client.requests.post", post)
+    picks = [Pick(rank=1, code="000001", name="平安银行", screen_score=80, final_score=80)]
+    result = rank_candidates_with_metadata(picks, "", key, "openai/test", "https://gateway.test/v1")
+
+    assert result.picks == picks
+    assert not result.ranked
+    assert picks[0].llm_score is None
+    assert result.errors == [
+        "LLM request timed out" if timeout else "LLM HTTP 401 Unauthorized: Bad *** for upstream ***"
+    ]
+    assert "falling back to screen_score" in caplog.text
+    for secret in (key, upstream):
+        assert secret not in caplog.text
+        assert secret not in str(result.errors)
+    assert post.call_count == 1
+
+
+def test_ranker_discards_partial_ranking_when_coverage_retry_times_out(monkeypatch):
+    post = Mock(
+        side_effect=[
+            _chat_response('{"ranked": [{"code": "000001", "llm_score": 99}]}'),
+            requests.ReadTimeout(),
+        ]
+    )
+    monkeypatch.setattr("alphasift.llm_client.requests.post", post)
+    picks = [
+        Pick(rank=1, code="000001", name="平安银行", screen_score=80, final_score=80),
+        Pick(rank=2, code="600000", name="浦发银行", screen_score=70, final_score=70),
+    ]
+
+    result = rank_candidates_with_metadata(picks, "", "key", "openai/test", "https://gateway.test/v1")
+
+    assert not result.ranked
+    assert result.picks is picks
+    assert [pick.llm_score for pick in result.picks] == [None, None]
+    assert result.errors == ["LLM request timed out"]
 
 
 def test_ranking_prompt_includes_structured_industry_context():
@@ -396,3 +473,185 @@ def test_ranking_prompt_is_bounded_and_keeps_required_fields():
     assert "prompt_trimmed" in prompt
     assert degradation
     assert degradation[0].startswith("LLM ranking prompt truncated:")
+
+
+def test_ranking_prompt_includes_red_flag_and_anti_familiarity_rules() -> None:
+    picks = [
+        Pick(rank=1, code="000001", name="示例公司", final_score=92.0, screen_score=92.0),
+    ]
+    prompt = _build_ranking_prompt(picks, hints="")
+    assert "<= 35" in prompt
+    assert "禁止品牌/名气偏见" in prompt
+
+
+def test_rank_candidates_enforces_red_flag_cap_retry_isolation_and_omitted_picks(monkeypatch) -> None:
+    from alphasift.ranker import rank_candidates_with_metadata
+
+    # 1. Code enforces llm_score <= 35 when unresolved adverse filing flags appear
+    p_bad = Pick(rank=1, code="600001", name="Example", final_score=80.0, screen_score=80.0)
+    monkeypatch.setattr(
+        "alphasift.ranker._call_llm",
+        lambda *_a, **_kw: json.dumps(
+            {
+                "ranked": [
+                    {
+                        "code": "600001",
+                        "llm_score": 95,
+                        "risk_flags": ["unresolved adverse filing"],
+                    }
+                ]
+            }
+        ),
+    )
+    capped = rank_candidates_with_metadata([p_bad], "", "k", "fake/model")
+    assert capped.ranked is True
+    assert capped.picks[0].llm_score == 35.0
+    assert "red_flag_capped" in capped.picks[0].risk_flags
+
+    # 2. Failed low-coverage attempt never mutates fallback picks' llm_score
+    picks_fail = [
+        Pick(rank=1, code="000001", name="A", final_score=80.0, screen_score=80.0),
+        Pick(rank=2, code="000002", name="B", final_score=75.0, screen_score=75.0),
+    ]
+    call_idx = {"n": 0}
+
+    def low_cov_then_crash(*_a, **_kw):
+        call_idx["n"] += 1
+        if call_idx["n"] == 1:
+            return json.dumps({"ranked": [{"code": "000001", "llm_score": 90}]})
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("alphasift.ranker._call_llm", low_cov_then_crash)
+    failed = rank_candidates_with_metadata(picks_fail, "", "k", "fake/model", max_retries=1, min_coverage=0.8)
+    assert failed.ranked is False
+    assert all(p.llm_score is None for p in failed.picks)
+
+    # 3. Omitted picks never receive synthetic LLM scores
+    picks_partial = [
+        Pick(rank=1, code="000001", name="A", final_score=80.0, screen_score=80.0),
+        Pick(rank=2, code="000002", name="B", final_score=75.0, screen_score=75.0),
+        Pick(rank=3, code="000003", name="C", final_score=70.0, screen_score=70.0),
+    ]
+    monkeypatch.setattr(
+        "alphasift.ranker._call_llm",
+        lambda *_a, **_kw: json.dumps(
+            {
+                "ranked": [
+                    {"code": "000001", "llm_score": 88},
+                    {"code": "000002", "llm_score": 82},
+                ]
+            }
+        ),
+    )
+    partial = rank_candidates_with_metadata(picks_partial, "", "k", "fake/model", min_coverage=0.6)
+    by_code = {p.code: p for p in partial.picks}
+    assert by_code["000003"].llm_score is None
+    assert by_code["000003"].final_score == 70.0
+    assert "llm_omitted" in by_code["000003"].risk_flags
+
+
+def test_rank_candidates_round6_negated_risk_dsa_news_omitted_cap_and_zero_cov(monkeypatch):
+    # 1. Negated risk phrases & benign "市场调查" do NOT trigger red-flag cap
+    p_clean = Pick(
+        rank=1,
+        code="600010",
+        name="CleanCorp",
+        final_score=80.0,
+        screen_score=80.0,
+        dsa_analysis_summary="公司公告无立案调查且已解除警示；完成年度市场调查。",
+    )
+    monkeypatch.setattr(
+        "alphasift.ranker._call_llm",
+        lambda *_a, **_kw: json.dumps({"ranked": [{"code": "600010", "llm_score": 90}]}),
+    )
+    res_clean = rank_candidates_with_metadata([p_clean], "", "k", "fake/model")
+    assert res_clean.ranked is True
+    assert res_clean.picks[0].llm_score == 90.0
+    assert "red_flag_capped" not in res_clean.picks[0].risk_flags
+
+    # 2. dsa_news adverse title triggers cap + omitted adverse pick also has final_score capped
+    p_news = Pick(
+        rank=1,
+        code="600011",
+        name="NewsRisk",
+        final_score=85.0,
+        screen_score=85.0,
+        dsa_news=[{"title": "公司收到证监会立案调查通知书"}],
+    )
+    p_omit_risk = Pick(
+        rank=2,
+        code="600012",
+        name="OmitRisk",
+        final_score=92.0,
+        screen_score=92.0,
+        risk_flags=["大股东减持"],
+    )
+    monkeypatch.setattr(
+        "alphasift.ranker._call_llm",
+        lambda *_a, **_kw: json.dumps({"ranked": [{"code": "600011", "llm_score": 96}]}),
+    )
+    res_mixed = rank_candidates_with_metadata(
+        [p_news, p_omit_risk],
+        "",
+        "k",
+        "fake/model",
+        rank_weight=0.40,
+        min_coverage=0.5,
+    )
+    by_code = {p.code: p for p in res_mixed.picks}
+    assert by_code["600011"].llm_score == 35.0
+    assert "red_flag_capped" in by_code["600011"].risk_flags
+    assert by_code["600012"].llm_score is None
+    assert "llm_omitted" in by_code["600012"].risk_flags
+    assert "red_flag_capped" in by_code["600012"].risk_flags
+    assert by_code["600012"].final_score == 92.0 * 0.6 + 35.0 * 0.4
+
+    # 3. Even with min_coverage=0.0, matched_count == 0 falls back safely (ranked=False)
+    p_zero = Pick(rank=1, code="600013", name="ZeroCov", final_score=77.0, screen_score=77.0)
+    monkeypatch.setattr(
+        "alphasift.ranker._call_llm",
+        lambda *_a, **_kw: json.dumps({"ranked": [{"code": "999999", "llm_score": 99}]}),
+    )
+    res_zero = rank_candidates_with_metadata([p_zero], "", "k", "fake/model", max_retries=0, min_coverage=0.0)
+    assert res_zero.ranked is False
+    assert res_zero.picks[0].llm_score is None
+
+    # 4. Pre-LLM pick.risk_summary is preserved even when LLM output omits or clears "risk"
+    p_prior_risk = Pick(
+        rank=1,
+        code="600014",
+        name="PriorRisk",
+        final_score=90.0,
+        screen_score=90.0,
+        risk_summary="立案调查尚未完结",
+    )
+    monkeypatch.setattr(
+        "alphasift.ranker._call_llm",
+        lambda *_a, **_kw: json.dumps({"ranked": [{"code": "600014", "llm_score": 99, "risk": ""}]}),
+    )
+    res_prior = rank_candidates_with_metadata([p_prior_risk], "", "k", "fake/model", max_retries=0)
+    assert res_prior.ranked is True
+    assert res_prior.picks[0].llm_score == 35.0
+    assert "red_flag_capped" in res_prior.picks[0].risk_flags
+    assert "立案调查尚未完结" in res_prior.picks[0].risk_summary
+    assert "触发红线上限(35)" in res_prior.picks[0].risk_summary
+
+
+def test_topic_alignment_fields_do_not_bloat_ranking_prompt():
+    base_pick = Pick(rank=1, code="600519", name="贵州茅台", final_score=80.0, screen_score=80.0, industry="白酒")
+    enriched_pick = Pick(
+        rank=1,
+        code="600519",
+        name="贵州茅台",
+        final_score=80.0,
+        screen_score=80.0,
+        industry="白酒",
+        topic_alignment_status="aligned",
+        topic_alignment_role="direct_industry",
+        topic_alignment_reason="直接行业命中热点路线: 白酒",
+        matched_topics=["白酒"],
+        unmatched_topics=["半导体"],
+    )
+    assert _build_ranking_prompt([enriched_pick], "hints", "ctx") == _build_ranking_prompt(
+        [base_pick], "hints", "ctx"
+    )

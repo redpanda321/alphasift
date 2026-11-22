@@ -209,6 +209,7 @@ def test_prepare_tushare_snapshot_maps_fields_and_units():
     assert normalized.loc[0, "turnover_rate"] == 2.5
     assert normalized.loc[0, "industry"] == "银行"
     assert normalized.attrs["snapshot_source"] == "tushare"
+    assert normalized.attrs["quote_date"] == "2026-04-30"
 
 
 def test_fetch_tushare_requires_token(monkeypatch):
@@ -507,8 +508,14 @@ def test_fetch_us_snapshot_single_ticker_with_multiindex(monkeypatch):
         def __init__(self, ticker):
             self.fast_info = FakeFastInfo()
 
+    download_kwargs: dict = {}
+
+    def fake_download(*args, **kwargs):
+        download_kwargs.update(kwargs)
+        return hist_df
+
     fake_yf = types.ModuleType("yfinance")
-    fake_yf.download = lambda *a, **kw: hist_df
+    fake_yf.download = fake_download
     fake_yf.Ticker = FakeTicker
     monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
 
@@ -518,3 +525,132 @@ def test_fetch_us_snapshot_single_ticker_with_multiindex(monkeypatch):
     assert len(df) == 1
     assert df.iloc[0]["code"] == "AAPL"
     assert df.iloc[0]["price"] > 0
+    assert df.attrs["market"] == "us"
+    assert df.attrs["quote_date"] == "2026-05-20"
+    assert download_kwargs["end"] > pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
+
+
+def test_fetch_sina_stops_when_snapshot_budget_is_spent(monkeypatch):
+    import alphasift.snapshot as snapshot_module
+
+    clock = {"now": 1000.0}
+    timeouts = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return [{"code": f"{len(timeouts):06d}", "name": "x", "trade": "1"}] * 80
+
+    def fake_get(url, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        clock["now"] += 4.0  # each page takes 4s; the budget is 10s
+        return FakeResponse()
+
+    monkeypatch.setenv("ALPHASIFT_SNAPSHOT_CALL_TIMEOUT_SEC", "10")
+    monkeypatch.setattr(snapshot_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr("alphasift.snapshot.requests.get", fake_get)
+
+    with pytest.raises(TimeoutError, match="sina exceeded 10s snapshot budget after 3 pages"):
+        _fetch_sina()
+
+    # Read timeouts shrink with the remaining budget, connect timeout stays short.
+    assert timeouts[0] == (5.0, 10.0)
+    assert timeouts[2][1] == pytest.approx(2.0)
+
+
+def test_page_budget_can_be_disabled(monkeypatch):
+    from alphasift.snapshot import _PageBudget
+
+    monkeypatch.setenv("ALPHASIFT_SNAPSHOT_CALL_TIMEOUT_SEC", "off")
+    budget = _PageBudget("sina", per_request_timeout=15.0)
+
+    assert budget.request_timeout() == (5.0, 15.0)
+
+
+def test_fetch_em_datacenter_requests_ohlcv_bse_and_quote_date(monkeypatch):
+    from alphasift.snapshot import _fetch_em_datacenter
+
+    captured: list[dict] = []
+
+    class FakeResp:
+        def json(self):
+            return {
+                "success": True,
+                "result": {
+                    "count": 2,
+                    "data": [
+                        {
+                            "SECUCODE": "000001.SZ",
+                            "SECURITY_CODE": "000001",
+                            "SECURITY_NAME_ABBR": "平安银行",
+                            "NEW_PRICE": 11.2,
+                            "OPEN_PRICE": 11.0,
+                            "HIGH_PRICE": 11.3,
+                            "LOW_PRICE": 10.95,
+                            "PRE_CLOSE_PRICE": 11.05,
+                            "VOLUME": 500000,
+                            "CHANGE_RATE": 1.36,
+                            "VOLUME_RATIO": 1.2,
+                            "DEAL_AMOUNT": 560000000.0,
+                            "TURNOVERRATE": 0.8,
+                            "PE9": 5.5,
+                            "PBNEWMRQ": 0.6,
+                            "TOTAL_MARKET_CAP": 2.1e11,
+                            "FREE_CAP": 2.0e11,
+                            "INDUSTRY": "银行",
+                            "MAX_TRADE_DATE": "2026-11-20",
+                        },
+                        {
+                            "SECUCODE": "920000.BJ",
+                            "SECURITY_CODE": "920000",
+                            "SECURITY_NAME_ABBR": "安徽凤凰",
+                            "NEW_PRICE": 22.5,
+                            "OPEN_PRICE": 22.0,
+                            "HIGH_PRICE": 22.9,
+                            "LOW_PRICE": 21.8,
+                            "PRE_CLOSE_PRICE": 21.9,
+                            "VOLUME": 12000,
+                            "CHANGE_RATE": 2.74,
+                            "VOLUME_RATIO": 1.4,
+                            "DEAL_AMOUNT": 27000000.0,
+                            "TURNOVERRATE": 2.1,
+                            "PE9": 18.0,
+                            "PBNEWMRQ": 2.4,
+                            "TOTAL_MARKET_CAP": 2.0e9,
+                            "FREE_CAP": 1.2e9,
+                            "INDUSTRY": "汽车零部件",
+                            "MAX_TRADE_DATE": "2026-11-20",
+                        },
+                    ],
+                },
+            }
+
+    def fake_em_get(url, *, params, headers, timeout):
+        captured.append(params)
+        return FakeResp()
+
+    monkeypatch.setattr("alphasift.snapshot._eastmoney_get", fake_em_get)
+    df = _fetch_em_datacenter()
+
+    assert len(captured) == 1
+    sty = captured[0]["sty"]
+    for field in (
+        "OPEN_PRICE",
+        "HIGH_PRICE",
+        "LOW_PRICE",
+        "PRE_CLOSE_PRICE",
+        "VOLUME",
+        "FREE_CAP",
+        "MAX_TRADE_DATE",
+    ):
+        assert field in sty
+    assert "北京证券交易所" in captured[0]["filter"]
+    assert df.attrs["snapshot_source"] == "em_datacenter"
+    assert df.attrs["quote_date"] == "2026-11-20"
+    assert df["code"].tolist() == ["000001", "920000"]
+    assert df.loc[0, "OPEN_PRICE"] == 11.0
+    assert df.loc[0, "circ_mv"] == pytest.approx(2.0e11)
+    assert df.loc[1, "PRE_CLOSE_PRICE"] == 21.9
+    assert df.loc[1, "circ_mv"] == pytest.approx(1.2e9)

@@ -49,13 +49,14 @@ style:                    # 可选，面向 UI/agent 的策略风格，不参与
 
 screening:
   enabled: bool            # 是否启用选股
-  market_scope: [string]   # 适用市场，当前仅 [cn]
+  market_scope: [string]   # 适用市场：cn / us / hk / jp / kr / tw / in，默认 [cn]
 
   hard_filters:            # L1 硬筛条件（全部可选，不填则不筛）
     exclude_st: bool       # 排除 ST
     price_min: float       # 最低价格
     price_max: float       # 最高价格
-    amount_min: float      # 最低成交额（元）
+    amount_min: float      # 最低成交额（当地货币，A 股为元）
+    avg_amount_usd_min: float  # 估算日均成交额下限（美元，非 A 股；当前价 × 近 10 日平均成交量，按市场近似汇率折算）
     market_cap_min: float  # 最低总市值
     market_cap_max: float  # 最高总市值
     pe_ttm_min: float      # 最低 PE(TTM)
@@ -86,6 +87,7 @@ screening:
     theme_heat: float      # 主题/板块热度，可选软因子
 
   scoring_profile:         # 可选，覆盖 L1 因子评分曲线中的默认参数
+    factor_rank_blend: float  # 0-1，合成 screen_score 时混入截面排名分对齐离散度（Pick.factor_scores 保持原始公式分）
     momentum_chase_start_pct: float
     activity_ideal_volume_ratio: float
     activity_ideal_turnover_rate: float
@@ -104,7 +106,8 @@ screening:
     low_daily_quality_score: float
     fetch_failed_daily_points: float
 
-  portfolio_profile:       # 可选，覆盖 LLM 行业/主题风险桶
+  portfolio_profile:       # 可选，控制行业/主题集中度
+    mode: soft | hard_cap  # soft（默认）只扣分；hard_cap 让 Top N 优先选不超过 max_same_bucket 的同桶股票（候选不足时用超出的补足；无行业标签的不受限）
     max_same_bucket: int
     concentration_penalty: float
     buckets:
@@ -188,6 +191,8 @@ alphasift strategies --template momentum_breakout_daily --json
 - 低波动价值策略可降低 `chase_change_pct`、`volume_spike_ratio`
 - 高弹性题材策略可提高 `high_turnover_rate`、`abnormal_volume_ratio`
 - 行业集中度偏好可用 `portfolio_profile.buckets` 调整，例如把银行、券商、保险归为金融风险桶
+- 默认 `soft` 模式只按超出数量扣分，分差大时同一行业仍可能占满前几名；需要硬性分散时设 `mode: hard_cap`，超出上限的候选会排到所有未超限候选之后，只在其他行业候选不足时才回补。行业来自 LLM 行业判断或快照/行业映射中的 `industry` 字段，没有行业标签的候选不受上限约束
+- 线性公式因子（`momentum`、`reversal`、`activity`、`stability`）截面离散度通常远小于排名因子（`value`、`liquidity`、`size`）；多因子或趋势质量策略若希望与市值/流动性同尺度竞争排名，可在 `scoring_profile` 中设置 `factor_rank_blend`（如 `1.0`），`Pick.factor_scores` 仍保留原始公式分，小样本池（`n <= 5`）会自动退回 `0.0`
 - 事件驱动策略可用 `event_profile` 偏好回购、订单、业绩改善，也可以提高公告相对新闻的来源权重
 
 不要把 profile 当作回测拟合参数频繁调到极端值；它更适合表达策略风格和风险偏好。

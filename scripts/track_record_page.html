@@ -1,0 +1,3353 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23090d16'/%3E%3Cpath d='M6 8h20l-7.5 8.8v6.6l-5 2.4V16.8L6 8z' fill='%233b82f6' fill-opacity='.25' stroke='%2360a5fa' stroke-width='2.2' stroke-linejoin='round'/%3E%3Ccircle cx='23' cy='23' r='2.5' fill='%2334d399'/%3E%3C/svg%3E">
+<title>AlphaSift · 量化形态观测与回测基准</title>
+<meta name="description" content="AlphaSift 开源全市场选股与验证引擎：A 股盘面宽度与情绪分布、多策略共识、公告排雷、规则 vs AI 同日配对归因、形态 250 日聚日验证与 T+5 / T+10 / T+20 不可成交口径评估。">
+<link rel="canonical" href="https://alphasift.zhulinsen.tech/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="AlphaSift">
+<meta property="og:title" content="AlphaSift · 形态 + AI 选股与多策略公开跟踪曲线">
+<meta property="og:description" content="A股/美股/港股等7市场每日自动选股、K线形态雷达、公告排雷、AI复盘日报与公开 T+5/T+10/T+20 策略跟踪曲线。">
+<meta property="og:url" content="https://alphasift.zhulinsen.tech/">
+<meta property="og:image" content="https://alphasift.zhulinsen.tech/social-preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="AlphaSift · 形态 + AI 选股与多策略公开跟踪曲线">
+<meta name="twitter:description" content="A股/美股/港股等7市场每日自动选股、K线形态雷达、公告排雷、AI复盘日报与公开 T+5/T+10/T+20 策略跟踪曲线。">
+<meta name="twitter:image" content="https://alphasift.zhulinsen.tech/social-preview.png">
+<link rel="alternate" type="application/atom+xml" title="AlphaSift Daily Feed" href="site/feed.xml">
+<style>
+:root {
+  --bg: #09090b;
+  --bg-elevated: #0e0e12;
+  --surface: #111115;
+  --surface-2: #17171d;
+  --surface-hover: #1c1c24;
+  --ink: #f4f4f5;
+  --ink-2: #d4d4d8;
+  --muted: #8e8e9a;
+  --subtle: #5c5c68;
+  --border: rgba(255, 255, 255, 0.085);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --glass: rgba(9, 9, 11, 0.78);
+  --accent: #3b82f6;
+  --accent-hi: #60a5fa;
+  --accent-soft: rgba(59, 130, 246, 0.14);
+  --up: #f87171;
+  --up-strong: #ef4444;
+  --up-soft: rgba(248, 113, 113, 0.13);
+  --down: #34d399;
+  --down-strong: #10b981;
+  --down-soft: rgba(52, 211, 153, 0.12);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.14);
+  --status-ok: #38bdf8;
+  --status-ok-soft: rgba(56, 189, 248, 0.13);
+  --status-err: #f43f5e;
+  --status-err-soft: rgba(244, 63, 94, 0.14);
+  --chip: rgba(255, 255, 255, 0.06);
+  --shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 10px 30px -15px rgba(0, 0, 0, 0.65);
+  --grid-dot: rgba(255, 255, 255, 0.035);
+  --glow: rgba(59, 130, 246, 0.09);
+  --s1: #60a5fa; --s2: #f87171; --s3: #34d399; --s4: #fbbf24;
+  --s5: #38bdf8; --s6: #fb923c; --s7: #e879f9; --s8: #94a3b8;
+  --s9: #a3e635; --s10: #2dd4bf; --s11: #fda4af; --s12: #c4b5fd;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  --bg: #fafafa;
+  --bg-elevated: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f4f4f5;
+  --surface-hover: #eceef2;
+  --ink: #09090b;
+  --ink-2: #27272a;
+  --muted: #52525b;
+  --subtle: #71717a;
+  --border: rgba(9, 9, 11, 0.09);
+  --border-strong: rgba(9, 9, 11, 0.18);
+  --glass: rgba(250, 250, 250, 0.84);
+  --accent: #1d4ed8;
+  --accent-hi: #2563eb;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --up: #dc2626;
+  --up-strong: #b91c1c;
+  --up-soft: rgba(220, 38, 38, 0.09);
+  --down: #059669;
+  --down-strong: #047857;
+  --down-soft: rgba(5, 150, 105, 0.1);
+  --warn: #b45309;
+  --warn-soft: rgba(180, 83, 9, 0.1);
+  --status-ok: #0284c7;
+  --status-ok-soft: rgba(2, 132, 199, 0.1);
+  --status-err: #e11d48;
+  --status-err-soft: rgba(225, 29, 72, 0.1);
+  --chip: rgba(9, 9, 11, 0.055);
+  --shadow: 0 1px 2px rgba(9, 9, 11, 0.04), 0 8px 24px -16px rgba(9, 9, 11, 0.08);
+  --grid-dot: rgba(9, 9, 11, 0.045);
+  --glow: rgba(37, 99, 235, 0.055);
+  --s1: #2563eb; --s2: #dc2626; --s3: #059669; --s4: #d97706;
+  --s5: #0284c7; --s6: #ea580c; --s7: #9333ea; --s8: #475569;
+  --s9: #65a30d; --s10: #0d9488; --s11: #e11d48; --s12: #4f46e5;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  color: var(--ink);
+  font: 13.5px/1.55 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(ellipse 80% 420px at 50% -80px, var(--glow), transparent 72%),
+    radial-gradient(var(--grid-dot) 1px, transparent 1px);
+  background-size: 100% 100%, 24px 24px;
+  min-height: 100vh;
+}
+
+a { color: var(--accent-hi); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code {
+  font-family: var(--font-mono); font-size: 0.9em;
+  background: var(--chip); padding: 1px 5px; border-radius: 5px; border: 1px solid var(--border);
+}
+
+/* Sticky Navigation Bar */
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  background: var(--glass);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.topbar-inner {
+  max-width: 1280px; margin: 0 auto; padding: 10px 20px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.brand-group { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-link {
+  display: inline-flex; align-items: center; gap: 9px; color: var(--ink);
+  font-weight: 700; font-size: 15px; letter-spacing: -0.02em; text-decoration: none;
+}
+.brand-link:hover { text-decoration: none; opacity: 0.92; }
+.brand-mark {
+  width: 26px; height: 26px; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--accent-hi);
+}
+.live-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  font-family: var(--font-mono); letter-spacing: 0.02em;
+  background: var(--down-soft); color: var(--down); border: 1px solid rgba(52, 211, 153, 0.24);
+  white-space: nowrap;
+}
+.live-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--down);
+  box-shadow: 0 0 8px var(--down);
+}
+
+.nav-center {
+  display: flex; align-items: center; gap: 2px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 3px;
+}
+.nav-center a {
+  padding: 4px 11px; border-radius: 999px; font-size: 12px; font-weight: 500;
+  color: var(--muted); transition: color 0.15s, background 0.15s; white-space: nowrap;
+}
+.nav-center a:hover { color: var(--ink); background: var(--chip); text-decoration: none; }
+
+.top-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.action-btn, .github-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border-radius: 8px; font-size: 12px; font-weight: 500;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+  cursor: pointer; transition: border-color 0.15s, background 0.15s, color 0.15s; white-space: nowrap;
+  font-family: inherit;
+}
+.action-btn:hover, .github-btn:hover {
+  border-color: var(--border-strong); background: var(--surface-2); color: var(--ink); text-decoration: none;
+}
+.github-btn {
+  background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 600;
+}
+.github-btn:hover { opacity: 0.9; background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+.lang-switch {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--border); background: var(--surface); border-radius: 8px;
+  padding: 2px; gap: 2px;
+}
+.lang-switch button {
+  border: 0; background: transparent; color: var(--muted);
+  padding: 3px 7px; border-radius: 6px; font: inherit; font-size: 11.5px; font-weight: 600;
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.lang-switch button:hover { color: var(--ink); background: var(--chip); }
+.lang-switch button[aria-pressed="true"] {
+  background: var(--accent-soft); color: var(--accent-hi);
+}
+
+/* Container */
+main { max-width: 1280px; margin: 0 auto; padding: 24px 20px 72px; }
+
+/* Editorial Masthead */
+.masthead {
+  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+  gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--border);
+}
+.masthead-left { max-width: 780px; }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--accent-hi); margin-bottom: 8px; font-family: var(--font-mono);
+}
+.masthead h1 {
+  margin: 0; font-size: clamp(22px, 2.8vw, 30px); line-height: 1.18;
+  font-weight: 700; letter-spacing: -0.03em; color: var(--ink);
+}
+.masthead-sub {
+  margin: 8px 0 0; color: var(--muted); font-size: 13.5px; line-height: 1.55;
+}
+.masthead-right {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+}
+.meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; align-items: center; }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; border-radius: 6px; font-size: 11.5px; color: var(--muted);
+  background: var(--surface); border: 1px solid var(--border); font-family: var(--font-mono);
+}
+.chip.ok { background: var(--down-soft); color: var(--down); border-color: rgba(52, 211, 153, 0.25); font-weight: 600; }
+.chip.bad { background: var(--up-soft); color: var(--up); border-color: rgba(248, 113, 113, 0.28); font-weight: 600; }
+.chip.accent { background: var(--accent-soft); color: var(--accent-hi); border-color: rgba(59, 130, 246, 0.25); font-weight: 600; }
+.chip.warn { background: var(--warn-soft); color: var(--warn); border-color: rgba(251, 191, 36, 0.28); font-weight: 600; }
+
+.stale-banner {
+  display: none; margin-top: 14px; padding: 11px 14px; border-radius: 10px;
+  background: var(--warn-soft); border: 1px solid rgba(251, 191, 36, 0.38);
+  color: var(--ink); font-size: 12.5px;
+}
+.stale-banner.show { display: block; }
+
+.health-strip {
+  margin-top: 14px; padding: 8px 12px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 12px;
+}
+.health-item {
+  display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap;
+}
+.health-item strong { color: var(--ink-2); font-weight: 600; }
+.health-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+.health-dot.ok { background: var(--status-ok); box-shadow: 0 0 6px var(--status-ok-soft); }
+.health-dot.pend { background: var(--warn); }
+.health-dot.err { background: var(--status-err); }
+.status-ok { color: var(--status-ok); }
+.status-err { color: var(--status-err); }
+.badge.ok-neutral { color: var(--status-ok); border-color: rgba(56, 189, 248, 0.35); background: var(--status-ok-soft); }
+.badge.pending { color: var(--warn); border-color: rgba(251, 191, 36, 0.35); background: var(--warn-soft); }
+
+/* Unified 4-Col Hairline KPI Strip */
+.kpi-strip {
+  margin-top: 18px;
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px; background: var(--border);
+  border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+  box-shadow: var(--shadow);
+}
+.kpi-cell {
+  background: var(--surface); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 4px; min-width: 0;
+}
+.kpi-label {
+  font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.03em;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+}
+.kpi-val {
+  font-size: clamp(20px, 2vw, 24px); font-weight: 700; letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums; font-family: var(--font-mono); line-height: 1.2; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.kpi-foot {
+  font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Section Headers */
+section { margin-top: 28px; scroll-margin-top: 66px; }
+.sec-head {
+  display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px;
+  margin-bottom: 12px;
+}
+.sec-head h2 {
+  margin: 0; font-size: 16.5px; font-weight: 700; letter-spacing: -0.015em;
+  display: flex; align-items: center; gap: 8px;
+}
+.sec-num {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  color: var(--accent-hi); background: var(--accent-soft); padding: 1px 6px; border-radius: 5px;
+}
+.sec-hint { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+
+/* Panels & Asymmetric Bento Grid */
+.panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.bento-command {
+  display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 14px; align-items: stretch;
+}
+.bento-pane {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; min-width: 0;
+}
+.pane-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+}
+.pane-title {
+  font-size: 14.5px; font-weight: 700; letter-spacing: -0.01em; display: flex; align-items: center; gap: 7px;
+}
+
+/* Brief Callout & Alert Bar */
+.brief-callout {
+  padding: 10px 12px; border-radius: 9px;
+  background: var(--surface-2); border: 1px solid var(--border); border-left: 3px solid var(--accent-hi);
+  font-size: 13px; line-height: 1.5; color: var(--ink-2);
+}
+.brief-callout b { color: var(--ink); }
+.alert-strip {
+  padding: 9px 12px; border-radius: 9px;
+  background: var(--up-soft); border: 1px solid rgba(248, 113, 113, 0.28);
+  font-size: 12.5px; display: flex; flex-direction: column; gap: 4px;
+}
+.alert-ok {
+  padding: 7px 11px; border-radius: 8px;
+  background: var(--down-soft); border: 1px solid rgba(52, 211, 153, 0.22);
+  color: var(--down); font-size: 12px; font-weight: 500;
+}
+
+/* Sector Concentration Strip */
+.sector-pills {
+  display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--border);
+}
+.sector-row {
+  display: grid; grid-template-columns: 92px 1fr 76px; align-items: center; gap: 8px; font-size: 12px;
+}
+.bar-track {
+  height: 7px; border-radius: 999px; background: var(--chip); overflow: hidden; position: relative;
+}
+.bar-fill {
+  height: 100%; border-radius: 999px; background: var(--accent-hi);
+}
+.bar-fill.up-bg { background: var(--up); }
+
+/* Right Bento: CN Regime & Multi-Market Snapshot */
+.cn-stat-2x2 {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+}
+.mini-stat {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+}
+.mini-stat .lbl { font-size: 11px; color: var(--muted); }
+.mini-stat .val { font-size: 15px; font-weight: 700; font-family: var(--font-mono); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.mini-stat .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.breadth-bar {
+  height: 8px; border-radius: 999px; overflow: hidden; display: flex; background: var(--chip);
+}
+.breadth-bar span { height: 100%; display: block; }
+.breadth-meta { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); }
+.dist-svg { width: 100%; height: 116px; display: block; }
+
+.ladder-list { display: flex; flex-direction: column; gap: 6px; }
+.ladder-row {
+  display: grid; grid-template-columns: 56px 1fr 56px; align-items: center; gap: 8px; font-size: 12px; font-family: var(--font-mono);
+}
+.hist-ribbon { display: flex; flex-wrap: wrap; gap: 5px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.hist-pill {
+  font-size: 11px; padding: 2px 7px; border-radius: 5px; background: var(--surface-2);
+  border: 1px solid var(--border); color: var(--muted); font-family: var(--font-mono);
+}
+
+.mkt-snap-list { display: flex; flex-direction: column; gap: 8px; }
+.mkt-snap-row {
+  display: grid; grid-template-columns: 72px minmax(0, 1fr) 74px; align-items: center; gap: 10px;
+  padding: 7px 9px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border);
+}
+.mkt-snap-mid { min-width: 0; }
+.mkt-snap-strat { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mkt-snap-meta { font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
+.mkt-snap-val { text-align: right; font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
+
+/* Controls / Toolbars */
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.seg {
+  display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
+  overflow: hidden; background: var(--surface); padding: 2px; gap: 2px;
+}
+.seg button {
+  border: 0; background: transparent; color: var(--muted); padding: 4px 10px;
+  border-radius: 6px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer;
+  transition: background 0.15s, color 0.15s; white-space: nowrap;
+}
+.seg button:hover { color: var(--ink); background: var(--chip); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #ffffff; font-weight: 600; }
+
+.pill-tabs { display: flex; flex-wrap: wrap; gap: 5px; }
+.pill-tab {
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  border-radius: 999px; padding: 4px 11px; font: inherit; font-size: 12px; font-weight: 500;
+  cursor: pointer; transition: all 0.15s; white-space: nowrap;
+}
+.pill-tab:hover { color: var(--ink); border-color: var(--border-strong); }
+.pill-tab[aria-pressed="true"] {
+  background: var(--accent-soft); color: var(--accent-hi); border-color: rgba(59, 130, 246, 0.35); font-weight: 600;
+}
+
+select, .search-input {
+  font: inherit; font-size: 12.5px; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px; outline: none;
+}
+select:focus, .search-input:focus { border-color: var(--accent-hi); }
+.search-input { min-width: 210px; }
+
+/* Precision Financial Tables */
+.scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td {
+  padding: 9px 11px; text-align: right; white-space: nowrap;
+  border-bottom: 1px solid var(--border); font-size: 12.5px;
+}
+table.compact-tbl th, table.compact-tbl td {
+  padding: 6px 4px; font-size: 11px;
+}
+table.compact-tbl th { font-size: 10px; }
+th {
+  font-weight: 600; color: var(--muted); font-size: 11px; letter-spacing: 0.03em;
+  background: var(--surface-2); text-transform: uppercase;
+}
+th:first-child, td:first-child, th.l, td.l { text-align: left; }
+tbody tr { transition: background 0.12s; }
+tbody tr:hover { background: var(--surface-hover); }
+tr:last-child td { border-bottom: 0; }
+tr.low-sample td, td.muted-cell { color: var(--muted); opacity: 0.78; }
+.ico { width: 14px; height: 14px; display: inline-block; vertical-align: -2px; flex-shrink: 0; }
+
+.rank-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 20px; border-radius: 5px; padding: 0 5px;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  background: var(--chip); color: var(--muted);
+}
+.rank-num.top { background: var(--accent-soft); color: var(--accent-hi); }
+
+.div-bar-wrap { display: inline-flex; align-items: center; gap: 7px; justify-content: flex-end; }
+.div-track { width: 58px; height: 5px; border-radius: 999px; background: var(--chip); overflow: hidden; }
+.div-fill { height: 100%; border-radius: 999px; }
+
+.up { color: var(--up); } .down { color: var(--down); } .dim { color: var(--muted); }
+.warn { color: var(--warn); font-weight: 600; }
+.small { font-size: 11.5px; }
+.mono { font-family: var(--font-mono); }
+.tag { font-size: 11px; color: var(--warn); margin-left: 4px; font-family: var(--font-mono); }
+.badge {
+  display: inline-block; padding: 1px 6px; border-radius: 5px; font-size: 11px;
+  font-weight: 600; vertical-align: middle; margin-left: 4px;
+  background: var(--chip); color: var(--muted); border: 1px solid var(--border);
+}
+.badge.ai { color: var(--accent-hi); border-color: rgba(59, 130, 246, 0.35); background: var(--accent-soft); }
+.badge.active { color: var(--down); border-color: rgba(52, 211, 153, 0.3); background: var(--down-soft); }
+.badge.bad { color: var(--up); border-color: rgba(248, 113, 113, 0.3); background: var(--up-soft); }
+.badge.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.35); background: var(--warn-soft); }
+.badge.exp { color: var(--muted); }
+.badge.mode { font-weight: 500; font-size: 10.5px; font-family: var(--font-mono); }
+
+.news-strip {
+  padding: 10px 12px; border-radius: 9px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.news-strip-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 11.5px; color: var(--muted); font-weight: 600;
+}
+.news-row {
+  display: flex; align-items: baseline; gap: 8px; font-size: 12px; line-height: 1.45; min-width: 0;
+}
+.news-meta {
+  flex-shrink: 0; font-family: var(--font-mono); font-size: 10.5px; color: var(--muted);
+}
+.news-title {
+  color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+a.news-title:hover { color: var(--accent-hi); }
+.chart svg text.end-lbl { font-family: var(--font-sans); font-size: 11px; font-weight: 600; }
+
+/* Chart Panel & Tooltip */
+.chart-wrap { position: relative; padding: 14px 16px 8px; }
+.chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart-tip {
+  position: absolute; pointer-events: none; z-index: 10; display: none;
+  padding: 8px 10px; border-radius: 8px; font-size: 12px;
+  background: var(--glass); border: 1px solid var(--border-strong); color: var(--ink);
+  backdrop-filter: blur(10px); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-mono); white-space: nowrap;
+}
+.legend {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px 14px;
+  border-top: 1px solid var(--border);
+}
+.legend-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px; font: inherit; font-size: 11.5px;
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
+  cursor: pointer; transition: all 0.15s;
+}
+.legend-btn:hover { border-color: var(--border-strong); color: var(--ink); }
+.legend-btn.focused { border-color: var(--accent-hi); color: var(--ink); background: var(--accent-soft); }
+.legend-btn i { display: inline-block; width: 12px; height: 2.5px; border-radius: 2px; }
+.legend-btn i.dashed { background: none !important; border-top: 2px dashed currentColor; height: 0; }
+
+/* Cards & Mini K-line */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.card-top { padding: 12px 14px 8px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.card h3 { font-size: 13.5px; margin: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card .sub { margin-top: 3px; color: var(--muted); font-size: 11.5px; font-family: var(--font-mono); }
+.card td, .card th { padding: 6px 10px; font-size: 12px; }
+.bento-pane table th, .bento-pane table td { padding: 7px 6px; font-size: 12px; }
+.kline { width: 96px; height: 28px; display: inline-block; vertical-align: middle; }
+.sparkline { width: 64px; height: 18px; display: inline-block; vertical-align: middle; }
+.pat-meta-row {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 6px 14px; border-bottom: 1px solid var(--border);
+  font-size: 11px; color: var(--muted); font-family: var(--font-mono);
+}
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Collapsible Details */
+details.sec-details {
+  margin-top: 18px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow); padding: 14px 18px;
+}
+details.sec-details > summary.sec-summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
+}
+details.sec-details > summary.sec-summary::-webkit-details-marker { display: none; }
+details.sec-details > summary.sec-summary::after {
+  content: "展开 ▾"; font-size: 12px; font-weight: 500; color: var(--muted);
+  padding: 2px 9px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2);
+}
+details.sec-details[open] > summary.sec-summary::after { content: "收起 ▴"; }
+:root[data-lang="en"] details.sec-details > summary.sec-summary::after { content: "Expand ▾"; }
+:root[data-lang="en"] details.sec-details[open] > summary.sec-summary::after { content: "Collapse ▴"; }
+:root[data-lang="ja"] details.sec-details > summary.sec-summary::after { content: "展開 ▾"; }
+:root[data-lang="ja"] details.sec-details[open] > summary.sec-summary::after { content: "閉じる ▴"; }
+details.sec-details > .sec-body { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+.baseline-strip {
+  display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 12px; margin-bottom: 12px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  font-size: 12px; font-family: var(--font-mono);
+}
+.subhead { font-size: 13.5px; font-weight: 700; margin: 16px 0 8px; color: var(--ink); }
+.empty { padding: 20px; text-align: center; color: var(--muted); font-size: 12.5px; }
+
+footer {
+  margin-top: 48px; padding: 20px 0 0; border-top: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px;
+  color: var(--muted); font-size: 12px;
+}
+.footer-links { display: flex; flex-wrap: wrap; gap: 14px; }
+
+@media (max-width: 1100px) {
+  .bento-command { grid-template-columns: 1fr; }
+  .kpi-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .nav-center { display: none; }
+}
+@media (max-width: 640px) {
+  .topbar-inner { padding: 8px 10px; gap: 6px; }
+  .brand-group { gap: 6px; }
+  .brand-link { flex-shrink: 0; font-size: 14px; gap: 6px; }
+  .brand-mark { width: 24px; height: 24px; }
+  .top-actions { gap: 4px; }
+  .action-btn, .github-btn { padding: 5px 7px; font-size: 11.5px; gap: 4px; }
+  .lang-switch button { padding: 3px 5px; font-size: 11px; }
+  main { padding: 16px 14px 52px; }
+  .kpi-strip { grid-template-columns: 1fr; }
+  .cards { grid-template-columns: 1fr; }
+  .live-pill { display: none; }
+  .action-btn .btn-lbl { display: none; }
+}
+@media (max-width: 460px) {
+  .github-btn span, #theme-toggle span { display: none; }
+}
+</style>
+</head>
+<body>
+<nav class="topbar">
+  <div class="topbar-inner">
+    <div class="brand-group">
+      <a class="brand-link" href="#top">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 5h18l-7 8v5l-4 2v-7L3 5z"/>
+          </svg>
+        </span>
+        <span>AlphaSift</span>
+      </a>
+      <span class="live-pill" id="live-pill"><span class="live-dot"></span>7 Markets</span>
+    </div>
+
+    <div class="nav-center" data-i18n-aria="nav_aria" aria-label="主导航">
+      <a href="#overview" data-i18n="nav_overview">焦点总览</a>
+      <a href="#leaderboard" data-i18n="nav_leaderboard">策略排行</a>
+      <a href="#trend-section" data-i18n="nav_trend">超额走势</a>
+      <a href="#explorer" data-i18n="nav_explorer">选股浏览</a>
+      <a href="#track-comparison-section" data-i18n="nav_ai">AI 归因</a>
+      <a href="#radar-section" data-i18n="nav_patterns">形态雷达</a>
+    </div>
+
+    <div class="top-actions">
+      <a class="action-btn" id="report-top-link" href="site/daily_report.html" data-i18n-title="nav_report_title" title="可打印盘后投研日报" style="display:none;">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+        <span class="btn-lbl" data-i18n="nav_report">今日研报</span>
+      </a>
+      <a class="action-btn" href="https://github.com/ZhuLinsen/alphasift/tree/track-record" target="_blank" rel="noopener" data-i18n-title="nav_ledger_title" title="查看 track-record 分支 Git 可审计原始运行日志">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        <span class="btn-lbl" data-i18n="nav_ledger">原始账本</span>
+      </a>
+      <a class="github-btn" href="https://github.com/ZhuLinsen/alphasift" target="_blank" rel="noopener">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.11.78-.25.78-.55 0-.27-.01-1.18-.02-2.14-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.72.08-.71.08-.71 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.71 1.26 3.37.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.06 11.06 0 0 1 5.78 0c2.21-1.49 3.18-1.18 3.18-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.26 5.68.41.36.78 1.06.78 2.15 0 1.55-.01 2.8-.01 3.18 0 .31.21.67.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/>
+        </svg>
+        <span>GitHub</span>
+      </a>
+      <div class="lang-switch" id="lang-switch" role="group" aria-label="Language">
+        <button type="button" data-lang="zh" aria-pressed="true">中</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+        <button type="button" data-lang="ja" aria-pressed="false">日</button>
+      </div>
+      <button type="button" class="action-btn" id="theme-toggle" data-i18n-aria="theme_aria" aria-label="切换明暗主题">亮色</button>
+    </div>
+  </div>
+</nav>
+
+<main id="top">
+  <header class="masthead">
+    <div class="masthead-left">
+      <div class="eyebrow" data-i18n="hero_eyebrow">OPEN-SOURCE QUANTITATIVE DISCOVERY &amp; T+N BENCHMARK</div>
+      <h1 data-i18n="hero_title">AlphaSift · 量化形态观测与回测基准</h1>
+      <p class="masthead-sub" data-i18n-html="hero_sub">每交易日收盘自动运行全市场 YAML 策略、公告排雷与可选 AI 重排，按 <code>T+5 / T+10 / T+20</code> 真实行情与一字涨停不可成交口径公开验证超额收益。</p>
+      <div class="meta" id="meta"></div>
+    </div>
+    <div class="masthead-right">
+      <a class="action-btn" href="https://github.com/ZhuLinsen/alphasift#readme" target="_blank" rel="noopener">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        <span data-i18n="btn_docs">使用文档</span>
+      </a>
+      <a class="action-btn" href="https://github.com/ZhuLinsen/alphasift/tree/main/strategies" target="_blank" rel="noopener">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+        <span data-i18n="btn_strategies">内置策略</span>
+      </a>
+    </div>
+  </header>
+
+  <div class="stale-banner" id="stale-banner"></div>
+  <div class="health-strip" id="health-strip"></div>
+
+  <div class="kpi-strip" id="kpi-strip">
+    <div class="kpi-cell"><div class="kpi-label" data-i18n="loading">加载中</div><div class="kpi-val">–</div><div class="kpi-foot" data-i18n="loading_sub">读取公开战绩与盘面统计…</div></div>
+  </div>
+
+  <!-- 01 · Focus Command Center -->
+  <section id="overview">
+    <div class="sec-head">
+      <div>
+        <h2><span class="sec-num">01</span><span data-i18n="sec1_title">今日高共识精选与盘面快照</span></h2>
+        <p class="sec-hint" data-i18n="sec1_hint">优先提取多策略共同命中标的、公告排雷结论，以及 A 股宽度/全球 7 市场领跑基准，首屏直给核心信号。</p>
+      </div>
+    </div>
+    <div class="bento-command">
+      <div class="bento-pane" id="consensus-pane">
+        <div class="empty" data-i18n="loading_consensus">正在分析今日跨策略共识候选…</div>
+      </div>
+      <div class="bento-pane" id="cn-hero-grid">
+        <div class="empty" data-i18n="loading_hero">加载盘面与跨市场快照…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 · Strategy Leaderboard -->
+  <section id="leaderboard">
+    <div class="sec-head">
+      <div>
+        <h2><span class="sec-num">02</span><span data-i18n="sec2_title">策略 T+N 超额排行榜</span></h2>
+        <p class="sec-hint" data-i18n-html="sec2_hint">按单只选股统计已到期窗口（超额 = 选股收益 − 同期市场基准收益）；切换日前 <code>close</code> 口径标为「未评估」，切换日起 <code>next_open</code> 统计一字涨停不可成交率。</p>
+      </div>
+      <div class="controls" style="margin-bottom:0;">
+        <div class="seg" id="win-score"></div>
+        <select id="sort-score" data-i18n-aria="sort_aria" aria-label="排序维度">
+          <option value="excess" data-i18n="sort_excess">按超额收益</option>
+          <option value="beat" data-i18n="sort_beat">按跑赢基准率</option>
+          <option value="return" data-i18n="sort_return">按绝对收益</option>
+          <option value="evaluated" data-i18n="sort_evaluated">按样本数</option>
+        </select>
+      </div>
+    </div>
+    <div class="controls" style="margin-bottom:10px;">
+      <div class="pill-tabs" id="market-score-pills"></div>
+    </div>
+    <div class="panel scroll"><table id="scorecard"></table></div>
+  </section>
+
+  <!-- 03 · Cumulative Excess Trend -->
+  <section id="trend-section">
+    <div class="sec-head">
+      <div>
+        <h2><span class="sec-num">03</span><span data-i18n="sec3_title">分赛道累计超额收益走势</span></h2>
+        <p class="sec-hint" data-i18n="sec3_hint">纯规则赛道（实线）与 AI 重排赛道（虚线）分离展示；点击底部图例可单独聚焦某条策略曲线，悬停查看单日明细。</p>
+      </div>
+      <div class="controls" style="margin-bottom:0;">
+        <div class="seg" id="win-trend"></div>
+        <div class="seg" id="track-trend">
+          <button type="button" data-t="both" aria-pressed="true" data-i18n="track_both">双赛道</button>
+          <button type="button" data-t="rules" aria-pressed="false" data-i18n="track_rules">仅规则</button>
+          <button type="button" data-t="ai" aria-pressed="false" data-i18n="track_ai">仅 AI</button>
+        </div>
+        <div class="seg" id="trend-density">
+          <button type="button" data-d="top3" aria-pressed="true" data-i18n="trend_top3">Top 3</button>
+          <button type="button" data-d="all" aria-pressed="false" data-i18n="trend_all">全部</button>
+        </div>
+        <select id="market-trend" data-i18n-aria="trend_mkt_aria" aria-label="走势市场"></select>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="chart-wrap">
+        <div class="chart" id="chart"></div>
+        <div class="chart-tip" id="chart-tip"></div>
+      </div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </section>
+
+  <!-- 04 · Searchable Picks Explorer -->
+  <section id="explorer">
+    <div class="sec-head">
+      <div>
+        <h2><span class="sec-num">04</span><span data-i18n="sec4_title">策略选股与历史复盘浏览器</span></h2>
+        <p class="sec-hint" data-i18n="sec4_hint">支持按股票代码、名称、行业或策略名实时过滤；切换「按日回看」可追踪每一天每只候选的 T+5 / T+10 / T+20 到期验证结果。</p>
+      </div>
+      <div class="controls" style="margin-bottom:0;">
+        <div class="seg" id="explorer-mode">
+          <button type="button" data-mode="latest" aria-pressed="true" data-i18n="mode_latest">最新选股</button>
+          <button type="button" data-mode="history" aria-pressed="false" data-i18n="mode_history">按日回看</button>
+        </div>
+        <select id="market-latest" data-i18n-aria="mkt_filter_aria" aria-label="市场筛选"></select>
+        <select id="day" data-i18n-aria="day_filter_aria" aria-label="历史交易日" style="display:none;"></select>
+        <input type="search" class="search-input" id="pick-search" data-i18n-placeholder="search_ph" data-i18n-aria="search_aria" placeholder="搜索代码 / 名称 / 行业 / 策略…" aria-label="过滤选股">
+      </div>
+    </div>
+    <div class="tab-panel active" id="tab-latest">
+      <div class="cards" id="latest"></div>
+    </div>
+    <div class="tab-panel" id="tab-history">
+      <div class="cards" id="history"></div>
+    </div>
+  </section>
+
+  <!-- 05 · AI Attribution & Pattern Radar -->
+  <section id="track-comparison-section">
+    <div class="sec-head">
+      <div>
+        <h2><span class="sec-num">05</span><span data-i18n="sec5_title">规则榜 vs AI 榜同日配对归因</span></h2>
+        <p class="sec-hint" data-i18n="sec5_hint">仅针对同一策略在同一交易日的双轨运行严格配对对比（同日配对 &lt; 10 日时隐藏差值，单列 AI 缺失率与重合度）。</p>
+      </div>
+      <div class="controls" style="margin-bottom:0;"><div class="seg" id="win-compare"></div></div>
+    </div>
+    <div id="track-compare-shell">
+      <div class="panel scroll" id="track-compare"></div>
+      <div id="ai-attribution-cards" style="margin-top: 12px;"></div>
+    </div>
+  </section>
+
+  <section id="radar-section">
+    <details class="sec-details" id="details-patterns">
+      <summary class="sec-summary"><span data-i18n="details_pat_title">A 股无状态形态雷达命中（20 日迷你 K 线）</span></summary>
+      <div class="sec-body">
+        <p class="sec-hint" style="margin:0 0 12px;" data-i18n-html="details_pat_hint">未通过 250 日 <code>next_open</code> 严苛门槛（N ≥ 200、扣 25bp 净超额 &gt; 0%、同日跑赢全A等权、H1/H2 各 ≥15d 且 ≥30 样本同号正超额、Newey-West t ≥ 1.96 且 BH-FDR q ≤ 0.05）的形态一律置灰标 <code>experimental</code>，仅作研究观察。</p>
+        <div id="pattern-hits-wrap"><div class="empty" data-i18n="loading_pat">加载形态命中…</div></div>
+      </div>
+    </details>
+
+    <details class="sec-details" id="details-replay">
+      <summary class="sec-summary"><span data-i18n="details_replay_title">250 日 next_open 形态回放、聚日稳定性与切片验证</span></summary>
+      <div class="sec-body">
+        <div id="universe-baseline-wrap"></div>
+        <div id="replay-summary-wrap"><div class="empty" data-i18n="no_replay_yet">暂无 250 日形态回放结果</div></div>
+        <div id="regime-slice-wrap"></div>
+        <div id="overhead-slice-wrap"></div>
+      </div>
+    </details>
+  </section>
+
+  <footer>
+    <div data-i18n-html="footer_note">
+      <strong>AlphaSift</strong> · 开源量化形态观测与回测基准（Apache-2.0 License）· 非投资建议，历史统计不含分红；低于样本门槛（成绩单 &lt; 20、AI 配对 &lt; 10 日、切片 &lt; 100、形态毕业 &lt; 200）统一置灰或隐藏差值。
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/ZhuLinsen/alphasift" target="_blank" rel="noopener" data-i18n="footer_repo">GitHub 源码仓库</a>
+      <a href="https://github.com/ZhuLinsen/alphasift/tree/track-record" target="_blank" rel="noopener" data-i18n="footer_ledger">track-record 原始账本</a>
+      <a id="footer-report-link" href="site/daily_report.html" style="display:none;" data-i18n="footer_report">每日投研日报</a>
+      <a href="site/feed.xml" target="_blank" rel="noopener" data-i18n="footer_rss">Atom RSS 订阅</a>
+      <a id="footer-manifest-link" href="site/manifest.sha256" target="_blank" rel="noopener" style="display:none;">SHA-256</a>
+      <a href="https://github.com/ZhuLinsen/alphasift/blob/main/README.md" target="_blank" rel="noopener" data-i18n="footer_readme">README 文档</a>
+    </div>
+  </footer>
+</main>
+
+<script>
+const SUPPORTED_LANGS = ["zh", "en", "ja"];
+
+const I18N = {
+  zh: {
+    page_title: "AlphaSift · 量化形态观测与回测基准",
+    nav_aria: "主导航",
+    nav_overview: "焦点总览",
+    nav_leaderboard: "策略排行",
+    nav_trend: "超额走势",
+    nav_explorer: "选股浏览",
+    nav_ai: "AI 归因",
+    nav_patterns: "形态雷达",
+    nav_report: "今日研报",
+    nav_report_title: "可打印盘后投研日报",
+    nav_rss: "RSS",
+    nav_rss_title: "订阅 Atom 1.0 RSS 每日更新",
+    nav_ledger: "原始账本",
+    nav_ledger_title: "查看 track-record 分支 Git 可审计原始运行日志",
+    theme_aria: "切换明暗主题",
+    theme_light: "亮色",
+    theme_dark: "暗色",
+    hero_title: "AlphaSift · 量化形态观测与回测基准",
+    hero_sub: "每交易日收盘自动运行全市场 YAML 策略、公告排雷与可选 AI 重排，按 <code>T+5 / T+10 / T+20</code> 真实行情与一字涨停不可成交口径公开验证超额收益。",
+    btn_docs: "使用文档",
+    btn_strategies: "内置策略",
+    loading: "加载中",
+    loading_sub: "读取公开战绩与盘面统计…",
+    loading_consensus: "正在分析今日跨策略共识候选…",
+    loading_hero: "加载盘面与跨市场快照…",
+    loading_pat: "加载形态命中…",
+    no_replay_yet: "暂无 250 日形态回放结果",
+    sec1_title: "今日高共识精选与盘面快照",
+    sec1_hint: "优先提取多策略共同命中标的、公告排雷结论，以及 A 股宽度/全球 7 市场领跑基准，首屏直给核心信号。",
+    sec2_title: "策略 T+N 超额排行榜",
+    sec2_hint: "按单只选股统计已到期窗口（超额 = 选股收益 − 同期市场基准收益）；切换日前 <code>close</code> 口径标为「未评估」，切换日起 <code>next_open</code> 统计一字涨停不可成交率。",
+    sort_aria: "排序维度",
+    sort_excess: "按超额收益",
+    sort_beat: "按跑赢基准率",
+    sort_return: "按绝对收益",
+    sort_evaluated: "按样本数",
+    sec3_title: "分赛道扩展均值超额走势",
+    sec3_hint: "纯规则赛道（实线）与 AI 重排赛道（虚线）分离展示；默认聚焦 Top 3，点击底部图例可单独锁定曲线，悬停或轻触查看单日明细。",
+    track_both: "双赛道",
+    track_rules: "仅规则",
+    track_ai: "仅 AI",
+    trend_mkt_aria: "走势市场",
+    sec4_title: "策略选股与历史复盘浏览器",
+    sec4_hint: "支持按股票代码、名称、行业或策略名实时过滤；切换「按日回看」可追踪每一天每只候选的 T+5 / T+10 / T+20 到期验证结果。",
+    mode_latest: "最新选股",
+    mode_history: "按日回看",
+    mkt_filter_aria: "市场筛选",
+    day_filter_aria: "历史交易日",
+    search_ph: "搜索代码 / 名称 / 行业 / 策略…",
+    search_aria: "过滤选股",
+    sec5_title: "规则榜 vs AI 榜同日配对归因",
+    sec5_hint: "仅针对同一策略在同一交易日的双轨运行严格配对对比（同日配对 < 10 日时隐藏差值，单列 AI 缺失率与重合度）。",
+    details_pat_title: "A 股无状态形态雷达命中（20 日迷你 K 线）",
+    details_pat_hint: "未通过 250 日 <code>next_open</code> 严苛门槛（N ≥ 200、扣 25bp 净超额 > 0%、同日跑赢全A等权、H1/H2 各 ≥15d 且 ≥30 样本同号正超额、Newey-West t ≥ 1.96 且 BH-FDR q ≤ 0.05）的形态一律置灰标 <code>experimental</code>，仅作研究观察。",
+    details_replay_title: "250 日 next_open 形态回放、聚日稳定性与切片验证",
+    footer_note: "<strong>AlphaSift</strong> · 开源量化形态观测与回测基准（Apache-2.0 License）· 公开纸面跟踪，非投资建议，历史统计不含分红；低于样本门槛（成绩单 &lt; 20、AI 配对 &lt; 10 日、切片 &lt; 100、形态毕业 &lt; 200）统一置灰或隐藏差值。",
+    footer_repo: "GitHub 源码仓库",
+    footer_ledger: "track-record 原始账本",
+    footer_report: "每日投研日报",
+    footer_rss: "Atom RSS 订阅",
+    footer_readme: "README 文档",
+    all_markets: "全部市场",
+    meta_updated: "更新于",
+    meta_runs_fmt: "{n} 次累计运行",
+    meta_days_fmt: "{n} 个交易日",
+    meta_switch_fmt: "next_open 切换日 {d}",
+    meta_skipped_fmt: "跳过 {n}",
+    stale_banner_html: "<strong>⚠️ 旧包降级提示：</strong>当前数据包日期 <code>{pack}</code> 落后于目标交易日 <code>{exp}</code>{reason}。网页继续展示可用降级口径，未强制的群聊 IM 推送已自动跳过。",
+    kpi1_lbl: "T+5 领跑超额",
+    kpi1_foot: "{strat} · 跑赢基准 {beat} ({n}只)",
+    kpi1_empty_val: "待到期",
+    kpi1_empty_foot: "首日运行满 5 个交易日后披露",
+    kpi1_low_n_val: "样本不足 (<{min})",
+    kpi1_low_n_foot: "当前最高已到期 {max} 只 · 达 {min} 只后披露冠军",
+    hl_rules_lbl: "规则账本",
+    hl_rules_ok: "{d} 日 · {r} 次",
+    hl_ai_lbl: "AI 对照",
+    hl_ai_ok: "已配对 ({n} 策略)",
+    hl_ai_pend: "0/10 配对日 · 待积累",
+    hl_pat_lbl: "形态雷达",
+    hl_pat_ok: "{d}",
+    hl_pat_pend: "待构建日线包",
+    hl_rep_lbl: "盘后日报",
+    hl_rep_ok: "{d}",
+    hl_rep_pend: "待生成",
+    hl_stale_suffix: "{d} (陈旧)",
+    pat_f_all: "全部 ({n})",
+    pat_f_active: "active ({n})",
+    pat_f_exp: "experimental ({n})",
+    kpi2_lbl: "全策略 T+5 样本加权均值",
+    kpi2_badge: "{n} 组有效",
+    kpi2_foot: "已到期 {eval} 股次 · 累计 {runs} 次选股",
+    kpi3_temp_lbl: "A 股盘面温度",
+    kpi3_up_suffix: "上涨",
+    kpi3_temp_foot: "中位数 {med} · 涨停 {lu} / 跌停 {ld}",
+    kpi3_cons_lbl: "今日 A 股最高共识",
+    kpi3_cons_badge: "{n} 策略",
+    kpi3_cons_foot: "{ind} · 均分 {score} · 现价 {price}",
+    kpi3_empty_lbl: "A 股最高共识",
+    kpi3_empty_foot: "暂无当日 A 股运行",
+    kpi4_ann_lbl: "公告排雷预警",
+    kpi4_ann_bad: "{n} 高风险",
+    kpi4_ann_ok: "全部通过",
+    kpi4_ann_bad_val: "{n} 只",
+    kpi4_ann_ok_val: "0 风险",
+    kpi4_ann_foot: "抽检 {n} 只核心候选 · {tail}",
+    kpi4_ann_clean: "无减持/立案/退市关键词",
+    kpi4_ops_lbl: "多市场自动化运行状态",
+    kpi4_ops_bad: "{n} 异常",
+    kpi4_ops_ok: "健康",
+    kpi4_ops_foot: "覆盖 {m} 个市场 · 共 {d} 个历史交易日",
+    pane_consensus_title: "多策略共振标的",
+    pane_consensus_badge: "{n} 只共振",
+    full_report_btn: "完整研报 →",
+    live_agg_chip: "{d} · 实时聚合",
+    ai_brief_badge: "AI 综述",
+    rule_brief_badge: "规则摘要",
+    brief_headline_lbl: "盘后要点：",
+    ann_alert_head: "⚠️ 公告排雷高风险（抽检 {checked} · 命中 {flagged} 只）：",
+    ann_ok_msg: "✓ 已对 {n} 只重点候选做近期公告排雷，未检出减持 / 立案 / 退市等高风险信号",
+    col_stock: "标的",
+    col_industry: "行业",
+    col_hits: "命中",
+    col_strategies: "覆盖策略",
+    col_avg_score: "均分",
+    col_chg: "涨跌",
+    col_price: "最新价",
+    col_ann: "公告",
+    n_strat_badge: "{n} 策略",
+    no_consensus: "今日暂无 ≥2 个策略同时命中的 A 股共振标的。",
+    sector_dist_title: "行业分布集中度（Top {n}）",
+    sector_dist_col: "占比 / 候选席位",
+    other_ind: "其他",
+    snap_7mkt_title: "全球 7 市场 T+5 领跑快照",
+    snap_pending: "待评估",
+    snap_beat_eval: "{bench} · 跑赢 {beat} · {n}只",
+    snap_note: "注：A 股 7 档涨跌分布与连板梯队将在 GitHub Actions 私有日线缓存完成首个交易日构建后自动显示。",
+    no_dist: "暂无涨跌分布统计",
+    cn_hero_title: "A 股微观盘面与情绪分布",
+    breadth_up: "涨",
+    breadth_flat: "平",
+    breadth_down: "跌",
+    stat_luld: "非 ST 涨停 / 跌停",
+    stat_luld_sub: "一字 {up}涨 / {dn}跌",
+    stat_seal: "封板率 / 两市成交额",
+    stat_seal_sub: "炸板 {broken} 只 · 最高 {streak} 板",
+    stat_prevlu: "昨涨停今日均表现",
+    stat_prevlu_sub: "样本 {n} 只 · 红盘 {win}",
+    stat_prom: "昨涨停早盘 / 晋级率",
+    stat_prom_sub: "连板晋级 {n} 只 ({rate})",
+    ladder_title: "连板梯队分布（仅观察，不调权重）",
+    ladder_empty: "今日无非 ST 连板分布",
+    ladder_board: "{b}板",
+    ladder_cnt: "{n} 只",
+    hist_title: "上涨 {v}%",
+    amt_unit: "亿",
+    sc_empty: "当前筛选暂无运行记录",
+    sc_cols: ["#", "市场", "策略", "入场口径", "运行", "已评估", "待定", "不可成交", "平均收益", "胜率", "同期基准", "超额收益 (T+{w})", "跑赢基准"],
+    sc_low_sample_title: "少于 {n} 只，样本偏小",
+    sc_unassessed: "未评估",
+    sc_unassessed_title: "切换前收盘口径，未评估开盘一字涨停",
+    tc_empty_all: "AI 对照赛道尚未积累成对交易日（当前 0/10 配对日），满足 10 个同日配对后将自动披露 AI vs 规则归因差值 · 自部署接入说明见 <a href=\"https://github.com/ZhuLinsen/alphasift/blob/main/docs/deployment.md\" target=\"_blank\" rel=\"noopener\">部署文档</a>。",
+    tc_empty_pending: "暂无到期的规则 vs AI 同日配对样本。",
+    tc_cols: ["市场", "策略", "配对日/总共", "AI 缺失率", "选股重合度", "规则同日超额", "AI 同日超额", "AI − 规则 (T+{w})", "AI 独选超额", "AI 剔除超额"],
+    tc_win_days: "胜出 {w}/{n}日",
+    tc_insuff: "样本不足 ({p}/{m})",
+    tc_insuff_title: "需至少 {m} 个同日配对",
+    n_picks_sm: "{n}只",
+    ai_attr_badge: "AI 当日归因",
+    ai_attr_sub: "重合度 {ov} · 规则 {r} 只 / AI {a} 只",
+    ai_mkt_view: "市场观点：",
+    ai_added: "AI 新增：",
+    ai_dropped: "AI 剔除：",
+    none_txt: "无",
+    case_badge: "T+{w} 个股案例",
+    case_adds: "AI 独选高光：",
+    case_avoids: "AI 避坑剔除：",
+    case_misses: "AI 错杀遗憾：",
+    pat_not_built: "A 股形态雷达快照将在下一交易日盘后包构建完成后自动更新命中与 20 日迷你 K 线；全部 9 套无状态形态定义见仓库 patterns/ 目录。",
+    pat_no_replay: "尚未生成 250 日形态回放结果。",
+    pat_no_entries: "最新快照暂无形态统计条目。",
+    pat_hit_zero: "{d} · 命中 0 只",
+    pat_no_sig: "今日无触发信号",
+    pat_hit_n: "{d} · 命中 {tot} 只（展示前 {shown} 只）",
+    pat_cols: ["股票", "涨跌", "上方筹码", "20日K线"],
+    ub_title: "同期全市场基准 ({s} 日)：",
+    ub_ew: "全市场等权 T+5 超额 {ex}（裸收益 {raw}）",
+    ub_liq: "· 流动性 ≥8000万 {ex}",
+    ub_bench: "· 沪深300 {ret}",
+    ub_t10: "· T+10 等权超额 {ex}",
+    rep_subhead: "250 日 next_open 回放门槛评估（{start} .. {end}，{sess} 个信号日）",
+    rep_cols: ["形态", "谱系/模式", "总信号", "不可成交", "T+5 基准匹配", "T+5 毛超额", "T+5 净超额 (-25bp)", "T+5 胜率", "NW t 值", "前半 H1 / 后半 H2", "T+10 超额", "门槛状态"],
+    pat_card_meta: "T+5 毛 {g} / 净 {n} · t={t} · N={cnt}",
+    pat_card_spark: "近15日",
+    footer_manifest: "SHA-256 账本校验",
+    sl_head_lbl: "形态 × 市场阶段（T+5 匹配样本 / 超额）",
+    sl_subhead: "形态 × 市场阶段切片（带 * 且置灰表示样本 &lt; {n}）",
+    ov_head_lbl: "形态 × 上方套牢盘切片（T+5 匹配样本 / 超额 / 胜率）",
+    ov_subhead: "形态 × 上方 10% 套牢筹码切片（带 * 且置灰表示样本 &lt; {n}）",
+    chart_empty: "该市场 T+{w} 所选赛道还没有到期的选股",
+    chart_tip_excess: "超额",
+    chart_tip_picks: "{n} 只",
+    tbl_stock: "股票",
+    tbl_industry: "行业",
+    tbl_price: "价格",
+    st_pending: "待定",
+    st_untradable: "不可成交",
+    st_untradable_title: "次日一字涨停无法成交",
+    st_nodata: "无数据",
+    st_excess_lbl: "超 ",
+    latest_n_picks: "{n} 只",
+    latest_sub: "{d} · 全市场 {snap} 只 → 硬筛 {flt} 只",
+    degraded_lbl: "数据回退",
+    trend_top3: "Top 3",
+    trend_all: "全部",
+    news_strip_title: "盘面要闻 (7×24)",
+    news_tag: "资讯",
+    no_picks_day: "当天没有符合条件的股票",
+    no_match_latest: "当前过滤条件无匹配策略或标的",
+    no_days: "暂无历史交易日记录",
+    loading_day: "加载交易日归档…",
+    load_fail: "加载失败：{msg}",
+    load_fatal: "数据加载失败：{msg}",
+    no_match_day: "当前过滤条件在当日无匹配记录",
+    day_opt: "{d}（{n} 次运行）",
+    t_win_pending: "T+{w} 待定",
+    live_latest_fmt: "最新 · {d}",
+    live_7mkt: "实时 · 7大市场",
+    rules_bench_chip: "规则基准",
+    latest_fallback: "最新",
+    tc_hidden_reason_fmt: "同日配对 {p} < {m} 天",
+    st_missing_title: "缺少基准或入场行情数据",
+    rule_hl_fmt: "{stale}市场处于{stage}，上涨 {adv}%（中位数 {med}），涨跌停 {lu}/{ld}（封板率 {seal}）",
+    rule_hl_stale: "【旧包降级】",
+    rule_hl_flag: "，公告排雷命中 {n} 只高风险",
+    rule_hl_cons: "，跨策略共识 {n} 只",
+    rule_sub_cons: "多策略共振标的：{items}",
+    rule_sub_nocons: "当日各策略候选分散（<2 策略重合）",
+    rule_sub_sec: "行业分布：{items}",
+    rule_sub_ai: "AI 调仓（+{add} / -{drop}）",
+    rule_hl_noreg_fmt: "{date} 规则汇总（{cons} 项共振 · {flag} 项公告提示）",
+    hero_eyebrow: "开源全市场量化选股与 T+N 真实基准",
+    pat_status_active: "active · 已通过",
+    pat_status_exp: "experimental",
+  },
+  en: {
+    page_title: "AlphaSift · Quantitative Discovery & T+N Benchmark",
+    nav_aria: "Primary Navigation",
+    nav_overview: "Overview",
+    nav_leaderboard: "Leaderboard",
+    nav_trend: "Trend",
+    nav_explorer: "Explorer",
+    nav_ai: "AI Delta",
+    nav_patterns: "Patterns",
+    nav_report: "Daily Report",
+    nav_report_title: "Printable post-close quantitative brief",
+    nav_rss: "RSS",
+    nav_rss_title: "Subscribe to Atom 1.0 daily feed",
+    nav_ledger: "Raw Ledger",
+    nav_ledger_title: "View Git-auditable raw run logs on track-record branch",
+    theme_aria: "Toggle light/dark theme",
+    theme_light: "Light",
+    theme_dark: "Dark",
+    hero_title: "AlphaSift · Quantitative Discovery & T+N Benchmark",
+    hero_sub: "Automated post-close screening across 7 markets with auditable YAML strategies, announcement risk screening, optional LLM re-ranking, and public <code>T+5 / T+10 / T+20</code> verification including untradable limit-up accounting.",
+    btn_docs: "Docs",
+    btn_strategies: "Strategies",
+    loading: "Loading",
+    loading_sub: "Fetching audited track record & market breadth…",
+    loading_consensus: "Aggregating cross-strategy consensus picks…",
+    loading_hero: "Loading market regime & 7-market benchmark…",
+    loading_pat: "Loading pattern radar hits…",
+    no_replay_yet: "No 250-day pattern replay available yet",
+    sec1_title: "Today's Consensus Signals & Market Pulse",
+    sec1_hint: "Highlights stocks selected by ≥2 independent strategies, announcement risk alerts, and CN microstructure breadth / 7-market leaders.",
+    sec2_title: "Strategy T+N Excess Return Leaderboard",
+    sec2_hint: "Evaluated per pick over matured trading windows (excess = stock return − matched benchmark). Pre-switchover <code>close</code> runs mark untradable as unassessed; <code>next_open</code> tracks open limit-up blocks.",
+    sort_aria: "Sort metric",
+    sort_excess: "Sort by Excess Return",
+    sort_beat: "Sort by Beat Rate",
+    sort_return: "Sort by Raw Return",
+    sort_evaluated: "Sort by Sample Size",
+    sec3_title: "Expanding Mean Excess Return by Track",
+    sec3_hint: "Solid lines represent deterministic rules; dashed lines show AI re-ranked track. Top 3 latest leaders stay highlighted; click legend to isolate or hover/touch for daily details.",
+    track_both: "Both Tracks",
+    track_rules: "Rules Only",
+    track_ai: "AI Only",
+    trend_mkt_aria: "Trend market",
+    sec4_title: "Strategy Picks & Historical Explorer",
+    sec4_hint: "Filter live across symbol, name, sector, or strategy; switch to By Date to audit individual picks at T+5 / T+10 / T+20.",
+    mode_latest: "Latest Picks",
+    mode_history: "By Date",
+    mkt_filter_aria: "Filter market",
+    day_filter_aria: "Trading session",
+    search_ph: "Filter symbol / name / sector / strategy…",
+    search_aria: "Filter picks",
+    sec5_title: "Rules vs AI Same-Day Paired Attribution",
+    sec5_hint: "Strict same-date, same-strategy paired comparison between rules and AI tracks (delta hidden when paired sessions < 10).",
+    details_pat_title: "CN Stateless Pattern Radar Hits (20-Day Mini K-Line)",
+    details_pat_hint: "Patterns below the strict 250-day <code>next_open</code> graduation gate (matched N ≥ 200, net excess > 0% after 25bp, matched-day alpha over All-A EW, H1/H2 ≥15d and ≥30 samples positive, Newey-West t ≥ 1.96, and BH-FDR q ≤ 0.05) stay muted as <code>experimental</code>.",
+    details_replay_title: "250-Day next_open Replay, Clustered Stability & Regime Slices",
+    footer_note: "<strong>AlphaSift</strong> · Open-Source Quantitative Discovery & Benchmark (Apache-2.0 License) · Research only, not investment advice; excludes dividends. Under-threshold cells (scorecard &lt; 20, AI pairs &lt; 10d, slices &lt; 100, pattern gate &lt; 200) are muted or hidden.",
+    footer_repo: "GitHub Repository",
+    footer_ledger: "track-record Branch",
+    footer_report: "Daily Research Brief",
+    footer_rss: "Atom RSS Feed",
+    footer_readme: "README",
+    all_markets: "All Markets",
+    meta_updated: "Updated",
+    meta_runs_fmt: "{n} runs logged",
+    meta_days_fmt: "{n} trading days",
+    meta_switch_fmt: "next_open switch {d}",
+    meta_skipped_fmt: "{n} skipped",
+    stale_banner_html: "<strong>⚠️ Stale Pack Fallback:</strong> Pack date <code>{pack}</code> trails target date <code>{exp}</code>{reason}. Degraded metrics remain visible; unforced IM pushes were skipped.",
+    kpi1_lbl: "T+5 Top Excess",
+    kpi1_foot: "{strat} · Beat {beat} ({n} picks)",
+    kpi1_empty_val: "Pending",
+    kpi1_empty_foot: "Disclosed after 5 matured sessions",
+    kpi1_low_n_val: "Low N (<{min})",
+    kpi1_low_n_foot: "Max {max} matured picks so far · leader shown at ≥{min}",
+    hl_rules_lbl: "Rules Ledger",
+    hl_rules_ok: "{d}d · {r} runs",
+    hl_ai_lbl: "AI Track",
+    hl_ai_ok: "Paired ({n} strats)",
+    hl_ai_pend: "0/10 paired days · pending",
+    hl_pat_lbl: "Pattern Radar",
+    hl_pat_ok: "{d}",
+    hl_pat_pend: "Pack pending",
+    hl_rep_lbl: "Daily Report",
+    hl_rep_ok: "{d}",
+    hl_rep_pend: "Pending",
+    hl_stale_suffix: "{d} (stale)",
+    pat_f_all: "All ({n})",
+    pat_f_active: "active ({n})",
+    pat_f_exp: "experimental ({n})",
+    kpi2_lbl: "Sample-Weighted T+5 Excess",
+    kpi2_badge: "{n} active",
+    kpi2_foot: "{eval} matured picks · {runs} total runs",
+    kpi3_temp_lbl: "CN Market Pulse",
+    kpi3_up_suffix: "Advancing",
+    kpi3_temp_foot: "Median {med} · Limit-Up {lu} / Down {ld}",
+    kpi3_cons_lbl: "Top CN Consensus",
+    kpi3_cons_badge: "{n} strategies",
+    kpi3_cons_foot: "{ind} · Avg {score} · Px {price}",
+    kpi3_empty_lbl: "Top CN Consensus",
+    kpi3_empty_foot: "No CN session logged yet",
+    kpi4_ann_lbl: "Announcement Risk Check",
+    kpi4_ann_bad: "{n} Flagged",
+    kpi4_ann_ok: "All Clear",
+    kpi4_ann_bad_val: "{n} flagged",
+    kpi4_ann_ok_val: "0 risks",
+    kpi4_ann_foot: "{n} shortlisted checked · {tail}",
+    kpi4_ann_clean: "No reduction / probe / delisting flags",
+    kpi4_ops_lbl: "Automation Health",
+    kpi4_ops_bad: "{n} errors",
+    kpi4_ops_ok: "Healthy",
+    kpi4_ops_foot: "{m} markets · {d} sessions tracked",
+    pane_consensus_title: "Cross-Strategy Consensus",
+    pane_consensus_badge: "{n} resonant",
+    full_report_btn: "Full Report →",
+    live_agg_chip: "{d} · Live Aggregated",
+    ai_brief_badge: "AI Brief",
+    rule_brief_badge: "Rule Summary",
+    brief_headline_lbl: "Post-Close Brief:",
+    ann_alert_head: "⚠️ Announcement Risk Alerts ({checked} checked · {flagged} flagged):",
+    ann_ok_msg: "✓ Screened {n} shortlisted candidates — no adverse filing keywords detected",
+    col_stock: "Security",
+    col_industry: "Sector",
+    col_hits: "Hits",
+    col_strategies: "Strategies",
+    col_avg_score: "Score",
+    col_chg: "Chg%",
+    col_price: "Price",
+    col_ann: "Filings",
+    n_strat_badge: "{n} strats",
+    no_consensus: "No CN stock selected by ≥2 strategies today.",
+    sector_dist_title: "Sector Concentration (Top {n})",
+    sector_dist_col: "Share / Slots",
+    other_ind: "Other",
+    snap_7mkt_title: "7-Market T+5 Leaders",
+    snap_pending: "Pending",
+    snap_beat_eval: "{bench} · Beat {beat} · n={n}",
+    snap_note: "CN 7-bucket return distribution and limit-up ladder appear once the private GitHub Actions daily pack cache completes a session.",
+    no_dist: "No return distribution data",
+    cn_hero_title: "CN Microstructure & Breadth",
+    breadth_up: "Adv",
+    breadth_flat: "Flat",
+    breadth_down: "Dec",
+    stat_luld: "Non-ST Limit-Up / Down",
+    stat_luld_sub: "Locked {up} up / {dn} dn",
+    stat_seal: "Seal Rate / Turnover",
+    stat_seal_sub: "Broken {broken} · Top {streak}d",
+    stat_prevlu: "Prev Limit-Up Today Avg",
+    stat_prevlu_sub: "n={n} · Green {win}",
+    stat_prom: "Prev LU Open / Promo Rate",
+    stat_prom_sub: "Promoted {n} ({rate})",
+    ladder_title: "Consecutive Limit-Up Ladder (observation only)",
+    ladder_empty: "No non-ST multi-day limit-ups today",
+    ladder_board: "{b}d",
+    ladder_cnt: "{n}",
+    hist_title: "Advancing {v}%",
+    amt_unit: "B",
+    sc_empty: "No matching track-record rows",
+    sc_cols: ["#", "Market", "Strategy", "Entry", "Runs", "Matured", "Pending", "Untradable", "Raw Ret", "Win Rate", "Benchmark", "Excess (T+{w})", "Beat Rate"],
+    sc_low_sample_title: "Below {n} samples (noisy)",
+    sc_unassessed: "Unassessed",
+    sc_unassessed_title: "Legacy close entry before next_open switchover",
+    tc_empty_all: "AI benchmark track has not accumulated paired sessions yet (0/10 paired days). Attribution delta unlocks automatically at ≥10 same-day pairs · see <a href=\"https://github.com/ZhuLinsen/alphasift/blob/main/docs/deployment.md\" target=\"_blank\" rel=\"noopener\">Deployment Docs</a> for self-hosting.",
+    tc_empty_pending: "No matured Rules vs AI paired samples yet.",
+    tc_cols: ["Market", "Strategy", "Paired/Common", "AI Missing", "Overlap", "Rules Excess", "AI Excess", "AI − Rules (T+{w})", "AI Added Excess", "AI Dropped Excess"],
+    tc_win_days: "Won {w}/{n}d",
+    tc_insuff: "Low N ({p}/{m})",
+    tc_insuff_title: "Needs ≥{m} paired days",
+    n_picks_sm: "{n}",
+    ai_attr_badge: "AI Today Delta",
+    ai_attr_sub: "Overlap {ov} · Rules {r} / AI {a}",
+    ai_mkt_view: "Market View: ",
+    ai_added: "AI Added: ",
+    ai_dropped: "AI Dropped: ",
+    none_txt: "None",
+    case_badge: "T+{w} Case Studies",
+    case_adds: "Top AI Adds: ",
+    case_avoids: "AI Avoided Losses: ",
+    case_misses: "Missed by AI: ",
+    pat_not_built: "CN pattern radar hits and 20D mini K-lines will appear automatically after the next post-close pack build; inspect all 9 YAML pattern specs in patterns/.",
+    pat_no_replay: "No 250-day replay report yet.",
+    pat_no_entries: "No pattern stats in latest snapshot.",
+    pat_hit_zero: "{d} · 0 hits",
+    pat_no_sig: "No signals triggered today",
+    pat_hit_n: "{d} · {tot} hits (top {shown})",
+    pat_cols: ["Security", "Chg%", "Overhead", "20D K-Line"],
+    ub_title: "Universe Baseline ({s} days):",
+    ub_ew: "All-A EW T+5 Excess {ex} (Raw {raw})",
+    ub_liq: "· Liquid ≥80M {ex}",
+    ub_bench: "· CSI 300 {ret}",
+    ub_t10: "· T+10 EW Excess {ex}",
+    rep_subhead: "250-Day next_open Graduation Gate ({start} .. {end}, {sess} signal days)",
+    rep_cols: ["Pattern", "Family / Mode", "Signals", "Untradable", "T+5 Matched", "T+5 Gross", "T+5 Net (-25bp)", "T+5 Win", "NW t", "H1 / H2 Excess", "T+10 Excess", "Status"],
+    pat_card_meta: "T+5 {g} / Net {n} · t={t} · N={cnt}",
+    pat_card_spark: "15D hits",
+    footer_manifest: "SHA-256 Manifest",
+    sl_head_lbl: "Pattern × Market Regime (T+5 Matched / Excess)",
+    sl_subhead: "Regime Slices (* & muted = matched N < {n})",
+    ov_head_lbl: "Pattern × Top-10% Overhead Supply (T+5 Matched / Excess / Win Rate)",
+    ov_subhead: "Overhead Supply Slices (* & muted = matched N < {n})",
+    chart_empty: "No matured T+{w} picks for the selected market/track",
+    chart_tip_excess: "Excess",
+    chart_tip_picks: "{n} picks",
+    tbl_stock: "Security",
+    tbl_industry: "Sector",
+    tbl_price: "Price",
+    st_pending: "Pending",
+    st_untradable: "Blocked",
+    st_untradable_title: "Next-open one-price limit-up untradable",
+    st_nodata: "N/A",
+    st_excess_lbl: "Ex ",
+    latest_n_picks: "{n} picks",
+    latest_sub: "{d} · {snap} universe → {flt} filtered",
+    degraded_lbl: "Fallback",
+    trend_top3: "Top 3",
+    trend_all: "All",
+    news_strip_title: "Market Flash (7x24)",
+    news_tag: "News",
+    no_picks_day: "No qualifying picks recorded",
+    no_match_latest: "No strategies or picks match current filter",
+    no_days: "No trading sessions recorded",
+    loading_day: "Loading session archive…",
+    load_fail: "Load failed: {msg}",
+    load_fatal: "Failed to load data: {msg}",
+    no_match_day: "No picks match current filter on this date",
+    day_opt: "{d} ({n} runs)",
+    t_win_pending: "T+{w} pending",
+    live_latest_fmt: "LATEST · {d}",
+    live_7mkt: "LIVE · 7 Markets",
+    rules_bench_chip: "Rules Benchmark",
+    latest_fallback: "Latest",
+    tc_hidden_reason_fmt: "Paired sessions {p} < {m} required",
+    st_missing_title: "Missing quote or benchmark data",
+    rule_hl_fmt: "{stale}Market regime {stage}, {adv}% advancing (median {med}), L/U-L/D {lu}/{ld} (seal {seal})",
+    rule_hl_stale: "[Stale Pack] ",
+    rule_hl_flag: ", {n} announcement alert(s)",
+    rule_hl_cons: ", {n} consensus pick(s)",
+    rule_sub_cons: "Consensus leaders: {items}",
+    rule_sub_nocons: "Scattered picks today (<2 strategy overlap)",
+    rule_sub_sec: "Top sectors: {items}",
+    rule_sub_ai: "AI re-ranked (+{add} / -{drop})",
+    rule_hl_noreg_fmt: "{date} Rules summary ({cons} consensus pick(s) · {flag} flagged)",
+    hero_eyebrow: "OPEN-SOURCE QUANTITATIVE DISCOVERY & T+N BENCHMARK",
+    pat_status_active: "active",
+    pat_status_exp: "experimental",
+  },
+  ja: {
+    page_title: "AlphaSift · クオンツ観測・T+N検証ベンチマーク",
+    nav_aria: "メインナビ",
+    nav_overview: "サマリー",
+    nav_leaderboard: "戦略ランキング",
+    nav_trend: "超過推移",
+    nav_explorer: "銘柄ブラウザ",
+    nav_ai: "AI 比較",
+    nav_patterns: "形態レーダー",
+    nav_report: "日次レポート",
+    nav_report_title: "印刷対応の引け後リサーチレポート",
+    nav_rss: "RSS",
+    nav_rss_title: "Atom 1.0 RSS フィードを購読",
+    nav_ledger: "生ログ",
+    nav_ledger_title: "track-record ブランチの Git 監査可能な生ログを表示",
+    theme_aria: "ライト／ダーク切替",
+    theme_light: "ライト",
+    theme_dark: "ダーク",
+    hero_title: "AlphaSift · クオンツ観測・T+N検証ベンチマーク",
+    hero_sub: "毎営業日の引け後に全市場 YAML 戦略・開示リスクチェック・任意の AI 再ランクを自動実行し、<code>T+5 / T+10 / T+20</code> の実測値とストップ高成行不可判定で超過リターンを公開検証します。",
+    btn_docs: "ドキュメント",
+    btn_strategies: "内蔵戦略",
+    loading: "読込中",
+    loading_sub: "公開トラックレコードと市場データを読込中…",
+    loading_consensus: "戦略間のコンセンサス候補を集計中…",
+    loading_hero: "市場地合い・7市場スナップショットを読込中…",
+    loading_pat: "パターン検出結果を読込中…",
+    no_replay_yet: "250日リプレイ結果はまだありません",
+    sec1_title: "本日のコンセンサス銘柄・市場サマリー",
+    sec1_hint: "複数戦略で重複選定された銘柄、適時開示アラート、および中国 A 株地合い／世界 7 市場の首位戦略を即座に把握できます。",
+    sec2_title: "戦略別 T+N 超過リターンランキング",
+    sec2_hint: "満期到来済みの銘柄単位で集計（超過 = 銘柄リターン − 同期ベンチマーク）。切替前の <code>close</code> 基準は「未評価」、<code>next_open</code> 以降は寄付ストップ高による取引不可率を集計します。",
+    sort_aria: "並び順",
+    sort_excess: "超過リターン順",
+    sort_beat: "ベンチマーク勝率順",
+    sort_return: "絶対リターン順",
+    sort_evaluated: "評価銘柄数順",
+    sec3_title: "トラック別 拡張平均超過リターン推移",
+    sec3_hint: "実線がルール・破線が AI 再ランクです。上位 3 戦略を強調表示し、凡例クリックで固定・ホバーやタップで詳細表示します。",
+    track_both: "両トラック",
+    track_rules: "ルールのみ",
+    track_ai: "AI のみ",
+    trend_mkt_aria: "推移の市場",
+    sec4_title: "選定銘柄・過去アーカイブブラウザ",
+    sec4_hint: "銘柄コード・銘柄名・業種・戦略名でリアルタイム絞り込み。「日別アーカイブ」で各日の T+5 / T+10 / T+20 実測結果を確認できます。",
+    mode_latest: "最新選定",
+    mode_history: "日別アーカイブ",
+    mkt_filter_aria: "市場フィルタ",
+    day_filter_aria: "営業日選択",
+    search_ph: "コード / 銘柄名 / 業種 / 戦略を検索…",
+    search_aria: "銘柄フィルタ",
+    sec5_title: "ルール vs AI 同日ペア帰属分析",
+    sec5_hint: "同一戦略・同一営業日の両トラック実行のみを厳密にペア比較します（ペア日数 < 10 日の場合、差分は非表示）。",
+    details_pat_title: "中国 A 株 ステートレスパターン検出（20日ミニローソク足）",
+    details_pat_hint: "250日 <code>next_open</code> 厳格基準（一致標本 ≥ 200、25bp 控除後純超過 > 0%、同日全A等重超過、H1/H2 各 ≥15日かつ ≥30標本同符号正超過、Newey-West t ≥ 1.96 かつ BH-FDR q ≤ 0.05）未達のパターンは <code>experimental</code> としてグレー表示されます。",
+    details_replay_title: "250日 next_open リプレイ・日別安定性・局面別スライス検証",
+    footer_note: "<strong>AlphaSift</strong> · オープンソース銘柄発掘＆検証ベンチマーク（Apache-2.0 License）· 投資助言ではありません（配当除く）。閾値未満（成績表 &lt; 20、AI ペア &lt; 10日、スライス &lt; 100、パターン &lt; 200）はグレーまたは非表示。",
+    footer_repo: "GitHub リポジトリ",
+    footer_ledger: "track-record 生ログ",
+    footer_report: "日次リサーチレポート",
+    footer_rss: "Atom RSS 購読",
+    footer_readme: "README",
+    all_markets: "全市場",
+    meta_updated: "更新日時",
+    meta_runs_fmt: "累計 {n} 回実行",
+    meta_days_fmt: "{n} 営業日",
+    meta_switch_fmt: "next_open 切替日 {d}",
+    meta_skipped_fmt: "スキップ {n}",
+    stale_banner_html: "<strong>⚠️ 旧データパック縮退表示：</strong>パック日付 <code>{pack}</code> が目標日 <code>{exp}</code> より古い状態です{reason}。画面は縮退モードで表示し、強制指定のない IM 通知はスキップしました。",
+    kpi1_lbl: "T+5 トップ超過リターン",
+    kpi1_foot: "{strat} · 対指数勝率 {beat} ({n}件)",
+    kpi1_empty_val: "集計待ち",
+    kpi1_empty_foot: "初回実行から 5 営業日後に公開",
+    kpi1_low_n_val: "標本不足 (<{min})",
+    kpi1_low_n_foot: "最多 {max} 件評価済 · {min} 件到達で首位公開",
+    hl_rules_lbl: "ルール台帳",
+    hl_rules_ok: "{d} 営業日 · {r} 回",
+    hl_ai_lbl: "AI 比較",
+    hl_ai_ok: "ペア済 ({n} 戦略)",
+    hl_ai_pend: "0/10 ペア日 · 蓄積中",
+    hl_pat_lbl: "形態レーダー",
+    hl_pat_ok: "{d}",
+    hl_pat_pend: "日足パック待ち",
+    hl_rep_lbl: "日次レポート",
+    hl_rep_ok: "{d}",
+    hl_rep_pend: "未生成",
+    hl_stale_suffix: "{d} (期限切れ)",
+    pat_f_all: "すべて ({n})",
+    pat_f_active: "active ({n})",
+    pat_f_exp: "experimental ({n})",
+    kpi2_lbl: "全戦略 T+5 加重平均超過",
+    kpi2_badge: "{n} 戦略有効",
+    kpi2_foot: "評価済 {eval} 銘柄 · 累計 {runs} 回実行",
+    kpi3_temp_lbl: "A 株市場地合い",
+    kpi3_up_suffix: "上昇",
+    kpi3_temp_foot: "中央値 {med} · S高 {lu} / S安 {ld}",
+    kpi3_cons_lbl: "本日 A 株最多コンセンサス",
+    kpi3_cons_badge: "{n} 戦略",
+    kpi3_cons_foot: "{ind} · 平均 {score} · 株価 {price}",
+    kpi3_empty_lbl: "A 株最多コンセンサス",
+    kpi3_empty_foot: "当日の A 株実行なし",
+    kpi4_ann_lbl: "適時開示リスク検査",
+    kpi4_ann_bad: "{n} 件警戒",
+    kpi4_ann_ok: "異常なし",
+    kpi4_ann_bad_val: "{n} 銘柄",
+    kpi4_ann_ok_val: "0 件",
+    kpi4_ann_foot: "上位 {n} 銘柄検査 · {tail}",
+    kpi4_ann_clean: "持株売却・調査・上場廃止等の警戒語なし",
+    kpi4_ops_lbl: "マルチ市場自動稼働",
+    kpi4_ops_bad: "{n} 件異常",
+    kpi4_ops_ok: "正常",
+    kpi4_ops_foot: "{m} 市場対応 · {d} 営業日記録済",
+    pane_consensus_title: "複数戦略コンセンサス銘柄",
+    pane_consensus_badge: "{n} 銘柄重複",
+    full_report_btn: "詳細レポート →",
+    live_agg_chip: "{d} · リアルタイム集計",
+    ai_brief_badge: "AI 要約",
+    rule_brief_badge: "統計サマリー",
+    brief_headline_lbl: "引け後サマリー：",
+    ann_alert_head: "⚠️ 開示リスク検知（検査 {checked} 件 · 該当 {flagged} 銘柄）：",
+    ann_ok_msg: "✓ 主要候補 {n} 銘柄の適時開示を検査済み（持株売却・行政調査等の警戒シグナルなし）",
+    col_stock: "銘柄",
+    col_industry: "業種",
+    col_hits: "戦略数",
+    col_strategies: "該当戦略",
+    col_avg_score: "平均スコア",
+    col_chg: "騰落率",
+    col_price: "株価",
+    col_ann: "開示",
+    n_strat_badge: "{n} 戦略",
+    no_consensus: "本日 ≥2 戦略で重複選定された A 株銘柄はありません。",
+    sector_dist_title: "業種集中度（上位 {n}）",
+    sector_dist_col: "構成比 / 枠数",
+    other_ind: "その他",
+    snap_7mkt_title: "世界 7 市場 T+5 首位スナップショット",
+    snap_pending: "評価待ち",
+    snap_beat_eval: "{bench} · 勝率 {beat} · {n}件",
+    snap_note: "注：A 株の 7 区分騰落分布と連騰ストップ高ラダーは GitHub Actions 非公開日足キャッシュの初回構築後に自動表示されます。",
+    no_dist: "騰落分布データなし",
+    cn_hero_title: "A 株ミクロ地合い・騰落分布",
+    breadth_up: "上昇",
+    breadth_flat: "横ばい",
+    breadth_down: "下落",
+    stat_luld: "非 ST ストップ高 / 安",
+    stat_luld_sub: "一本値 {up}高 / {dn}安",
+    stat_seal: "ストップ高維持率 / 売買代金",
+    stat_seal_sub: "剥がれ {broken} · 最高 {streak}連",
+    stat_prevlu: "前日 S高 本日平均騰落",
+    stat_prevlu_sub: "標本 {n} · 陽線 {win}",
+    stat_prom: "前日 S高 寄付き / 連騰率",
+    stat_prom_sub: "連騰 {n} 銘柄 ({rate})",
+    ladder_title: "連騰ストップ高ラダー（観測専用・重み調整なし）",
+    ladder_empty: "本日非 ST の連騰ストップ高なし",
+    ladder_board: "{b}連続",
+    ladder_cnt: "{n}社",
+    hist_title: "上昇比率 {v}%",
+    amt_unit: "億元",
+    sc_empty: "該当するトラックレコードはありません",
+    sc_cols: ["#", "市場", "戦略", "基準", "実行", "評価済", "保留", "不可", "平均騰落", "勝率", "ベンチマーク", "超過 (T+{w})", "対指数勝率"],
+    sc_low_sample_title: "{n} 件未満のため参考値",
+    sc_unassessed: "未評価",
+    sc_unassessed_title: "next_open 切替前の終値基準",
+    tc_empty_all: "AI ベンチマークは現在ペア営業日を蓄積中です（0/10 ペア日）。同日ペアが 10 日以上に達すると差分を自動表示します · 自前設定は <a href=\"https://github.com/ZhuLinsen/alphasift/blob/main/docs/deployment.md\" target=\"_blank\" rel=\"noopener\">デプロイガイド</a> をご参照ください。",
+    tc_empty_pending: "満期到来のルール vs AI ペア標本はまだありません。",
+    tc_cols: ["市場", "戦略", "ペア/共通日", "AI 欠損率", "重複率", "ルール超過", "AI 超過", "AI − ルール (T+{w})", "AI 独自超過", "AI 除外超過"],
+    tc_win_days: "勝 {w}/{n}日",
+    tc_insuff: "標本不足 ({p}/{m})",
+    tc_insuff_title: "{m}日以上のペア比較が必要",
+    n_picks_sm: "{n}件",
+    ai_attr_badge: "AI 当日帰属",
+    ai_attr_sub: "重複 {ov} · ルール {r} / AI {a}",
+    ai_mkt_view: "市場見通し：",
+    ai_added: "AI 追加：",
+    ai_dropped: "AI 除外：",
+    none_txt: "なし",
+    case_badge: "T+{w} 個別事例",
+    case_adds: "AI 独自選定ハイライト：",
+    case_avoids: "AI 回避成功：",
+    case_misses: "AI 見逃し：",
+    pat_not_built: "A 株パターンレーダーは次営業日の引け後パック構築完了時に 20 日ミニローソク足付きで自動更新されます（全 9 パターン定義は patterns/ を参照）。",
+    pat_no_replay: "250日リプレイ結果はまだありません。",
+    pat_no_entries: "最新スナップショットにパターン統計がありません。",
+    pat_hit_zero: "{d} · 0 件",
+    pat_no_sig: "本日の検出シグナルなし",
+    pat_hit_n: "{d} · {tot} 件検出（上位 {shown} 件）",
+    pat_cols: ["銘柄", "騰落率", "上値しこり", "20日足"],
+    ub_title: "同期全市場ベースライン ({s} 日)：",
+    ub_ew: "全市場等重 T+5 超過 {ex}（素 {raw}）",
+    ub_liq: "· 流動性 ≥8000万 {ex}",
+    ub_bench: "· CSI 300 {ret}",
+    ub_t10: "· T+10 等重超過 {ex}",
+    rep_subhead: "250日 next_open 卒業基準検証（{start} .. {end}、{sess} 営業日）",
+    rep_cols: ["パターン", "系統 / 方式", "総数", "取引不可", "T+5 一致", "T+5 粗超過", "T+5 純超過 (-25bp)", "T+5 勝率", "NW t値", "前半 H1 / 後半 H2", "T+10 超過", "判定"],
+    pat_card_meta: "T+5 粗 {g} / 純 {n} · t={t} · N={cnt}",
+    pat_card_spark: "15日推移",
+    footer_manifest: "SHA-256 検証",
+    sl_head_lbl: "パターン × 市場局面（T+5 一致数 / 超過）",
+    sl_subhead: "市場局面スライス（* と薄字は標本 &lt; {n}）",
+    ov_head_lbl: "パターン × 上値10%しこり玉（T+5 一致 / 超過 / 勝率）",
+    ov_subhead: "上値しこり玉スライス（* と薄字は標本 &lt; {n}）",
+    chart_empty: "選択した市場・トラックで満期到来の T+{w} 銘柄がありません",
+    chart_tip_excess: "超過",
+    chart_tip_picks: "{n} 銘柄",
+    tbl_stock: "銘柄",
+    tbl_industry: "業種",
+    tbl_price: "株価",
+    st_pending: "保留",
+    st_untradable: "取引不可",
+    st_untradable_title: "翌寄付ストップ高のため約定不可",
+    st_nodata: "データなし",
+    st_excess_lbl: "超 ",
+    latest_n_picks: "{n} 銘柄",
+    latest_sub: "{d} · 市場 {snap} 銘柄 → 絞り込み {flt} 銘柄",
+    degraded_lbl: "フォールバック",
+    trend_top3: "上位3",
+    trend_all: "すべて",
+    news_strip_title: "市況フラッシュ (7×24)",
+    news_tag: "ニュース",
+    no_picks_day: "該当銘柄なし",
+    no_match_latest: "条件に一致する戦略・銘柄がありません",
+    no_days: "営業日データなし",
+    loading_day: "アーカイブ読込中…",
+    load_fail: "読込失敗：{msg}",
+    load_fatal: "データ読込失敗：{msg}",
+    no_match_day: "この日付で条件に一致する銘柄はありません",
+    day_opt: "{d}（{n} 回実行）",
+    t_win_pending: "T+{w} 保留",
+    live_latest_fmt: "最新 · {d}",
+    live_7mkt: "稼働中 · 7市場",
+    rules_bench_chip: "ルール基準",
+    latest_fallback: "最新",
+    tc_hidden_reason_fmt: "同日ペア {p} 日 < {m} 日",
+    st_missing_title: "価格またはベンチマークデータ欠損",
+    rule_hl_fmt: "{stale}相場局面 {stage}、上昇銘柄 {adv}%（中央値 {med}）、S高/安 {lu}/{ld}（維持率 {seal}）",
+    rule_hl_stale: "【旧パック縮退】",
+    rule_hl_flag: "・開示警戒 {n} 銘柄",
+    rule_hl_cons: "・重複コンセンサス {n} 銘柄",
+    rule_sub_cons: "注目コンセンサス：{items}",
+    rule_sub_nocons: "本日は戦略間の重複なし（候補分散）",
+    rule_sub_sec: "業種偏重：{items}",
+    rule_sub_ai: "AI 軌道リバランス（追加 {add} / 除外 {drop}）",
+    rule_hl_noreg_fmt: "{date} ルール集計（コンセンサス {cons}件 · 警戒 {flag}件）",
+    hero_eyebrow: "オープンソース多市場クオンツ探索・T+N 公開ベンチマーク",
+    pat_status_active: "採用 (active)",
+    pat_status_exp: "試験観測",
+  },
+};
+
+const MARKET_I18N = {
+  zh: { cn: "A 股", us: "美股", hk: "港股", jp: "日本", kr: "韩国", tw: "台湾", in: "印度" },
+  en: { cn: "CN A-Shares", us: "US", hk: "HK", jp: "Japan", kr: "Korea", tw: "Taiwan", in: "India" },
+  ja: { cn: "中国A株", us: "米国", hk: "香港", jp: "日本", kr: "韓国", tw: "台湾", in: "インド" },
+};
+
+const SESSION_I18N = {
+  zh: { asia: "亚洲场", us: "美股场" },
+  en: { asia: "Asia", us: "US" },
+  ja: { asia: "アジア市場", us: "米国市場" },
+};
+
+const REGIME_ORDER = ["freezing", "startup", "main_up", "divergence", "ebb", "neutral"];
+const REGIME_I18N = {
+  zh: { freezing: "冰点", startup: "启动", main_up: "主升", divergence: "分歧", ebb: "退潮", neutral: "震荡" },
+  en: { freezing: "Freezing", startup: "Startup", main_up: "Main Up", divergence: "Divergence", ebb: "Ebb", neutral: "Choppy" },
+  ja: { freezing: "極寒", startup: "初動", main_up: "主昇波", divergence: "分岐", ebb: "後退", neutral: "レンジ" },
+};
+
+const STRATEGY_I18N = {
+  en: {
+    balanced_alpha: "Balanced Alpha",
+    blue_chip_income: "Blue-Chip Income",
+    capital_heat: "Capital Heat",
+    dual_low: "Dual Low Value",
+    global_value: "Global Value",
+    low_volatility_quality: "Low-Vol Quality",
+    momentum_quality: "Momentum Quality",
+    oversold_reversal: "Oversold Reversal",
+    quality_value: "Quality Value",
+    shrink_pullback: "Shrink Pullback",
+    us_momentum_quality: "US Momentum Quality",
+    volume_breakout: "Volume Breakout",
+  },
+  ja: {
+    balanced_alpha: "バランス・アルファ",
+    blue_chip_income: "優良高配当株",
+    capital_heat: "資金モメンタム",
+    dual_low: "低PER・低PBR",
+    global_value: "グローバル・バリュー",
+    low_volatility_quality: "低ボラ・クオリティ",
+    momentum_quality: "モメンタム・クオリティ",
+    oversold_reversal: "売られ過ぎ反発",
+    quality_value: "クオリティ・バリュー",
+    shrink_pullback: "出来高縮小押し目",
+    us_momentum_quality: "米国モメンタム",
+    volume_breakout: "出来高ブレイク",
+  },
+};
+
+const PATTERN_I18N = {
+  en: {
+    bottom_volume_yang: "Bottom Volume Surge",
+    box_breakout: "Box Breakout",
+    double_bottom_breakout: "Double Bottom Breakout",
+    ma20_shrink_pullback: "MA20 Low-Vol Pullback",
+    shooting_star_confirm: "Upper-Wick Confirm",
+    single_yang_hold: "Single Bullish Hold",
+    steady_trend_breakout: "Steady Trend Breakout",
+    three_white_soldiers: "Three White Soldiers",
+    three_white_soldiers_pullback: "Three Soldiers Pullback",
+  },
+  ja: {
+    bottom_volume_yang: "底値倍増陽線",
+    box_breakout: "ボックス圏ブレイク",
+    double_bottom_breakout: "ダブルボトム突破",
+    ma20_shrink_pullback: "20日線低ボラ押し目",
+    shooting_star_confirm: "上ヒゲ確認",
+    single_yang_hold: "大陽線ホールド",
+    steady_trend_breakout: "低ボラ堅調突破",
+    three_white_soldiers: "赤三兵",
+    three_white_soldiers_pullback: "赤三兵押し目確認",
+  },
+};
+
+const DIST_BUCKETS = [
+  { key: "le_neg7", label: "≤-7%", tone: "down" },
+  { key: "neg7_neg3", label: "-7~-3%", tone: "down" },
+  { key: "neg3_0", label: "-3~0%", tone: "down" },
+  { key: "flat", label_key: "breadth_flat", tone: "flat" },
+  { key: "pos0_3", label: "0~3%", tone: "up" },
+  { key: "pos3_7", label: "3~7%", tone: "up" },
+  { key: "ge_pos7", label: "≥7%", tone: "up" },
+];
+const OVERHEAD_I18N = {
+  zh: [
+    { key: "low_lt15", label: "上方筹码 <15%" },
+    { key: "mid_15_35", label: "15%~35%" },
+    { key: "high_ge35", label: "≥35%" },
+  ],
+  en: [
+    { key: "low_lt15", label: "Overhead <15%" },
+    { key: "mid_15_35", label: "15%–35%" },
+    { key: "high_ge35", label: "≥35%" },
+  ],
+  ja: [
+    { key: "low_lt15", label: "しこり <15%" },
+    { key: "mid_15_35", label: "15%–35%" },
+    { key: "high_ge35", label: "≥35%" },
+  ],
+};
+
+const MIN_SAMPLE = 20;
+const MIN_SLICE_SAMPLE = 100;
+const MIN_PATTERN_GRAD_SAMPLE = 200;
+
+const SECTOR_I18N = {
+  en: {
+    "未分类": "Unclassified", "白酒": "Baijiu", "酿酒行业": "Alcohol & Beverage", "半导体": "Semiconductors",
+    "银行": "Banking", "证券": "Brokers", "券商": "Brokers", "保险": "Insurance", "煤炭开采": "Coal Mining",
+    "医药": "Healthcare", "医疗": "Healthcare", "化学制药": "Pharmaceuticals", "中药": "TCM Pharma", "消费": "Consumer",
+    "汽车": "Autos", "电子元件": "Electronics", "软件开发": "Software", "计算机软件": "Software", "软件工程": "Software",
+    "互联网服务": "Internet", "稀有金属": "Rare Metals", "石油天然气": "Oil & Gas",
+    "电力行业": "Utilities", "建筑施工": "Construction", "工程建设": "Construction", "基础建设": "Infrastructure",
+    "港口航运": "Ports & Shipping", "交通运输": "Transport", "物流行业": "Logistics", "化工原料": "Chemicals",
+    "化学原料": "Chemicals", "化学制品": "Chemicals", "化工": "Chemicals", "地产": "Real Estate", "房地产": "Real Estate",
+    "新能源": "Clean Energy", "光伏设备": "Solar", "风电设备": "Wind Power", "电池": "Batteries",
+    "电网设备": "Grid Equipment", "有色金属": "Metals", "钢铁": "Steel", "机械设备": "Machinery",
+    "通用设备": "General Equip", "专用设备": "Specialty Equip", "军工": "Defense", "航空航天": "Aerospace",
+    "通信服务": "Telecom", "光学光电子": "Optoelectronics", "家用电器": "Appliances", "食品饮料": "Food & Beverage",
+    "商业百货": "Retail", "农林牧渔": "Agriculture", "传媒": "Media", "医疗器械": "MedTech", "医药商业": "Pharma Retail",
+    "合成纤维及树脂": "Synthetic Fibers",
+  },
+  ja: {
+    "未分类": "未分類", "白酒": "白酒・酒造", "酿酒行业": "酒類飲料", "半导体": "半導体",
+    "银行": "銀行", "证券": "証券", "券商": "証券", "保险": "保険", "煤炭开采": "石炭鉱業",
+    "医药": "医薬", "医疗": "医療", "化学制药": "医薬品", "中药": "漢方薬", "消费": "消費財",
+    "汽车": "自動車", "电子元件": "電子部品", "软件开发": "ソフトウェア", "计算机软件": "ソフトウェア", "软件工程": "ソフトウェア",
+    "互联网服务": "ネットサービス", "稀有金属": "レアメタル", "石油天然气": "石油・ガス",
+    "电力行业": "電力", "建筑施工": "建設", "工程建设": "建築土木", "基础建设": "インフラ建設",
+    "港口航运": "港湾・海運", "交通运输": "運輸", "物流行业": "物流", "化工原料": "化学",
+    "化学原料": "化学原料", "化学制品": "化学製品", "化工": "化学", "地产": "不動産", "房地产": "不動産",
+    "新能源": "新エネルギー", "光伏设备": "太陽光", "风电设备": "風力", "电池": "電池",
+    "电网设备": "送電設備", "有色金属": "非鉄金属", "钢铁": "鉄鋼", "机械设备": "機械",
+    "通用设备": "汎用機械", "专用设备": "専用機械", "军工": "防衛・航空", "航空航天": "航空宇宙",
+    "通信服务": "通信", "光学光电子": "光電子", "家用电器": "家電", "食品饮料": "食品飲料",
+    "商业百货": "小売", "农林牧渔": "農林水産", "传媒": "メディア", "医疗器械": "医療機器", "医药商业": "医薬流通",
+    "合成纤维及树脂": "合成繊維・樹脂",
+  },
+};
+
+const state = {
+  lang: "zh",
+  theme: "dark",
+  summary: null,
+  patterns: null,
+  report: null,
+  reportReady: false,
+  scoreWin: "5",
+  scoreMarket: "all",
+  scoreSort: "excess",
+  compareWin: "5",
+  trendWin: "5",
+  trendTrack: "both",
+  trendDensity: "top3",
+  trendMarket: null,
+  trendFocus: null,
+  latestMarket: null,
+  explorerMode: "latest",
+  patFilter: "all",
+  searchQuery: "",
+  dayCache: {},
+  currentDay: null,
+  dayReqId: 0,
+};
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function normalizeLang(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (s.startsWith("en")) return "en";
+  if (s.startsWith("ja")) return "ja";
+  if (s.startsWith("zh")) return "zh";
+  return "";
+}
+
+function t(key, vars) {
+  const dict = I18N[state.lang] || I18N.zh;
+  let str = dict[key] !== undefined ? dict[key] : (I18N.zh[key] !== undefined ? I18N.zh[key] : key);
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) {
+      str = str.replaceAll(`{${k}}`, v === null || v === undefined ? "" : String(v));
+    }
+  }
+  return str;
+}
+
+const mname = (id) => (MARKET_I18N[state.lang] || MARKET_I18N.zh)[id] || id;
+const sesname = (id) => (SESSION_I18N[state.lang] || SESSION_I18N.zh)[id] || id;
+const rname = (id, serverFallback) => (REGIME_I18N[state.lang] || REGIME_I18N.zh)[id] || serverFallback || id || "-";
+const indname = (raw) => {
+  const s = String(raw ?? "").trim();
+  if (!s || s === "未分类") return t("other_ind");
+  const map = SECTOR_I18N[state.lang];
+  return (map && map[s]) || s;
+};
+const tStatus = (status) => {
+  if (status === "pending") return t("st_pending");
+  if (status === "untradable_limit_up") return t("st_untradable_title");
+  if (status === "missing") return t("st_missing_title");
+  return t("st_nodata");
+};
+const tHiddenReason = (raw, paired, minPaired) => {
+  if (!raw || state.lang === "zh") return raw || t("tc_insuff_title", { m: minPaired });
+  if (/同日配对|paired/i.test(String(raw))) {
+    return t("tc_hidden_reason_fmt", { p: paired, m: minPaired });
+  }
+  return t("tc_insuff_title", { m: minPaired });
+};
+
+function rawSname(name) {
+  const map = STRATEGY_I18N[state.lang];
+  if (map && map[name]) return String(map[name]);
+  return String(((state.summary && state.summary.strategy_names) || {})[name] || name || "");
+}
+function sname(name) {
+  return esc(rawSname(name));
+}
+
+function pname(slug, serverDisplay) {
+  const map = PATTERN_I18N[state.lang];
+  if (map && map[slug]) return map[slug];
+  return serverDisplay || slug;
+}
+
+function pct(v, digits = 2) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '<span class="dim">–</span>';
+  const n = Number(v);
+  const cls = n > 0 ? "up" : n < 0 ? "down" : "";
+  return `<span class="${cls}">${n > 0 ? "+" : ""}${n.toFixed(digits)}%</span>`;
+}
+const rate = (v) => (v === null || v === undefined || Number.isNaN(Number(v))) ? '<span class="dim">–</span>' : `${Math.round(Number(v) * 100)}%`;
+const sharePct = (v) => (v === null || v === undefined || Number.isNaN(Number(v))) ? '<span class="dim">–</span>' : `${Number(v).toFixed(1)}%`;
+const num = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v))) ? '<span class="dim">–</span>' : Number(v).toFixed(d);
+const localTime = (iso) => {
+  if (!iso) return "–";
+  const loc = state.lang === "en" ? "en-US" : state.lang === "ja" ? "ja-JP" : "zh-CN";
+  return new Date(iso).toLocaleString(loc, { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+};
+
+const ICO_SUN = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/></svg>';
+const ICO_MOON = '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+const ICO_TARGET = '<svg class="ico" style="color:var(--accent-hi)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
+const ICO_PULSE = '<svg class="ico" style="color:var(--accent-hi)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>';
+const ICO_GLOBE = '<svg class="ico" style="color:var(--accent-hi)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>';
+
+function syncThemeBtn(theme) {
+  const btn = $("theme-toggle");
+  if (!btn) return;
+  btn.innerHTML = theme === "light" ? `${ICO_MOON}<span>${esc(t("theme_dark"))}</span>` : `${ICO_SUN}<span>${esc(t("theme_light"))}</span>`;
+}
+
+function reportHref() {
+  const params = new URLSearchParams();
+  if (state.lang && state.lang !== "zh") params.set("lang", state.lang);
+  if (state.theme && state.theme !== "dark") params.set("theme", state.theme);
+  const qs = params.toString();
+  return qs ? `site/daily_report.html?${qs}` : "site/daily_report.html";
+}
+
+function syncReportLinks() {
+  const href = reportHref();
+  ["report-top-link", "footer-report-link"].forEach((id) => {
+    const el = $(id);
+    if (el) el.setAttribute("href", href);
+  });
+}
+
+function applyStaticI18n() {
+  document.documentElement.lang = state.lang === "en" ? "en" : state.lang === "ja" ? "ja" : "zh-CN";
+  document.documentElement.setAttribute("data-lang", state.lang);
+  document.title = t("page_title");
+  document.querySelectorAll("[data-i18n]").forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-html]").forEach((el) => { el.innerHTML = t(el.dataset.i18nHtml); });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => { el.setAttribute("placeholder", t(el.dataset.i18nPlaceholder)); });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => { el.setAttribute("title", t(el.dataset.i18nTitle)); });
+  document.querySelectorAll("[data-i18n-aria]").forEach((el) => { el.setAttribute("aria-label", t(el.dataset.i18nAria)); });
+  const sw = $("lang-switch");
+  if (sw) sw.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.lang === state.lang)));
+  syncThemeBtn(state.theme);
+  syncReportLinks();
+}
+
+function refreshAllViews() {
+  if (!state.summary) return;
+  renderMarketSelectorsLanguage();
+  renderMetaAndKpis();
+  renderConsensusPane();
+  renderCnHero();
+  renderScorecard();
+  renderTrackComparison();
+  renderPatternRadar();
+  renderChart();
+  renderLatest();
+  if (state.currentDay) renderDay(state.currentDay);
+}
+
+function syncQueryState() {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("lang", state.lang);
+    url.searchParams.set("theme", state.theme);
+    const setOrDel = (k, v, def) => {
+      if (v && v !== def) url.searchParams.set(k, v);
+      else url.searchParams.delete(k);
+    };
+    setOrDel("win", state.scoreWin, "5");
+    setOrDel("mkt", state.scoreMarket, "all");
+    setOrDel("q", (state.searchQuery || "").trim(), "");
+    setOrDel("mode", state.explorerMode, "latest");
+    setOrDel("pf", state.patFilter, "all");
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  } catch (_) {}
+}
+
+function restoreQueryState() {
+  try {
+    const qs = new URLSearchParams(window.location.search);
+    const win = qs.get("win");
+    if (win === "5" || win === "10" || win === "20") {
+      state.scoreWin = win; state.compareWin = win; state.trendWin = win;
+    }
+    const mkt = qs.get("mkt");
+    if (mkt) state.scoreMarket = mkt;
+    const q = qs.get("q");
+    if (q !== null) state.searchQuery = q;
+    const mode = qs.get("mode");
+    if (mode === "latest" || mode === "history") state.explorerMode = mode;
+    const pf = qs.get("pf");
+    if (pf === "all" || pf === "active" || pf === "experimental") state.patFilter = pf;
+  } catch (_) {}
+}
+
+function setLang(lang) {
+  const norm = normalizeLang(lang) || "zh";
+  if (!SUPPORTED_LANGS.includes(norm)) return;
+  state.lang = norm;
+  try { localStorage.setItem("alphasift-lang", norm); } catch (_) {}
+  syncQueryState();
+  applyStaticI18n();
+  refreshAllViews();
+}
+
+function initLang() {
+  let lang = "";
+  try {
+    lang = normalizeLang(new URLSearchParams(window.location.search).get("lang"));
+    if (!lang) lang = normalizeLang(localStorage.getItem("alphasift-lang"));
+  } catch (_) {}
+  if (!lang) lang = normalizeLang(navigator.language || "");
+  state.lang = SUPPORTED_LANGS.includes(lang) ? lang : "zh";
+  applyStaticI18n();
+  const sw = $("lang-switch");
+  if (sw) {
+    sw.addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      if (btn && btn.dataset && btn.dataset.lang) setLang(btn.dataset.lang);
+    });
+  }
+}
+
+function initTheme() {
+  let theme = "dark";
+  try {
+    const q = new URLSearchParams(window.location.search).get("theme");
+    const saved = localStorage.getItem("alphasift-theme");
+    if (q === "light" || q === "dark") theme = q;
+    else if (saved === "light" || saved === "dark") theme = saved;
+  } catch (_) {}
+  state.theme = theme;
+  document.documentElement.setAttribute("data-theme", theme);
+  syncThemeBtn(theme);
+  const btn = $("theme-toggle");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const next = state.theme === "light" ? "dark" : "light";
+    state.theme = next;
+    document.documentElement.setAttribute("data-theme", next);
+    syncThemeBtn(next);
+    syncReportLinks();
+    syncQueryState();
+    try { localStorage.setItem("alphasift-theme", next); } catch (_) {}
+  });
+}
+
+function segmented(el, key, onChange) {
+  el.innerHTML = state.summary.windows.map((w) => `<button type="button" data-w="${w}">T+${w}</button>`).join("");
+  const sync = () => el.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.w === state[key])));
+  el.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    const w = btn && btn.dataset && btn.dataset.w;
+    if (!w) return;
+    state[key] = w;
+    sync();
+    if (key === "scoreWin") syncQueryState();
+    onChange();
+  });
+  sync();
+}
+
+function initTrackToggle() {
+  const el = $("track-trend");
+  if (!el) return;
+  const sync = () => el.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.t === state.trendTrack)));
+  el.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    const tr = btn && btn.dataset && btn.dataset.t;
+    if (!tr) return;
+    state.trendTrack = tr;
+    state.trendFocus = null;
+    sync();
+    renderChart();
+  });
+  sync();
+}
+
+function initTrendDensity() {
+  const el = $("trend-density");
+  if (!el) return;
+  const sync = () => el.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.d === state.trendDensity)));
+  el.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    const d = btn && btn.dataset && btn.dataset.d;
+    if (!d) return;
+    state.trendDensity = d;
+    state.trendFocus = null;
+    sync();
+    renderChart();
+  });
+  sync();
+}
+
+function fillMarkets(el, key, onChange, withAll = false) {
+  const markets = (state.summary.markets || []).map((m) => m.id);
+  state[key] = withAll ? "all" : (markets[0] || null);
+  el.innerHTML = (withAll ? [`<option value="all">${esc(t("all_markets"))}</option>`] : [])
+    .concat(markets.map((m) => `<option value="${m}">${esc(mname(m))}</option>`))
+    .join("");
+  el.addEventListener("change", () => {
+    state[key] = el.value;
+    if (key === "trendMarket") state.trendFocus = null;
+    onChange();
+  });
+}
+
+function renderMarketSelectorsLanguage() {
+  const markets = (state.summary.markets || []).map((m) => m.id);
+  [["market-trend", false, "trendMarket"], ["market-latest", false, "latestMarket"]].forEach(([id, withAll, key]) => {
+    const el = $(id);
+    if (!el) return;
+    const cur = state[key] || (withAll ? "all" : markets[0]);
+    el.innerHTML = (withAll ? [`<option value="all">${esc(t("all_markets"))}</option>`] : [])
+      .concat(markets.map((m) => `<option value="${m}">${esc(mname(m))}</option>`))
+      .join("");
+    if (cur) el.value = cur;
+  });
+  const pills = $("market-score-pills");
+  if (pills) {
+    const all = [{ id: "all", label: t("all_markets") }].concat(markets.map((m) => ({ id: m, label: mname(m) })));
+    pills.innerHTML = all.map((p) => `<button type="button" class="pill-tab" data-m="${p.id}" aria-pressed="${p.id === state.scoreMarket}">${esc(p.label)}</button>`).join("");
+  }
+  const daySel = $("day");
+  if (daySel && state.summary.days) {
+    const curDay = state.currentDay || ((state.summary.days[0] || {}).date || "");
+    daySel.innerHTML = (state.summary.days || []).map((d) => `<option value="${d.date}">${esc(t("day_opt", { d: d.date, n: d.runs }))}</option>`).join("");
+    if (curDay) daySel.value = curDay;
+  }
+}
+
+function computeClientConsensus() {
+  const cnRuns = ((state.summary && state.summary.latest) || {}).cn || [];
+  const byCode = new Map();
+  const sectorStats = new Map();
+  let totalPickSlots = 0;
+
+  for (const run of cnRuns) {
+    const strat = run.strategy;
+    for (const pk of run.picks || []) {
+      const code = String(pk.code || "").trim();
+      if (!code) continue;
+      totalPickSlots += 1;
+      const ind = pk.industry || t("other_ind");
+      if (!sectorStats.has(ind)) sectorStats.set(ind, { industry: ind, pick_count: 0, codes: new Set() });
+      const sec = sectorStats.get(ind);
+      sec.pick_count += 1;
+      sec.codes.add(code);
+
+      if (!byCode.has(code)) {
+        byCode.set(code, {
+          code,
+          name: pk.name || code,
+          industry: ind,
+          strategies: new Set(),
+          tracks: new Set(),
+          scores: [],
+          price: pk.price,
+          pe_ratio: pk.pe_ratio,
+          pb_ratio: pk.pb_ratio,
+          change_pct: pk.change_pct ?? null,
+          announcement_risk_flags: pk.announcement_risk_flags || [],
+        });
+      }
+      const entry = byCode.get(code);
+      if (strat) entry.strategies.add(strat);
+      entry.tracks.add(run.track || "rules");
+      if (pk.final_score !== null && pk.final_score !== undefined) entry.scores.push(Number(pk.final_score));
+    }
+  }
+
+  const consensus = [...byCode.values()]
+    .filter((x) => x.strategies.size >= 2)
+    .map((x) => ({
+      code: x.code,
+      name: x.name,
+      industry: x.industry,
+      strategy_count: x.strategies.size,
+      strategies: [...x.strategies].sort(),
+      tracks: [...x.tracks].sort(),
+      avg_final_score: x.scores.length ? x.scores.reduce((a, b) => a + b, 0) / x.scores.length : null,
+      price: x.price,
+      pe_ratio: x.pe_ratio,
+      pb_ratio: x.pb_ratio,
+      change_pct: x.change_pct,
+      announcement_risk_flags: x.announcement_risk_flags,
+    }))
+    .sort((a, b) => (b.strategy_count - a.strategy_count) || ((b.avg_final_score ?? -1) - (a.avg_final_score ?? -1)));
+
+  const sectors = [...sectorStats.values()]
+    .map((s) => ({
+      industry: s.industry,
+      pick_count: s.pick_count,
+      unique_codes: s.codes.size,
+      share_pct: totalPickSlots ? (s.pick_count / totalPickSlots) * 100 : 0,
+    }))
+    .sort((a, b) => b.pick_count - a.pick_count);
+
+  const latestDate = cnRuns.length ? cnRuns[0].date : null;
+  return { consensus, sectors, latestDate, cnRunCount: cnRuns.length };
+}
+
+function renderMiniKline(bars, observeLag) {
+  if (!Array.isArray(bars) || !bars.length) return '<span class="dim">–</span>';
+  let lo = Infinity, hi = -Infinity;
+  for (const b of bars) {
+    if (!Array.isArray(b) || b.length < 4) continue;
+    if (b[2] < lo) lo = b[2];
+    if (b[1] > hi) hi = b[1];
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return '<span class="dim">–</span>';
+  const span = Math.max(hi - lo, hi * 0.005, 1e-6);
+  const W = 96, H = 28, pad = 3.5;
+  const n = bars.length;
+  const step = (W - pad * 2) / n;
+  const bw = Math.max(1.8, step * 0.65);
+  const y = (p) => pad + (1 - (p - lo) / span) * (H - pad * 2);
+  const shapes = [];
+  bars.forEach((b, i) => {
+    const [o, h, l, c] = b;
+    const cx = (pad + (i + 0.5) * step).toFixed(1);
+    const col = c >= o ? "var(--up)" : "var(--down)";
+    const yTop = y(Math.max(o, c)), yBot = y(Math.min(o, c));
+    const bh = Math.max(1.4, yBot - yTop).toFixed(1);
+    shapes.push(`<line x1="${cx}" x2="${cx}" y1="${y(h).toFixed(1)}" y2="${y(l).toFixed(1)}" stroke="${col}" stroke-width="1"/>`);
+    shapes.push(`<rect x="${(Number(cx) - bw / 2).toFixed(1)}" y="${yTop.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh}" rx="0.5" fill="${col}"/>`);
+  });
+  const lag = Number(observeLag || 0);
+  if (Number.isInteger(lag) && lag > 0 && n - 1 - lag >= 0) {
+    const obsX = (pad + (n - 1 - lag + 0.5) * step).toFixed(1);
+    const confX = (pad + (n - 0.5) * step).toFixed(1);
+    shapes.push(`<circle cx="${obsX}" cy="2.2" r="1.8" fill="var(--accent-hi)"/>`);
+    shapes.push(`<circle cx="${confX}" cy="${(H - 2.2).toFixed(1)}" r="1.8" fill="var(--warn)"/>`);
+  }
+  return `<svg class="kline" viewBox="0 0 ${W} ${H}" aria-label="${n}D">${shapes.join("")}</svg>`;
+}
+
+function renderHitSparkline(history, slug) {
+  const vals = (history || []).slice(-15).map((h) => Number(((h && h.counts_by_pattern) || {})[slug] || 0));
+  if (!vals.length) return '<span class="dim">–</span>';
+  const maxV = Math.max(1, ...vals);
+  const W = 64, H = 18;
+  const step = W / vals.length;
+  const bw = Math.max(2, step * 0.68);
+  const bars = vals.map((v, i) => {
+    const bh = Math.max(v > 0 ? 2.5 : 1, (v / maxV) * (H - 3));
+    const x = (i * step + (step - bw) / 2).toFixed(1);
+    const y = (H - 1 - bh).toFixed(1);
+    const fill = v > 0 ? "var(--accent-hi)" : "var(--border-strong)";
+    return `<rect x="${x}" y="${y}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="0.8" fill="${fill}" opacity="${v > 0 ? "0.9" : "0.5"}"/>`;
+  });
+  return `<svg class="sparkline" viewBox="0 0 ${W} ${H}" aria-label="${vals.length}d hits">${bars.join("")}</svg>`;
+}
+
+function renderReturnDistSvg(dist) {
+  if (!dist || typeof dist !== "object") return `<div class="empty">${esc(t("no_dist"))}</div>`;
+  const counts = DIST_BUCKETS.map((b) => Number(dist[b.key] || 0));
+  const maxVal = Math.max(1, ...counts);
+  const W = 360, H = 116, top = 18, bot = 22, barH = H - top - bot;
+  const step = W / DIST_BUCKETS.length;
+  const bw = step * 0.58;
+  const parts = [];
+  DIST_BUCKETS.forEach((b, idx) => {
+    const val = counts[idx];
+    const h = Math.max(val > 0 ? 4 : 0, (val / maxVal) * barH);
+    const x = idx * step + (step - bw) / 2;
+    const y = top + (barH - h);
+    const fill = b.tone === "up" ? "var(--up)" : b.tone === "down" ? "var(--down)" : "var(--muted)";
+    const lbl = b.label_key ? t(b.label_key) : b.label;
+    parts.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="3" fill="${fill}" opacity="0.88"/>`);
+    parts.push(`<text x="${(x + bw / 2).toFixed(1)}" y="${Math.max(12, y - 4).toFixed(1)}" text-anchor="middle" font-size="10" font-family="var(--font-mono)" fill="var(--ink-2)">${val}</text>`);
+    parts.push(`<text x="${(x + bw / 2).toFixed(1)}" y="${H - 5}" text-anchor="middle" font-size="10" font-family="var(--font-mono)" fill="var(--muted)">${esc(lbl)}</text>`);
+  });
+  return `<svg class="dist-svg" viewBox="0 0 ${W} ${H}" role="img">${parts.join("")}</svg>`;
+}
+
+function renderMetaAndKpis() {
+  const s = state.summary;
+  const chips = [
+    `${t("meta_updated")} ${localTime(s.generated_at)}`,
+    t("meta_runs_fmt", { n: s.run_count }),
+    t("meta_days_fmt", { n: (s.days || []).length }),
+    t("meta_switch_fmt", { d: s.entry_mode_switch_date || "2026-11-21" }),
+  ];
+  const html = chips.map((c) => `<span class="chip">${esc(c)}</span>`);
+  let totalOk = 0, totalRuns = 0, totalFailures = 0;
+  for (const [session, info] of Object.entries(s.sessions || {})) {
+    const failures = info.failures || [];
+    const bad = failures.length > 0;
+    const skipped = info.skipped || 0;
+    totalOk += Number(info.ok || 0);
+    totalRuns += Number(info.total || 0);
+    totalFailures += failures.length;
+    const title = failures.map((f) => `${f.market} ${f.strategy}: ${f.status} ${f.error || ""}`).join("\n");
+    const statusText = skipped && info.total === 0
+      ? t("meta_skipped_fmt", { n: skipped })
+      : `${info.ok}/${info.total}${skipped ? ` · ${t("meta_skipped_fmt", { n: skipped })}` : ""}`;
+    html.push(`<span class="chip${bad ? " bad" : " ok"}" title="${esc(title)}">${esc(sesname(session))} ${esc(statusText)}</span>`);
+  }
+  $("meta").innerHTML = html.join("");
+
+  const livePill = $("live-pill");
+  if (livePill) {
+    const latestDay = (s.days && s.days[0] && s.days[0].date) || "";
+    livePill.innerHTML = `<span class="live-dot"></span>${latestDay ? esc(t("live_latest_fmt", { d: latestDay })) : esc(t("live_7mkt"))}`;
+  }
+
+  const rep = state.report || s.latest_report || {};
+  const patLatest = (state.patterns && state.patterns.latest) || {};
+  const isStale = Boolean(rep.pack_is_stale || patLatest.pack_is_stale);
+  const banner = $("stale-banner");
+  if (isStale) {
+    const packDate = rep.pack_trade_date || patLatest.pack_trade_date || "–";
+    const expDate = rep.expected_trade_date || patLatest.expected_trade_date || "–";
+    const reason = rep.stale_reason || patLatest.stale_reason || "";
+    banner.innerHTML = t("stale_banner_html", { pack: esc(packDate), exp: esc(expDate), reason: reason ? ` (${esc(reason)})` : "" });
+    banner.classList.add("show");
+  } else {
+    banner.classList.remove("show");
+    banner.innerHTML = "";
+  }
+
+  const sc = s.scorecard || [];
+  const t5Rows = sc.filter((r) => ((r.windows || {})["5"] || {}).average_excess_return_pct !== null && ((r.windows || {})["5"] || {}).average_excess_return_pct !== undefined);
+  const qualifiedT5 = t5Rows.filter((r) => Number(((r.windows || {})["5"] || {}).evaluated || 0) >= MIN_SAMPLE);
+  const sortedT5 = [...qualifiedT5].sort((a, b) => b.windows["5"].average_excess_return_pct - a.windows["5"].average_excess_return_pct);
+  const bestT5 = sortedT5[0] || null;
+  const maxEval = t5Rows.reduce((mx, r) => Math.max(mx, Number(((r.windows || {})["5"] || {}).evaluated || 0)), 0);
+
+  let evalTot = 0, exSum = 0;
+  for (const r of t5Rows) {
+    const w5 = r.windows["5"];
+    const n = Number(w5.evaluated || 0);
+    if (n > 0) {
+      evalTot += n;
+      exSum += Number(w5.average_excess_return_pct) * n;
+    }
+  }
+  const avgEx = evalTot > 0 ? exSum / evalTot : null;
+
+  const hs = $("health-strip");
+  if (hs) {
+    const aiCnt = (s.track_comparison || []).length;
+    const cnRuns = Array.isArray(s.latest)
+      ? s.latest.filter((r) => r && r.market === "cn")
+      : ((s.latest || {}).cn || []);
+    const latestCnDate = cnRuns.reduce((mx, r) => (r && r.date && r.date > mx ? r.date : mx), "");
+    const art = s.artifacts || {};
+    const artPat = art.patterns || {};
+    const artRep = art.report || {};
+    const patDate = (patLatest && patLatest.trade_date) || artPat.trade_date || "";
+    const patOk = Boolean(patDate);
+    const patStale = Boolean(patOk && (artPat.pack_is_stale || patLatest.pack_is_stale || (latestCnDate && patDate < latestCnDate)));
+    const repDate = (rep && rep.trade_date) || artRep.trade_date || "";
+    const repOk = Boolean(state.reportReady || repDate);
+    const repStale = Boolean(repOk && (artRep.pack_is_stale || rep.pack_is_stale || (latestCnDate && repDate && repDate < latestCnDate)));
+    const patVal = !patOk ? t("hl_pat_pend") : patStale ? t("hl_stale_suffix", { d: patDate }) : t("hl_pat_ok", { d: patDate });
+    const repVal = !repOk ? t("hl_rep_pend") : repStale ? t("hl_stale_suffix", { d: repDate }) : t("hl_rep_ok", { d: repDate || "ready" });
+    const patTip = patStale
+      ? (patLatest.stale_reason || artPat.reason || (latestCnDate ? `${patDate} < ${latestCnDate}` : "stale"))
+      : (artPat.reason || "");
+    const repTip = repStale
+      ? (rep.stale_reason || artRep.reason || (latestCnDate && repDate ? `${repDate} < ${latestCnDate}` : "stale"))
+      : (artRep.reason || "");
+    const items = [
+      { cls: totalFailures ? "pend" : "ok", lbl: t("hl_rules_lbl"), val: t("hl_rules_ok", { d: (s.days || []).length, r: s.run_count }), tip: "" },
+      { cls: aiCnt > 0 ? "ok" : "pend", lbl: t("hl_ai_lbl"), val: aiCnt > 0 ? t("hl_ai_ok", { n: aiCnt }) : t("hl_ai_pend"), tip: "" },
+      { cls: patOk && !patStale ? "ok" : "pend", lbl: t("hl_pat_lbl"), val: patVal, tip: patTip },
+      { cls: repOk && !repStale ? "ok" : "pend", lbl: t("hl_rep_lbl"), val: repVal, tip: repTip },
+    ];
+    hs.innerHTML = items.map((it) => `<span class="health-item" title="${esc(it.tip)}"><span class="health-dot ${it.cls}"></span><strong>${esc(it.lbl)}</strong><span>${esc(it.val)}</span></span>`).join("");
+  }
+  const mLink = $("footer-manifest-link");
+  if (mLink) {
+    if (s.integrity && s.integrity.manifest_path) {
+      mLink.href = s.integrity.manifest_path;
+      mLink.textContent = `${t("footer_manifest")} (${String(s.integrity.runs_sha256 || "").slice(0, 8)})`;
+      mLink.style.display = "";
+    } else {
+      mLink.style.display = "none";
+    }
+  }
+
+  const kpi1 = bestT5
+    ? `<div class="kpi-cell">
+         <div class="kpi-label"><span>${esc(t("kpi1_lbl"))}</span><span class="badge active">${esc(mname(bestT5.market))}</span></div>
+         <div class="kpi-val">${pct(bestT5.windows["5"].average_excess_return_pct)}</div>
+         <div class="kpi-foot">${t("kpi1_foot", { strat: sname(bestT5.strategy), beat: rate(bestT5.windows["5"].beat_rate), n: bestT5.windows["5"].evaluated })}</div>
+       </div>`
+    : t5Rows.length > 0
+      ? `<div class="kpi-cell"><div class="kpi-label"><span>${esc(t("kpi1_lbl"))}</span><span class="badge pending">&lt;${MIN_SAMPLE}</span></div><div class="kpi-val dim">${esc(t("kpi1_low_n_val", { min: MIN_SAMPLE }))}</div><div class="kpi-foot">${esc(t("kpi1_low_n_foot", { max: maxEval, min: MIN_SAMPLE }))}</div></div>`
+      : `<div class="kpi-cell"><div class="kpi-label">${esc(t("kpi1_lbl"))}</div><div class="kpi-val dim">${esc(t("kpi1_empty_val"))}</div><div class="kpi-foot">${esc(t("kpi1_empty_foot"))}</div></div>`;
+
+  const kpi2 = `<div class="kpi-cell">
+    <div class="kpi-label"><span>${esc(t("kpi2_lbl"))}</span><span class="badge">${esc(t("kpi2_badge", { n: t5Rows.length }))}</span></div>
+    <div class="kpi-val">${pct(avgEx)}</div>
+    <div class="kpi-foot">${esc(t("kpi2_foot", { eval: evalTot, runs: s.run_count }))}</div>
+  </div>`;
+
+  const reg = patLatest.market_regime || rep.market_regime || ((s.pattern_board || {}).latest || {}).market_regime || null;
+  const clientSyn = computeClientConsensus();
+  const topConsensus = ((rep.cross_strategy_synthesis || {}).consensus_picks || clientSyn.consensus)[0] || null;
+
+  const kpi3 = reg
+    ? `<div class="kpi-cell">
+         <div class="kpi-label"><span>${esc(t("kpi3_temp_lbl"))} (${esc((reg.trade_date || "").slice(5))})</span><span class="badge accent">${esc(rname(reg.regime_stage, reg.regime_stage_label))}</span></div>
+         <div class="kpi-val">${esc(Number(reg.advance_ratio_pct || 0).toFixed(1))}% <span class="small dim" style="font-weight:500;">${esc(t("kpi3_up_suffix"))}</span></div>
+         <div class="kpi-foot">${t("kpi3_temp_foot", { med: pct(reg.median_return_pct), lu: esc(String(reg.non_st_limit_up_count ?? 0)), ld: esc(String(reg.non_st_limit_down_count ?? 0)) })}</div>
+       </div>`
+    : topConsensus
+      ? `<div class="kpi-cell">
+           <div class="kpi-label"><span>${esc(t("kpi3_cons_lbl"))}</span><span class="badge accent">${esc(t("kpi3_cons_badge", { n: topConsensus.strategy_count }))}</span></div>
+           <div class="kpi-val">${esc(topConsensus.name)} <span class="small dim">${esc(topConsensus.code)}</span></div>
+           <div class="kpi-foot">${esc(t("kpi3_cons_foot", { ind: indname(topConsensus.industry), score: (topConsensus.avg_final_score != null ? Number(topConsensus.avg_final_score).toFixed(1) : "–"), price: (topConsensus.price != null ? Number(topConsensus.price).toFixed(2) : "–") }))}</div>
+         </div>`
+      : `<div class="kpi-cell"><div class="kpi-label">${esc(t("kpi3_empty_lbl"))}</div><div class="kpi-val dim">–</div><div class="kpi-foot">${esc(t("kpi3_empty_foot"))}</div></div>`;
+
+  const ann = rep.announcement_risks || {};
+  const flaggedCount = (ann.flagged_items || []).length;
+  const checkedCount = Number(ann.checked_count || 0);
+  const kpi4 = checkedCount > 0
+    ? `<div class="kpi-cell">
+         <div class="kpi-label"><span>${esc(t("kpi4_ann_lbl"))}</span><span class="badge ${flaggedCount ? "bad" : "ok-neutral"}">${esc(flaggedCount ? t("kpi4_ann_bad", { n: flaggedCount }) : t("kpi4_ann_ok"))}</span></div>
+         <div class="kpi-val">${flaggedCount > 0 ? `<span class="status-err">${esc(t("kpi4_ann_bad_val", { n: flaggedCount }))}</span>` : `<span class="status-ok">${esc(t("kpi4_ann_ok_val"))}</span>`}</div>
+         <div class="kpi-foot">${esc(t("kpi4_ann_foot", { n: checkedCount, tail: flaggedCount ? ((ann.flagged_items[0] || {}).name || "") : t("kpi4_ann_clean") }))}</div>
+       </div>`
+    : `<div class="kpi-cell">
+         <div class="kpi-label"><span>${esc(t("kpi4_ops_lbl"))}</span><span class="badge ${totalFailures ? "bad" : "ok-neutral"}">${esc(totalFailures ? t("kpi4_ops_bad", { n: totalFailures }) : t("kpi4_ops_ok"))}</span></div>
+         <div class="kpi-val"><span class="${totalFailures ? "status-err" : "status-ok"}">${totalOk} / ${totalRuns}</span></div>
+         <div class="kpi-foot">${esc(t("kpi4_ops_foot", { m: (s.markets || []).length, d: (s.days || []).length }))}</div>
+       </div>`;
+
+  $("kpi-strip").innerHTML = kpi1 + kpi2 + kpi3 + kpi4;
+}
+
+function renderConsensusPane() {
+  const wrap = $("consensus-pane");
+  const rep = state.report || (state.summary && state.summary.latest_report) || {};
+  const brief = rep.ai_brief || {};
+  const ann = rep.announcement_risks || {};
+  const syn = rep.cross_strategy_synthesis || {};
+  const clientSyn = computeClientConsensus();
+
+  const consensus = (syn.consensus_picks && syn.consensus_picks.length) ? syn.consensus_picks : clientSyn.consensus;
+  const sectors = (syn.sector_concentration && syn.sector_concentration.length) ? syn.sector_concentration : clientSyn.sectors;
+  const tradeDate = rep.trade_date || clientSyn.latestDate || t("latest_fallback");
+  const flagged = ann.flagged_items || [];
+  const checked = Number(ann.checked_count || 0);
+  const mNews = (rep.market_news && Array.isArray(rep.market_news.items)) ? rep.market_news.items : [];
+  const candNews = (rep.market_news && rep.market_news.candidate_news) || {};
+
+  let headlineHtml = "";
+  if (brief.headline) {
+    const modeBadge = brief.mode === "llm" ? `<span class="badge ai">${esc(t("ai_brief_badge"))}</span>` : `<span class="badge">${esc(t("rule_brief_badge"))}</span>`;
+    let hlText = brief.headline;
+    let subText = brief.consensus_and_ai_edge || "";
+    if (state.lang !== "zh" && brief.mode !== "llm") {
+      const reg = rep.market_regime || ((state.patterns || {}).latest || {}).market_regime || ((state.summary.pattern_board || {}).latest || {}).market_regime || null;
+      if (reg) {
+        const adv = Number(reg.advance_ratio_pct || 0).toFixed(1);
+        const med = reg.median_return_pct !== null && reg.median_return_pct !== undefined
+          ? `${Number(reg.median_return_pct) > 0 ? "+" : ""}${Number(reg.median_return_pct).toFixed(2)}%`
+          : "–";
+        const seal = reg.seal_rate_pct !== null && reg.seal_rate_pct !== undefined ? `${Number(reg.seal_rate_pct).toFixed(1)}%` : "–";
+        hlText = t("rule_hl_fmt", {
+          stale: rep.pack_is_stale ? t("rule_hl_stale") : "",
+          stage: rname(reg.regime_stage, reg.regime_stage_label),
+          adv,
+          med,
+          lu: reg.non_st_limit_up_count ?? 0,
+          ld: reg.non_st_limit_down_count ?? 0,
+          seal,
+        });
+        if (flagged.length) hlText += t("rule_hl_flag", { n: flagged.length });
+        else if (consensus.length) hlText += t("rule_hl_cons", { n: consensus.length });
+      } else {
+        hlText = t("rule_hl_noreg_fmt", { date: tradeDate, cons: consensus.length, flag: flagged.length });
+      }
+      const subParts = [];
+      if (consensus.length) {
+        subParts.push(t("rule_sub_cons", { items: consensus.slice(0, 3).map((c) => `${c.code} ${c.name} (${c.strategy_count})`).join(", ") }));
+      } else {
+        subParts.push(t("rule_sub_nocons"));
+      }
+      if (sectors.length) {
+        subParts.push(t("rule_sub_sec", { items: sectors.slice(0, 3).map((s) => `${indname(s.industry)} (${Number(s.share_pct || 0).toFixed(1)}%)`).join(", ") }));
+      }
+      const aiHl = rep.ai_highlights || [];
+      if (aiHl.length) {
+        const addN = aiHl.reduce((acc, h) => acc + ((h && h.added_by_ai) || []).length, 0);
+        const dropN = aiHl.reduce((acc, h) => acc + ((h && h.dropped_by_ai) || []).length, 0);
+        subParts.push(t("rule_sub_ai", { add: addN, drop: dropN }));
+      }
+      subText = subParts.join(" · ");
+    }
+    headlineHtml = `<div class="brief-callout"><b>${modeBadge} ${esc(t("brief_headline_lbl"))}</b>${esc(hlText)}${subText ? `<div class="small dim" style="margin-top:4px;">${esc(subText)}</div>` : ""}</div>`;
+  }
+
+  let annHtml = "";
+  if (flagged.length) {
+    annHtml = `<div class="alert-strip">
+      <div><b>${esc(t("ann_alert_head", { checked, flagged: flagged.length }))}</b></div>
+      ${flagged.slice(0, 4).map((x) => {
+        const fl = (x.negative_event_flags || []).map(esc).join("/");
+        return `<div class="small"><strong>${esc(x.name || x.code)}</strong> <span class="mono dim">${esc(x.code)}</span> <span class="badge bad">${fl}</span> · <span class="dim">${esc((x.announcement_summary || "").slice(0, 52))}</span></div>`;
+      }).join("")}
+    </div>`;
+  } else if (checked > 0) {
+    annHtml = `<div class="alert-ok">${esc(t("ann_ok_msg", { n: checked }))}</div>`;
+  }
+
+  let tableHtml = "";
+  if (consensus.length) {
+    const rows = consensus.slice(0, 8).map((c, idx) => {
+      const stratTags = (c.strategies || []).slice(0, 3).map((st) => `<span class="badge">${sname(st)}</span>`).join("");
+      const more = (c.strategies || []).length > 3 ? ` <span class="dim small">+${c.strategies.length - 3}</span>` : "";
+      const riskFlags = c.announcement_risk_flags || [];
+      const riskCell = riskFlags.length ? `<span class="badge bad">${esc(riskFlags.join("/"))}</span>` : '<span class="dim">–</span>';
+      const stockNews = candNews[c.code] || [];
+      const newsHint = stockNews.length ? stockNews.map((n) => `[${n.date || n.source || ""}] ${n.title}`).join("\n") : "";
+      const newsPill = stockNews.length ? ` <span class="badge" title="${esc(newsHint)}">${esc(t("news_tag"))}</span>` : "";
+      const rightCol = (c.change_pct !== null && c.change_pct !== undefined)
+        ? pct(c.change_pct, 2)
+        : (c.price !== null && c.price !== undefined ? `¥${num(c.price, 2)}` : '<span class="dim">–</span>');
+      return `<tr>
+        <td><span class="rank-num ${idx < 3 ? "top" : ""}">${idx + 1}</span></td>
+        <td class="l" title="${esc(newsHint)}"><strong>${esc(c.name)}</strong> <span class="mono small dim">${esc(c.code)}</span>${newsPill}</td>
+        <td class="l dim">${c.industry ? esc(indname(c.industry)) : "–"}</td>
+        <td><span class="badge accent">${esc(t("n_strat_badge", { n: c.strategy_count }))}</span></td>
+        <td class="l">${stratTags}${more}</td>
+        <td class="mono">${num(c.avg_final_score, 1)}</td>
+        <td class="mono">${rightCol}</td>
+        <td>${riskCell}</td>
+      </tr>`;
+    }).join("");
+    const priceHdr = consensus.some((c) => c.change_pct !== null && c.change_pct !== undefined) ? t("col_chg") : t("col_price");
+    tableHtml = `<div class="scroll"><table>
+      <tr><th>#</th><th class="l">${esc(t("col_stock"))}</th><th class="l">${esc(t("col_industry"))}</th><th>${esc(t("col_hits"))}</th><th class="l">${esc(t("col_strategies"))}</th><th>${esc(t("col_avg_score"))}</th><th>${esc(priceHdr)}</th><th>${esc(t("col_ann"))}</th></tr>
+      ${rows}
+    </table></div>`;
+  } else {
+    tableHtml = `<div class="empty">${esc(t("no_consensus"))}</div>`;
+  }
+
+  const sectorHtml = sectors.length
+    ? `<div class="sector-pills">
+        <div class="small dim" style="display:flex;justify-content:space-between;"><span>${esc(t("sector_dist_title", { n: Math.min(5, sectors.length) }))}</span><span class="mono">${esc(t("sector_dist_col"))}</span></div>
+        ${sectors.slice(0, 5).map((s) => `
+          <div class="sector-row">
+            <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(indname(s.industry))}</span>
+            <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, Number(s.share_pct || 0)).toFixed(1)}%"></div></div>
+            <span class="mono small" style="text-align:right;">${Number(s.share_pct || 0).toFixed(1)}% (${s.pick_count})</span>
+          </div>`).join("")}
+      </div>`
+    : "";
+
+  const safeNewsUrl = (raw) => (/^https?:\/\//i.test(String(raw || "").trim()) ? String(raw).trim() : "");
+  const newsHtml = mNews.length
+    ? `<div class="news-strip">
+        <div class="news-strip-head"><span>📰 ${esc(t("news_strip_title"))}</span><span class="mono">${esc(((rep.market_news || {}).sources || []).join(" · "))}</span></div>
+        ${mNews.slice(0, 4).map((n) => {
+          const href = safeNewsUrl(n.url);
+          const meta = [n.time, n.source].filter(Boolean).join(" · ");
+          const titleEl = href
+            ? `<a class="news-title" href="${esc(href)}" target="_blank" rel="noopener">${esc(n.title)}</a>`
+            : `<span class="news-title">${esc(n.title)}</span>`;
+          return `<div class="news-row">${meta ? `<span class="news-meta">${esc(meta)}</span>` : ""}${titleEl}</div>`;
+        }).join("")}
+      </div>`
+    : "";
+
+  const reportBtn = rep.trade_date
+    ? `<a class="action-btn" href="${esc(reportHref())}" style="padding:3px 9px;font-size:11.5px;">${esc(t("full_report_btn"))}</a>`
+    : `<span class="chip">${esc(t("live_agg_chip", { d: tradeDate }))}</span>`;
+
+  wrap.innerHTML = `
+    <div class="pane-head">
+      <div class="pane-title">${ICO_TARGET} ${esc(t("pane_consensus_title"))} <span class="badge accent">${esc(t("pane_consensus_badge", { n: consensus.length }))}</span></div>
+      ${reportBtn}
+    </div>
+    ${headlineHtml}
+    ${annHtml}
+    ${tableHtml}
+    ${sectorHtml}
+    ${newsHtml}
+  `;
+}
+
+function renderCnHero() {
+  const wrap = $("cn-hero-grid");
+  const pb = state.patterns || {};
+  const latestPat = pb.latest || {};
+  const rep = state.report || (state.summary && state.summary.latest_report) || {};
+  const reg = latestPat.market_regime || rep.market_regime || ((state.summary.pattern_board || {}).latest || {}).market_regime || null;
+
+  if (!reg) {
+    const markets = state.summary.markets || [];
+    const sc = state.summary.scorecard || [];
+    const rowsHtml = markets.map((m) => {
+      const mRows = sc.filter((r) => r.market === m.id && ((r.windows || {})["5"] || {}).average_excess_return_pct !== null && ((r.windows || {})["5"] || {}).average_excess_return_pct !== undefined);
+      mRows.sort((a, b) => b.windows["5"].average_excess_return_pct - a.windows["5"].average_excess_return_pct);
+      const top = mRows[0] || null;
+      if (!top) {
+        return `<div class="mkt-snap-row"><span class="badge">${esc(mname(m.id))}</span><div class="mkt-snap-mid"><div class="mkt-snap-meta">${esc(m.benchmark)}</div></div><div class="mkt-snap-val dim">${esc(t("snap_pending"))}</div></div>`;
+      }
+      const w5 = top.windows["5"];
+      const ex = Number(w5.average_excess_return_pct);
+      const barW = Math.min(100, Math.max(8, Math.abs(ex) * 14));
+      return `<div class="mkt-snap-row">
+        <div><strong style="font-size:12.5px;">${esc(mname(m.id))}</strong><div class="small dim">${esc(m.id.toUpperCase())}</div></div>
+        <div class="mkt-snap-mid">
+          <div class="mkt-snap-strat">${sname(top.strategy)}</div>
+          <div class="mkt-snap-meta">${t("snap_beat_eval", { bench: esc(m.benchmark), beat: rate(w5.beat_rate), n: w5.evaluated })}</div>
+          <div class="bar-track" style="margin-top:4px;height:4px;"><div class="bar-fill ${ex >= 0 ? "up-bg" : ""}" style="width:${barW.toFixed(1)}%;${ex < 0 ? "background:var(--down);" : ""}"></div></div>
+        </div>
+        <div class="mkt-snap-val">${pct(ex, 2)}</div>
+      </div>`;
+    }).join("");
+
+    wrap.innerHTML = `
+      <div class="pane-head">
+        <div class="pane-title">${ICO_GLOBE} ${esc(t("snap_7mkt_title"))}</div>
+        <span class="chip">${esc(t("rules_bench_chip"))}</span>
+      </div>
+      <div class="mkt-snap-list">${rowsHtml}</div>
+      <div class="small dim" style="margin-top:auto;padding-top:8px;border-top:1px dashed var(--border);">
+        ${esc(t("snap_note"))}
+      </div>
+    `;
+    return;
+  }
+
+  const totalTraded = Math.max(1, Number(reg.traded_count || 0));
+  const adv = Number(reg.advancing_count || 0);
+  const dec = Number(reg.declining_count || 0);
+  const flat = Number(reg.flat_count || 0);
+  const advW = (adv / totalTraded) * 100;
+  const flatW = (flat / totalTraded) * 100;
+  const decW = Math.max(0, 100 - advW - flatW);
+  const amtVal = reg.total_amount_yi !== null && reg.total_amount_yi !== undefined
+    ? (state.lang === "en" ? `${(Number(reg.total_amount_yi) * 0.1).toFixed(0)}B RMB` : `${Math.round(Number(reg.total_amount_yi))} ${t("amt_unit")}`)
+    : "–";
+  const seal = reg.seal_rate_pct !== null && reg.seal_rate_pct !== undefined ? `${Number(reg.seal_rate_pct).toFixed(1)}%` : "–";
+
+  const ladder = reg.consecutive_board_ladder || {};
+  const ladderEntries = Object.entries(ladder).sort((a, b) => Number(b[0]) - Number(a[0]));
+  const maxCnt = Math.max(1, ...ladderEntries.map(([, v]) => Number(v || 0)));
+  const ladderHtml = ladderEntries.length
+    ? `<div class="ladder-list">${ladderEntries.map(([b, cnt]) => {
+        const w = Math.max(8, (Number(cnt) / maxCnt) * 100);
+        return `<div class="ladder-row"><span>${esc(t("ladder_board", { b }))}</span><div class="bar-track"><div class="bar-fill up-bg" style="width:${w.toFixed(1)}%"></div></div><span style="text-align:right;font-weight:600">${esc(t("ladder_cnt", { n: cnt }))}</span></div>`;
+      }).join("")}</div>`
+    : `<div class="small dim">${esc(t("ladder_empty"))}</div>`;
+
+  const hist = (pb.history || []).slice(-6);
+  const histHtml = hist.length
+    ? `<div class="hist-ribbon">${hist.map((h) => `<span class="hist-pill" title="${esc(t("hist_title", { v: num(h.advance_ratio_pct, 1) }))}">${esc((h.trade_date || "").slice(5))} · ${esc(rname(h.regime_stage, h.regime_stage_label))} ${h.non_st_limit_up_count ?? 0}/${h.non_st_limit_down_count ?? 0}</span>`).join("")}</div>`
+    : "";
+
+  wrap.innerHTML = `
+    <div class="pane-head">
+      <div class="pane-title">${ICO_PULSE} ${esc(t("cn_hero_title"))}</div>
+      <span class="chip accent">${esc(reg.trade_date || latestPat.trade_date || "–")} · ${esc(rname(reg.regime_stage, reg.regime_stage_label))}</span>
+    </div>
+    <div class="breadth-bar" title="${esc(t("breadth_up"))} ${adv} / ${esc(t("breadth_flat"))} ${flat} / ${esc(t("breadth_down"))} ${dec}">
+      <span style="width:${advW.toFixed(1)}%;background:var(--up)"></span>
+      <span style="width:${flatW.toFixed(1)}%;background:var(--muted);opacity:0.45"></span>
+      <span style="width:${decW.toFixed(1)}%;background:var(--down)"></span>
+    </div>
+    <div class="breadth-meta"><span>${esc(t("breadth_up"))} ${adv} (${Number(reg.advance_ratio_pct || 0).toFixed(1)}%)</span><span>${esc(t("breadth_flat"))} ${flat}</span><span>${esc(t("breadth_down"))} ${dec}</span></div>
+    ${renderReturnDistSvg(reg.return_distribution)}
+    <div class="cn-stat-2x2">
+      <div class="mini-stat">
+        <div class="lbl">${esc(t("stat_luld"))}</div>
+        <div class="val"><span class="up">${reg.non_st_limit_up_count ?? 0}</span> / <span class="down">${reg.non_st_limit_down_count ?? 0}</span></div>
+        <div class="sub">${esc(t("stat_luld_sub", { up: reg.one_price_limit_up_count ?? 0, dn: reg.one_price_limit_down_count ?? 0 }))}</div>
+      </div>
+      <div class="mini-stat">
+        <div class="lbl">${esc(t("stat_seal"))}</div>
+        <div class="val">${seal} · <span class="small">${esc(amtVal)}</span></div>
+        <div class="sub">${esc(t("stat_seal_sub", { broken: reg.non_st_broken_board_count ?? 0, streak: reg.max_consecutive_limit_up ?? 0 }))}</div>
+      </div>
+      <div class="mini-stat">
+        <div class="lbl">${esc(t("stat_prevlu"))}</div>
+        <div class="val">${pct(reg.prev_limit_up_avg_return_pct)}</div>
+        <div class="sub">${t("stat_prevlu_sub", { n: reg.prev_limit_up_count ?? 0, win: sharePct(reg.prev_limit_up_win_rate_pct) })}</div>
+      </div>
+      <div class="mini-stat">
+        <div class="lbl">${esc(t("stat_prom"))}</div>
+        <div class="val">${pct(reg.prev_limit_up_open_premium_pct)}</div>
+        <div class="sub">${t("stat_prom_sub", { n: reg.prev_limit_up_promoted_count ?? 0, rate: sharePct(reg.prev_limit_up_promotion_rate_pct) })}</div>
+      </div>
+    </div>
+    <div>
+      <div class="small dim" style="margin-bottom:6px;">${esc(t("ladder_title"))}</div>
+      ${ladderHtml}
+    </div>
+    ${histHtml}
+  `;
+}
+
+function initScoreMarketPills() {
+  const wrap = $("market-score-pills");
+  const markets = state.summary.markets || [];
+  const pills = [{ id: "all", label: t("all_markets") }].concat(markets.map((m) => ({ id: m.id, label: mname(m.id) })));
+  wrap.innerHTML = pills.map((p) => `<button type="button" class="pill-tab" data-m="${p.id}" aria-pressed="${p.id === state.scoreMarket}">${esc(p.label)}</button>`).join("");
+  wrap.addEventListener("click", (e) => {
+    const btn = e.target.closest("button");
+    const m = btn && btn.dataset && btn.dataset.m;
+    if (!m) return;
+    state.scoreMarket = m;
+    wrap.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.m === m)));
+    syncQueryState();
+    renderScorecard();
+  });
+  const sortEl = $("sort-score");
+  if (sortEl) sortEl.addEventListener("change", () => { state.scoreSort = sortEl.value; renderScorecard(); });
+}
+
+function renderScorecard() {
+  const w = state.scoreWin;
+  let rows = state.summary.scorecard || [];
+  if (state.scoreMarket !== "all") rows = rows.filter((r) => r.market === state.scoreMarket);
+  if (!rows.length) {
+    $("scorecard").innerHTML = `<tr><td class="empty">${esc(t("sc_empty"))}</td></tr>`;
+    return;
+  }
+
+  const metricVal = (r) => {
+    const x = (r.windows || {})[w] || {};
+    if (state.scoreSort === "beat") return x.beat_rate ?? -1e9;
+    if (state.scoreSort === "return") return x.average_return_pct ?? -1e9;
+    if (state.scoreSort === "evaluated") return x.evaluated ?? -1e9;
+    return x.average_excess_return_pct ?? -1e9;
+  };
+  const sorted = [...rows].sort((a, b) => metricVal(b) - metricVal(a));
+  const maxAbsEx = Math.max(2, ...sorted.map((r) => Math.abs(Number(((r.windows || {})[w] || {}).average_excess_return_pct || 0))));
+
+  const cols = t("sc_cols");
+  const head = `<thead><tr><th>${esc(cols[0])}</th><th>${esc(cols[1])}</th><th class="l">${esc(cols[2])}</th><th class="l">${esc(cols[3])}</th><th>${esc(cols[4])}</th><th>${esc(cols[5])}</th><th>${esc(cols[6])}</th><th>${esc(cols[7])}</th><th>${esc(cols[8])}</th><th>${esc(cols[9])}</th><th>${esc(cols[10])}</th><th>${esc(cols[11].replace("{w}", w))}</th><th>${esc(cols[12])}</th></tr></thead>`;
+  const body = sorted.map((r, idx) => {
+    const x = (r.windows || {})[w] || {};
+    const bench = x.matched_return_pct !== null && x.average_excess_return_pct !== null ? x.matched_return_pct - x.average_excess_return_pct : null;
+    const lowSample = (x.evaluated ?? 0) < MIN_SAMPLE;
+    const few = (x.evaluated ?? 0) > 0 && lowSample ? `<span class="tag" title="${esc(t("sc_low_sample_title", { n: MIN_SAMPLE }))}">&lt;${MIN_SAMPLE}</span>` : "";
+    const trBadge = r.track === "ai" ? '<span class="badge ai">AI</span>' : "";
+    const modes = (r.entry_modes || ["close"]).join(" / ");
+    const hasNextOpen = Array.isArray(r.entry_modes) && r.entry_modes.includes("next_open");
+    const unShare = (x.untradable_assessed === false || (!hasNextOpen && x.untradable_assessed !== true) || x.untradable_share_pct === null || x.untradable_share_pct === undefined)
+      ? `<span class="dim" title="${esc(t("sc_unassessed_title"))}">${esc(t("sc_unassessed"))}</span>`
+      : (x.untradable_share_pct > 0 ? `<span class="warn">${sharePct(x.untradable_share_pct)}</span>` : "0.0%");
+
+    const ex = x.average_excess_return_pct;
+    const barW = ex !== null && ex !== undefined ? Math.max(4, (Math.abs(Number(ex)) / maxAbsEx) * 100) : 0;
+    const exColor = ex > 0 ? "var(--up)" : ex < 0 ? "var(--down)" : "var(--muted)";
+    const exCell = (ex !== null && ex !== undefined)
+      ? `<div class="div-bar-wrap"><span class="div-track"><span class="div-fill" style="width:${barW.toFixed(1)}%;background:${exColor};display:block;"></span></span><b>${pct(ex)}</b></div>`
+      : '<span class="dim">–</span>';
+
+    return `<tr class="${lowSample ? "low-sample" : ""}">
+      <td><span class="rank-num ${idx < 3 && !lowSample ? "top" : ""}">${idx + 1}</span></td>
+      <td>${esc(mname(r.market))}</td>
+      <td class="l"><strong>${sname(r.strategy)}</strong>${trBadge}</td>
+      <td class="l"><span class="badge mode">${esc(modes)}</span></td>
+      <td class="mono">${r.runs}</td>
+      <td class="mono">${x.evaluated ?? 0}${few}</td>
+      <td class="dim mono">${x.pending ?? 0}</td>
+      <td class="mono">${unShare}</td>
+      <td class="mono">${pct(x.average_return_pct)}</td>
+      <td class="mono">${rate(x.win_rate)}</td>
+      <td class="mono">${pct(bench)}</td>
+      <td class="mono">${exCell}</td>
+      <td class="mono">${rate(x.beat_rate)}</td>
+    </tr>`;
+  }).join("");
+  $("scorecard").innerHTML = `${head}<tbody>${body}</tbody>`;
+}
+
+function renderTrackComparison() {
+  const rows = state.summary.track_comparison || [];
+  const rep = state.report || (state.summary && state.summary.latest_report) || {};
+  const hl = rep.ai_highlights || [];
+  const w = state.compareWin;
+
+  if (!rows.length && !hl.length) {
+    $("track-compare").innerHTML = `<div class="empty" style="padding:14px 16px;">${t("tc_empty_all")}</div>`;
+    $("ai-attribution-cards").innerHTML = "";
+    return;
+  }
+
+  if (!rows.length) {
+    $("track-compare").innerHTML = `<div class="empty">${esc(t("tc_empty_pending"))}</div>`;
+  } else {
+    const tc = t("tc_cols");
+    const head = `<thead><tr><th>${esc(tc[0])}</th><th class="l">${esc(tc[1])}</th><th>${esc(tc[2])}</th><th>${esc(tc[3])}</th><th>${esc(tc[4])}</th><th>${esc(tc[5])}</th><th>${esc(tc[6])}</th><th>${esc(tc[7].replace("{w}", w))}</th><th>${esc(tc[8])}</th><th>${esc(tc[9])}</th></tr></thead>`;
+    const body = rows.map((r) => {
+      const x = (r.windows || {})[w] || {};
+      const paired = x.paired_days ?? 0;
+      const minPaired = x.min_paired_days ?? 10;
+      const sufficient = Boolean(x.sample_sufficient) && x.ai_minus_rules_pct !== null && x.ai_minus_rules_pct !== undefined;
+      const deltaCell = sufficient
+        ? `<b>${pct(x.ai_minus_rules_pct)}</b><div class="small dim">${esc(t("tc_win_days", { w: x.ai_win_days ?? 0, n: paired }))}</div>`
+        : `<span class="badge exp" title="${esc(tHiddenReason(x.delta_hidden_reason, paired, minPaired))}">${esc(t("tc_insuff", { p: paired, m: minPaired }))}</span>`;
+      const missRate = r.ai_missing_rate_pct !== null && r.ai_missing_rate_pct !== undefined ? `${Number(r.ai_missing_rate_pct).toFixed(1)}%` : "–";
+      const overlap = r.avg_pick_overlap_pct !== null && r.avg_pick_overlap_pct !== undefined ? `${Number(r.avg_pick_overlap_pct).toFixed(1)}%` : "–";
+      const uniqTxt = x.ai_unique_count ? `${pct(x.ai_unique_excess_pct)} <span class="dim small">(${x.ai_unique_count})</span>` : '<span class="dim">–</span>';
+      const dropTxt = x.rules_dropped_count ? `${pct(x.rules_dropped_excess_pct)} <span class="dim small">(${x.rules_dropped_count})</span>` : '<span class="dim">–</span>';
+      return `<tr class="${sufficient ? "" : "low-sample"}">
+        <td>${esc(mname(r.market))}</td>
+        <td class="l"><strong>${sname(r.strategy)}</strong></td>
+        <td class="mono">${paired} / ${r.common_days ?? paired}</td>
+        <td class="mono">${missRate}</td>
+        <td class="mono">${overlap}</td>
+        <td class="mono">${pct(x.rules_excess_pct)} <span class="dim small">(${esc(t("n_picks_sm", { n: x.rules_matched ?? 0 }))})</span></td>
+        <td class="mono">${pct(x.ai_excess_pct)} <span class="dim small">(${esc(t("n_picks_sm", { n: x.ai_matched ?? 0 }))})</span></td>
+        <td class="mono">${deltaCell}</td>
+        <td class="mono">${uniqTxt}</td>
+        <td class="mono">${dropTxt}</td>
+      </tr>`;
+    }).join("");
+    $("track-compare").innerHTML = `<table>${head}<tbody>${body}</tbody></table>`;
+  }
+
+  const hlWrap = $("ai-attribution-cards");
+  const sep = state.lang === "en" ? "; " : "；";
+  const hlCards = hl.map((item) => {
+    const added = (item.added_by_ai || []).map((a) => `${esc(a.name)}(${esc(a.code)})${a.ranking_reason ? `: ${esc(a.ranking_reason.slice(0, 42))}` : ""}`).join(sep) || t("none_txt");
+    const dropped = (item.dropped_by_ai || []).map((d) => `${esc(d.name)}(${esc(d.code)})`).join(sep) || t("none_txt");
+    const ovStr = item.overlap_pct === null || item.overlap_pct === undefined ? "–" : `${item.overlap_pct}%`;
+    return `<div class="card">
+      <div class="card-top">
+        <h3><span>${sname(item.strategy)}</span><span class="badge ai">${esc(t("ai_attr_badge"))}</span></h3>
+        <div class="sub">${esc(t("ai_attr_sub", { ov: ovStr, r: item.rules_pick_count ?? 0, a: item.ai_pick_count ?? 0 }))}</div>
+      </div>
+      <div style="padding:10px 14px;font-size:12.5px;display:flex;flex-direction:column;gap:5px;">
+        ${item.llm_market_view ? `<div><span class="dim">${esc(t("ai_mkt_view"))}</span>${esc(item.llm_market_view)}</div>` : ""}
+        <div><span class="up">${esc(t("ai_added"))}</span>${added}</div>
+        <div><span class="dim">${esc(t("ai_dropped"))}</span>${dropped}</div>
+      </div>
+    </div>`;
+  });
+
+  const caseCards = rows.map((r) => {
+    const winObj = (r.windows || {})[w] || {};
+    const cs = winObj.ai_case_studies || {};
+    const adds = cs.best_ai_adds || [];
+    const avoids = cs.best_ai_avoids || [];
+    const misses = cs.missed_by_ai || [];
+    if (!adds.length && !avoids.length && !misses.length) return "";
+    const fmtCase = (x) => `${esc((x.date || "").slice(5))} ${esc(x.name || x.code)}(${esc(x.code)}) ${pct(x.excess_return_pct)}`;
+    return `<div class="card">
+      <div class="card-top">
+        <h3><span>${sname(r.strategy)}</span><span class="badge ai">${esc(t("case_badge", { w }))}</span></h3>
+      </div>
+      <div style="padding:10px 14px;font-size:12.5px;display:flex;flex-direction:column;gap:5px;">
+        ${adds.length ? `<div><span class="up">${esc(t("case_adds"))}</span>${adds.map(fmtCase).join(sep)}</div>` : ""}
+        ${avoids.length ? `<div><span class="down">${esc(t("case_avoids"))}</span>${avoids.map(fmtCase).join(sep)}</div>` : ""}
+        ${misses.length ? `<div><span class="dim">${esc(t("case_misses"))}</span>${misses.map(fmtCase).join(sep)}</div>` : ""}
+      </div>
+    </div>`;
+  }).filter(Boolean);
+
+  const allCards = [...hlCards, ...caseCards];
+  hlWrap.innerHTML = allCards.length ? `<div class="cards">${allCards.join("")}</div>` : "";
+}
+
+function renderPatternRadar() {
+  const pb = state.patterns;
+  if (!pb || !pb.latest) {
+    $("pattern-hits-wrap").innerHTML = `<div class="empty">${esc(t("pat_not_built"))}</div>`;
+    $("universe-baseline-wrap").innerHTML = "";
+    $("replay-summary-wrap").innerHTML = `<div class="empty">${esc(t("pat_no_replay"))}</div>`;
+    $("regime-slice-wrap").innerHTML = "";
+    $("overhead-slice-wrap").innerHTML = "";
+    return;
+  }
+  const dpEl = $("details-patterns");
+  if (dpEl) dpEl.open = true;
+  const drEl = $("details-replay");
+  const latest = pb.latest;
+  const replay = pb.replay;
+  if (drEl && replay && Array.isArray(replay.patterns) && replay.patterns.length) drEl.open = true;
+  const sigMap = latest.signals_by_pattern || {};
+  const counts = latest.counts_by_pattern || {};
+  const patNames = Object.keys(counts);
+  const replayStatus = {};
+  const replayByName = {};
+  if (replay && Array.isArray(replay.patterns)) {
+    for (const p of replay.patterns) {
+      replayStatus[p.pattern] = (p.graduation || {}).recommended_status || "experimental";
+      replayByName[p.pattern] = p;
+    }
+  }
+
+  if (!patNames.length) {
+    $("pattern-hits-wrap").innerHTML = `<div class="empty">${esc(t("pat_no_entries"))}</div>`;
+  } else {
+    const pcols = t("pat_cols");
+    const patMeta = patNames.map((name) => {
+      const items = sigMap[name] || [];
+      const total = counts[name] || items.length;
+      const st = replayStatus[name] || (items[0] ? items[0].status : "experimental");
+      return { name, items, total, st };
+    });
+    const actCnt = patMeta.filter((x) => x.st === "active").length;
+    const expCnt = patMeta.length - actCnt;
+    const filterBar = `<div class="controls" id="pat-filter-bar" style="margin-bottom:10px;"><div class="seg">
+      <button type="button" data-pf="all" aria-pressed="${state.patFilter === "all"}">${esc(t("pat_f_all", { n: patMeta.length }))}</button>
+      <button type="button" data-pf="active" aria-pressed="${state.patFilter === "active"}">${esc(t("pat_f_active", { n: actCnt }))}</button>
+      <button type="button" data-pf="experimental" aria-pressed="${state.patFilter === "experimental"}">${esc(t("pat_f_exp", { n: expCnt }))}</button>
+    </div></div>`;
+    const fmtS = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? "–" : `${Number(v) > 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
+    const visible = patMeta.filter((x) => state.patFilter === "all" || x.st === state.patFilter);
+    const cards = visible.map(({ name, items, total, st }) => {
+      const badge = st === "active"
+        ? `<span class="badge active">${esc(t("pat_status_active"))}</span>`
+        : `<span class="badge exp">${esc(t("pat_status_exp"))}</span>`;
+      const dname = pname(name, items[0] && items[0].display_name);
+      const rInfo = replayByName[name] || null;
+      const rh5 = rInfo ? ((rInfo.horizons || {}).t5 || {}) : {};
+      const rGrad = rInfo ? (rInfo.graduation || {}) : {};
+      const rStab = rInfo ? (rInfo.stability || {}) : {};
+      const gVal = rh5.gross_excess_mean_pct ?? rh5.excess_mean_pct;
+      const nVal = rGrad.t5_net_excess_mean_pct ?? rh5.net_excess_mean_pct;
+      const tStr = rStab.t_stat !== null && rStab.t_stat !== undefined ? Number(rStab.t_stat).toFixed(2) : "–";
+      const metaBar = rInfo
+        ? `<div class="pat-meta-row"><span>${esc(t("pat_card_meta", { g: fmtS(gVal), n: fmtS(nVal), t: tStr, cnt: rh5.excess_scored ?? rh5.scored ?? 0 }))}</span><span title="${esc(t("pat_card_spark"))}">${renderHitSparkline(pb.history, name)}</span></div>`
+        : (pb.history && pb.history.length ? `<div class="pat-meta-row"><span>${esc(t("pat_card_spark"))}</span><span>${renderHitSparkline(pb.history, name)}</span></div>` : "");
+      if (!items.length) {
+        return `<div class="card"><div class="card-top"><h3><span>${esc(dname)}</span>${badge}</h3><div class="sub">${esc(t("pat_hit_zero", { d: latest.trade_date }))}</div></div>${metaBar}<div class="empty">${esc(t("pat_no_sig"))}</div></div>`;
+      }
+      const rows = items.slice(0, 6).map((s) => {
+        const obs = s.observe_lag_days ? ` <span class="dim small">-${s.observe_lag_days}d</span>` : "";
+        const ov = s.overhead_supply_10pct !== null && s.overhead_supply_10pct !== undefined ? `${Number(s.overhead_supply_10pct).toFixed(0)}%` : "–";
+        return `<tr><td class="l"><strong>${esc(s.name || s.code)}</strong> <span class="mono dim small">${esc(s.code)}</span>${obs}</td>
+          <td class="mono">${pct(s.change_pct)}</td><td class="dim mono">${ov}</td><td>${renderMiniKline(s.kline, s.observe_lag_days)}</td></tr>`;
+      }).join("");
+      return `<div class="card">
+        <div class="card-top">
+          <h3><span>${esc(dname)}</span>${badge}</h3>
+          <div class="sub">${esc(t("pat_hit_n", { d: latest.trade_date, tot: total, shown: Math.min(6, items.length) }))}</div>
+        </div>
+        ${metaBar}
+        <div class="scroll"><table><thead><tr><th class="l">${esc(pcols[0])}</th><th>${esc(pcols[1])}</th><th>${esc(pcols[2])}</th><th>${esc(pcols[3])}</th></tr></thead><tbody>${rows}</tbody></table></div>
+      </div>`;
+    }).join("");
+    $("pattern-hits-wrap").innerHTML = `${filterBar}${cards ? `<div class="cards">${cards}</div>` : `<div class="empty">${esc(t("pat_no_sig"))}</div>`}`;
+    const pfBar = $("pat-filter-bar");
+    if (pfBar) {
+      pfBar.addEventListener("click", (e) => {
+        const btn = e.target.closest("button");
+        const pf = btn && btn.dataset && btn.dataset.pf;
+        if (!pf) return;
+        state.patFilter = pf;
+        syncQueryState();
+        renderPatternRadar();
+      });
+    }
+  }
+
+  if (replay && Array.isArray(replay.patterns) && replay.patterns.length) {
+    const ps = replay.pack_summary || {};
+    const ub = replay.universe_baseline || {};
+    const ub5 = ub.t5 || {};
+    const ub10 = ub.t10 || {};
+    if (ub5.sessions) {
+      $("universe-baseline-wrap").innerHTML = `<div class="baseline-strip">
+        <b>${esc(t("ub_title", { s: ub5.sessions }))}</b>
+        <span>${t("ub_ew", { ex: pct(ub5.equal_weight_excess_mean_pct), raw: pct(ub5.equal_weight_raw_mean_pct) })}</span>
+        <span>${t("ub_liq", { ex: pct(ub5.liquid_excess_mean_pct) })}</span>
+        <span>${t("ub_bench", { ret: pct(ub5.benchmark_mean_pct) })}</span>
+        ${ub10.sessions ? `<span>${t("ub_t10", { ex: pct(ub10.equal_weight_excess_mean_pct) })}</span>` : ""}
+      </div>`;
+    } else {
+      $("universe-baseline-wrap").innerHTML = "";
+    }
+
+    const rcols = t("rep_cols");
+    const repHead = `<thead><tr><th class="l">${esc(rcols[0])}</th><th class="l">${esc(rcols[1])}</th><th>${esc(rcols[2])}</th><th>${esc(rcols[3])}</th><th>${esc(rcols[4])}</th><th>${esc(rcols[5])}</th><th>${esc(rcols[6])}</th><th>${esc(rcols[7])}</th><th>${esc(rcols[8])}</th><th>${esc(rcols[9])}</th><th>${esc(rcols[10])}</th><th>${esc(rcols[11])}</th></tr></thead>`;
+    const repRows = replay.patterns.map((p) => {
+      const h5 = (p.horizons || {}).t5 || {};
+      const h10 = (p.horizons || {}).t10 || {};
+      const grad = p.graduation || {};
+      const stab = p.stability || {};
+      const mt = p.multiple_testing || {};
+      const status = grad.recommended_status || "experimental";
+      const t5ExcessN = Number(h5.excess_scored ?? h5.scored ?? 0);
+      const totalSigN = Number(h5.scored ?? 0) + Number(p.untradable_count || 0);
+      const muted = status !== "active" || t5ExcessN < MIN_PATTERN_GRAD_SAMPLE;
+      const badge = status === "active"
+        ? `<span class="badge active">${esc(t("pat_status_active"))}</span>`
+        : `<span class="badge exp">${esc(t("pat_status_exp"))}</span>`;
+      const tStat = stab.t_stat !== null && stab.t_stat !== undefined ? `${Number(stab.t_stat).toFixed(2)}` : "–";
+      const tTipParts = [];
+      if (stab.naive_daily_t_stat !== null && stab.naive_daily_t_stat !== undefined) tTipParts.push(`naive t=${Number(stab.naive_daily_t_stat).toFixed(2)}`);
+      if (stab.ew_t_stat !== null && stab.ew_t_stat !== undefined) tTipParts.push(`EW NW t=${Number(stab.ew_t_stat).toFixed(2)}`);
+      if (mt.bh_q_value_csi300 !== null && mt.bh_q_value_csi300 !== undefined) tTipParts.push(`BH q=${Number(mt.bh_q_value_csi300).toFixed(3)}`);
+      const tTip = tTipParts.join(" · ");
+      const h1d = Number(stab.h1_days ?? 0);
+      const h2d = Number(stab.h2_days ?? 0);
+      const h1h2 = (stab.h1_days || stab.h2_days)
+        ? `<div>${pct(stab.h1_daily_excess_mean_pct ?? stab.h1_excess_mean_pct)} <span class="dim">(${esc(String(h1d))}d)</span></div><div>${pct(stab.h2_daily_excess_mean_pct ?? stab.h2_excess_mean_pct)} <span class="dim">(${esc(String(h2d))}d)</span></div>`
+        : '<span class="dim">–</span>';
+      const grossEx = h5.gross_excess_mean_pct ?? h5.excess_mean_pct;
+      const netEx = grad.t5_net_excess_mean_pct ?? h5.net_excess_mean_pct;
+      return `<tr class="${muted ? "low-sample" : ""}">
+        <td class="l"><strong>${esc(pname(p.pattern, p.display_name))}</strong><div class="mono dim small">${esc(p.pattern)}</div></td>
+        <td class="l dim">${esc(p.family)}<div class="small">${esc(p.mode)}</div></td>
+        <td class="mono">${esc(String(totalSigN))}</td>
+        <td class="mono">${sharePct(p.untradable_share_pct)}</td>
+        <td class="mono">${esc(String(t5ExcessN))}${t5ExcessN < MIN_PATTERN_GRAD_SAMPLE ? '<span class="tag">&lt;200</span>' : ""}</td>
+        <td class="mono">${pct(grossEx)}</td>
+        <td class="mono">${pct(netEx)}</td>
+        <td class="mono">${sharePct(h5.excess_win_rate_pct ?? h5.win_rate_pct)}</td>
+        <td class="mono" title="${esc(tTip)}">${esc(tStat)}</td>
+        <td class="mono">${h1h2}</td>
+        <td class="mono">${pct(h10.excess_mean_pct)}</td>
+        <td title="${esc(grad.reason || "")}">${badge}</td>
+      </tr>`;
+    }).join("");
+    $("replay-summary-wrap").innerHTML = `<h3 class="subhead" style="margin-top:4px;">${esc(t("rep_subhead", { start: ps.eval_start_date, end: ps.eval_end_date, sess: ps.eval_sessions ?? "-" }))}</h3>
+      <div class="panel scroll">${`<table class="compact-tbl">${repHead}<tbody>${repRows}</tbody></table>`}</div>`;
+
+    const slHead = `<thead><tr><th class="l">${esc(t("sl_head_lbl"))}</th>${REGIME_ORDER.map((s) => `<th>${esc(rname(s))}</th>`).join("")}</tr></thead>`;
+    const slRows = replay.patterns.map((p) => {
+      const cells = REGIME_ORDER.map((s) => {
+        const cell = (p.by_regime || {})[s] || {};
+        const n = cell.t5_excess_scored ?? cell.t5_scored ?? 0;
+        const small = n < MIN_SLICE_SAMPLE;
+        return `<td class="mono ${small ? "muted-cell" : ""}">${n}${small ? "*" : ""} / ${pct(cell.t5_excess_mean_pct)}</td>`;
+      }).join("");
+      return `<tr><td class="l">${esc(pname(p.pattern, p.display_name))}</td>${cells}</tr>`;
+    }).join("");
+    $("regime-slice-wrap").innerHTML = `<h3 class="subhead">${t("sl_subhead", { n: MIN_SLICE_SAMPLE })}</h3>
+      <div class="panel scroll"><table>${slHead}<tbody>${slRows}</tbody></table></div>`;
+
+    const hasOv = replay.patterns.some((p) => p.by_overhead_supply && Object.keys(p.by_overhead_supply).length);
+    if (hasOv) {
+      const ovBuckets = OVERHEAD_I18N[state.lang] || OVERHEAD_I18N.zh;
+      const ovHead = `<thead><tr><th class="l">${esc(t("ov_head_lbl"))}</th>${ovBuckets.map((b) => `<th>${esc(b.label)}</th>`).join("")}</tr></thead>`;
+      const ovRows = replay.patterns.map((p) => {
+        const cells = ovBuckets.map((b) => {
+          const cell = (p.by_overhead_supply || {})[b.key] || {};
+          const n = cell.t5_excess_scored ?? cell.t5_scored ?? 0;
+          const small = n < MIN_SLICE_SAMPLE;
+          return `<td class="mono ${small ? "muted-cell" : ""}">${n}${small ? "*" : ""} / ${pct(cell.t5_excess_mean_pct)} <span class="dim small">${sharePct(cell.t5_win_rate_pct)}</span></td>`;
+        }).join("");
+        return `<tr><td class="l">${esc(pname(p.pattern, p.display_name))}</td>${cells}</tr>`;
+      }).join("");
+      $("overhead-slice-wrap").innerHTML = `<h3 class="subhead">${t("ov_subhead", { n: MIN_SLICE_SAMPLE })}</h3>
+        <div class="panel scroll"><table>${ovHead}<tbody>${ovRows}</tbody></table></div>`;
+    } else {
+      $("overhead-slice-wrap").innerHTML = "";
+    }
+  } else {
+    $("universe-baseline-wrap").innerHTML = "";
+    $("replay-summary-wrap").innerHTML = `<div class="empty">${esc(t("pat_no_replay"))}</div>`;
+    $("regime-slice-wrap").innerHTML = "";
+    $("overhead-slice-wrap").innerHTML = "";
+  }
+}
+
+function renderChart() {
+  const rulesSeries = ((state.summary.trend || {})[state.trendMarket] || {})[state.trendWin] || {};
+  const aiSeries = ((state.summary.trend_ai || {})[state.trendMarket] || {})[state.trendWin] || {};
+  const lines = [];
+  if (state.trendTrack === "rules" || state.trendTrack === "both") {
+    for (const n of Object.keys(rulesSeries).sort()) {
+      lines.push({ id: `${n}:rules`, label: rawSname(n), track: "rules", pts: rulesSeries[n] });
+    }
+  }
+  if (state.trendTrack === "ai" || state.trendTrack === "both") {
+    for (const n of Object.keys(aiSeries).sort()) {
+      lines.push({ id: `${n}:ai`, label: `${rawSname(n)} [AI]`, track: "ai", pts: aiSeries[n] });
+    }
+  }
+  const tip = $("chart-tip");
+  if (tip) tip.style.display = "none";
+  if (!lines.length) {
+    $("chart").innerHTML = `<div class="empty">${esc(t("chart_empty", { w: state.trendWin }))}</div>`;
+    $("legend").innerHTML = "";
+    return;
+  }
+
+  const dates = [...new Set(lines.flatMap((l) => l.pts.map((p) => p[0])))].sort();
+  const values = lines.flatMap((l) => l.pts.map((p) => p[1]));
+  let lo = Math.min(0, ...values), hi = Math.max(0, ...values);
+  const pad = (hi - lo) * 0.14 || 1;
+  lo -= pad; hi += pad;
+  const W = 1040, H = 310, L = 54, R = 148, T = 16, B = 30;
+  const x = (d) => L + (dates.length === 1 ? (W - L - R) / 2 : (dates.indexOf(d) / (dates.length - 1)) * (W - L - R));
+  const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const ticks = 4, parts = [];
+
+  for (let i = 0; i <= ticks; i++) {
+    const v = lo + ((hi - lo) * i) / ticks;
+    parts.push(`<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--border)" stroke-dasharray="3 4"/>`);
+    parts.push(`<text x="${L - 8}" y="${y(v) + 4}" text-anchor="end" font-size="11" font-family="var(--font-mono)" fill="var(--muted)">${v.toFixed(1)}%</text>`);
+  }
+  parts.push(`<line x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}" stroke="var(--muted)" stroke-opacity="0.55" stroke-dasharray="4 4"/>`);
+
+  const step = Math.max(1, Math.ceil(dates.length / 7));
+  dates.forEach((d, i) => {
+    if (i % step === 0 || i === dates.length - 1)
+      parts.push(`<text x="${x(d)}" y="${H - 8}" text-anchor="middle" font-size="11" font-family="var(--font-mono)" fill="var(--muted)">${d.slice(5)}</text>`);
+  });
+
+  let top3Ids = null;
+  if (!state.trendFocus && state.trendDensity === "top3" && lines.length > 5) {
+    top3Ids = new Set(
+      [...lines]
+        .filter((l) => Array.isArray(l.pts) && l.pts.length)
+        .sort((a, b) => Number(b.pts[b.pts.length - 1][1]) - Number(a.pts[a.pts.length - 1][1]))
+        .slice(0, 3)
+        .map((l) => l.id)
+    );
+  }
+
+  const endLabels = [];
+  lines.forEach((l, i) => {
+    const color = `var(--s${(i % 12) + 1})`;
+    const isDim = state.trendFocus ? state.trendFocus !== l.id : (top3Ids ? !top3Ids.has(l.id) : false);
+    const sw = state.trendFocus === l.id ? "2.8" : (top3Ids && top3Ids.has(l.id) ? "2.4" : (state.trendDensity === "all" && !state.trendFocus ? "2.1" : "1.8"));
+    const op = state.trendFocus ? (isDim ? "0.18" : "0.95") : (isDim ? "0.22" : (state.trendDensity === "all" && !top3Ids ? "0.86" : "0.95"));
+    const dashAttr = l.track === "ai" ? ' stroke-dasharray="5 3"' : "";
+    parts.push(`<polyline fill="none" stroke="${color}" stroke-width="${sw}" stroke-opacity="${op}" stroke-linecap="round" stroke-linejoin="round"${dashAttr} points="${l.pts.map((p) => `${x(p[0])},${y(p[1])}`).join(" ")}"/>`);
+    for (const p of l.pts) {
+      parts.push(`<circle class="pt" data-id="${esc(l.id)}" data-label="${esc(l.label)}" data-date="${esc(p[0])}" data-val="${p[1]}" data-n="${p[2]}" data-col="${color}" cx="${x(p[0])}" cy="${y(p[1])}" r="${state.trendFocus === l.id ? 4 : 3}" fill="${color}" fill-opacity="${op}"/>`);
+    }
+    if (l.pts.length && (!isDim || state.trendFocus === l.id)) {
+      const lp = l.pts[l.pts.length - 1];
+      endLabels.push({
+        id: l.id,
+        label: l.label,
+        color,
+        lastX: x(lp[0]),
+        desiredY: y(lp[1]),
+        val: Number(lp[1]),
+      });
+    }
+  });
+
+  // Render collision-avoided right-edge end labels for active/top curves (capped at 5 in "all" mode).
+  const sortedByVal = [...endLabels].sort((a, b) => b.val - a.val).slice(0, state.trendFocus ? 1 : (state.trendDensity === "all" ? 5 : 3));
+  sortedByVal.sort((a, b) => a.desiredY - b.desiredY);
+  const minGap = 15, yMin = T + 8, yMax = H - B - 4;
+  for (let i = 0; i < sortedByVal.length; i++) {
+    let cur = Math.max(yMin, Math.min(yMax, sortedByVal[i].desiredY));
+    if (i > 0) cur = Math.max(cur, sortedByVal[i - 1].yPos + minGap);
+    sortedByVal[i].yPos = cur;
+  }
+  if (sortedByVal.length && sortedByVal[sortedByVal.length - 1].yPos > yMax) {
+    sortedByVal[sortedByVal.length - 1].yPos = yMax;
+    for (let i = sortedByVal.length - 2; i >= 0; i--) {
+      sortedByVal[i].yPos = Math.min(sortedByVal[i].yPos, sortedByVal[i + 1].yPos - minGap);
+    }
+    for (let i = 0; i < sortedByVal.length; i++) {
+      sortedByVal[i].yPos = Math.max(yMin, sortedByVal[i].yPos);
+    }
+  }
+  for (const item of sortedByVal) {
+    const lblX = dates.length === 1 ? item.lastX + 12 : Math.max(item.lastX + 8, W - R + 10);
+    const shortName = item.label.length > 10 ? `${item.label.slice(0, 9)}…` : item.label;
+    const sign = item.val > 0 ? "+" : "";
+    if (Math.abs(item.yPos - item.desiredY) > 2 || lblX - item.lastX > 12) {
+      parts.push(`<line x1="${item.lastX + 2}" y1="${item.desiredY.toFixed(1)}" x2="${lblX - 4}" y2="${item.yPos.toFixed(1)}" stroke="${item.color}" stroke-opacity="0.45" stroke-width="1"/>`);
+    }
+    parts.push(`<text class="end-lbl" x="${lblX}" y="${(item.yPos + 3.5).toFixed(1)}" fill="${item.color}">${esc(shortName)} ${sign}${item.val.toFixed(2)}%</text>`);
+  }
+
+  parts.push(`<line class="chart-crosshair" id="chart-crosshair" x1="${L}" x2="${L}" y1="${T}" y2="${H - B}" stroke="var(--accent-hi)" stroke-width="1" stroke-dasharray="3 3" style="display:none;pointer-events:none"/>`);
+  parts.push(`<rect class="chart-hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" style="cursor:crosshair;touch-action:none"/>`);
+
+  $("chart").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img">${parts.join("")}</svg>`;
+
+  const svg = $("chart").querySelector("svg");
+  const hitRect = svg && svg.querySelector("rect.chart-hit");
+  const xhair = svg && svg.querySelector("#chart-crosshair");
+  if (svg && tip) {
+    const showTipFor = (c, rowsForDate) => {
+      const val = Number(c.dataset.val);
+      if (Array.isArray(rowsForDate) && rowsForDate.length > 1) {
+        const extra = rowsForDate.slice(0, 5).map((item) => {
+          const mark = item.id === c.dataset.id ? "▸ " : "";
+          const sign = item.val > 0 ? "+" : "";
+          return `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:2px;"><span>${mark}<span style="color:${item.col}">●</span> ${esc(item.label)}</span><span class="${item.val >= 0 ? "up" : "down"}">${sign}${item.val.toFixed(2)}%</span></div>`;
+        }).join("");
+        tip.innerHTML = `<div style="font-weight:700;margin-bottom:3px;">${esc(c.dataset.date)} · ${esc(t("chart_tip_excess"))}</div>${extra}`;
+      } else {
+        tip.innerHTML = `<b>${esc(c.dataset.label)}</b><br>${esc(c.dataset.date)} · ${esc(t("chart_tip_excess"))} <span class="${val >= 0 ? "up" : "down"}">${val > 0 ? "+" : ""}${val.toFixed(2)}%</span> · ${esc(t("chart_tip_picks", { n: c.dataset.n }))}`;
+      }
+      tip.style.display = "block";
+      const wrapBox = $("chart").parentElement.getBoundingClientRect();
+      const cBox = c.getBoundingClientRect();
+      tip.style.left = `${Math.min(wrapBox.width - 230, Math.max(8, cBox.left - wrapBox.left + 10))}px`;
+      tip.style.top = `${Math.max(8, cBox.top - wrapBox.top - 52)}px`;
+      if (xhair) {
+        const cx = c.getAttribute("cx");
+        xhair.setAttribute("x1", cx);
+        xhair.setAttribute("x2", cx);
+        xhair.style.display = "";
+      }
+    };
+    svg.querySelectorAll("circle.pt").forEach((c) => {
+      c.addEventListener("mouseenter", () => showTipFor(c));
+      c.addEventListener("mouseleave", () => { tip.style.display = "none"; if (xhair) xhair.style.display = "none"; });
+    });
+    if (hitRect) {
+      const pts = [...svg.querySelectorAll("circle.pt")].filter((c) => !state.trendFocus || c.dataset.id === state.trendFocus);
+      const handlePtr = (e) => {
+        if (!pts.length) return;
+        const svgBox = svg.getBoundingClientRect();
+        if (!svgBox.width || !svgBox.height) return;
+        const mx = ((e.clientX - svgBox.left) / svgBox.width) * W;
+        const my = ((e.clientY - svgBox.top) / svgBox.height) * H;
+        let best = null, bestDist = Infinity;
+        for (const c of pts) {
+          const dx = Number(c.getAttribute("cx")) - mx;
+          const dy = Number(c.getAttribute("cy")) - my;
+          const d2 = dx * dx * 1.4 + dy * dy;
+          if (d2 < bestDist) { bestDist = d2; best = c; }
+        }
+        if (best) {
+          let dateRows = null;
+          if (!state.trendFocus) {
+            const targetDate = best.dataset.date;
+            dateRows = pts
+              .filter((p) => p.dataset.date === targetDate)
+              .map((p) => ({
+                id: p.dataset.id,
+                label: p.dataset.label,
+                col: p.dataset.col,
+                val: Number(p.dataset.val),
+              }))
+              .sort((a, b) => b.val - a.val);
+          }
+          showTipFor(best, dateRows);
+        }
+      };
+      hitRect.addEventListener("pointermove", handlePtr);
+      hitRect.addEventListener("pointerdown", handlePtr);
+      hitRect.addEventListener("pointerleave", () => { tip.style.display = "none"; if (xhair) xhair.style.display = "none"; });
+    }
+  }
+
+  $("legend").innerHTML = lines.map((l, i) => {
+    const col = `var(--s${(i % 12) + 1})`;
+    const focused = state.trendFocus === l.id;
+    return `<button type="button" class="legend-btn${focused ? " focused" : ""}" data-id="${esc(l.id)}"><i class="${l.track === "ai" ? "dashed" : ""}" style="background:${col};color:${col}"></i><span>${esc(l.label)}</span></button>`;
+  }).join("");
+
+  $("legend").querySelectorAll("button.legend-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.id;
+      state.trendFocus = state.trendFocus === id ? null : id;
+      renderChart();
+    });
+  });
+}
+
+function picksTable(picks, withEval) {
+  const wins = state.summary.windows;
+  const head = withEval
+    ? `<thead><tr><th>#</th><th class="l">${esc(t("tbl_stock"))}</th>${wins.map((w) => `<th>T+${w}</th>`).join("")}</tr></thead>`
+    : `<thead><tr><th>#</th><th class="l">${esc(t("tbl_stock"))}</th><th class="l">${esc(t("tbl_industry"))}</th><th>${esc(t("tbl_price"))}</th><th>PE</th><th>PB</th></tr></thead>`;
+  const body = picks.map((p) => {
+    const name = `<strong>${esc(p.name)}</strong> <span class="mono dim small">${esc(p.code)}</span>`;
+    if (!withEval)
+      return `<tr><td><span class="rank-num ${p.rank <= 3 ? "top" : ""}">${p.rank}</span></td><td class="l">${name}</td><td class="l dim">${esc(indname(p.industry))}</td><td class="mono">${num(p.price)}</td><td class="mono">${num(p.pe_ratio, 1)}</td><td class="mono">${num(p.pb_ratio, 2)}</td></tr>`;
+    const cells = wins.map((w) => {
+      const e = (p.evaluation || {})[w];
+      if (!e) return '<td class="dim mono">–</td>';
+      if (e.status === "pending") return `<td class="dim">${esc(t("st_pending"))}</td>`;
+      if (e.status === "untradable_limit_up") return `<td class="dim" title="${esc(t("st_untradable_title"))}">${esc(t("st_untradable"))}</td>`;
+      if (e.status !== "ok") return `<td class="dim" title="${esc(tStatus(e.status))}">${esc(t("st_nodata"))}</td>`;
+      return `<td class="mono" title="${esc(t("chart_tip_excess"))} ${e.excess_return_pct ?? "–"}%">${pct(e.return_pct, 1)}<br><span class="small">${e.excess_return_pct === null ? "" : esc(t("st_excess_lbl")) + pct(e.excess_return_pct, 1)}</span></td>`;
+    }).join("");
+    return `<tr><td><span class="rank-num ${p.rank <= 3 ? "top" : ""}">${p.rank}</span></td><td class="l">${name}</td>${cells}</tr>`;
+  }).join("");
+  return `<div class="scroll"><table>${head}<tbody>${body}</tbody></table></div>`;
+}
+
+function matchesSearch(run, q) {
+  if (!q) return true;
+  const sLabel = (((state.summary && state.summary.strategy_names) || {})[run.strategy] || run.strategy || "").toLowerCase();
+  const trLabel = ((STRATEGY_I18N[state.lang] || {})[run.strategy] || "").toLowerCase();
+  if (sLabel.includes(q) || trLabel.includes(q) || String(run.strategy || "").toLowerCase().includes(q)) return true;
+  return (run.picks || []).some((p) =>
+    String(p.code || "").toLowerCase().includes(q) ||
+    String(p.name || "").toLowerCase().includes(q) ||
+    String(p.industry || "").toLowerCase().includes(q) ||
+    indname(p.industry).toLowerCase().includes(q)
+  );
+}
+
+function renderLatest() {
+  const q = (state.searchQuery || "").trim().toLowerCase();
+  const runs = ((state.summary.latest || {})[state.latestMarket] || []).filter((r) => matchesSearch(r, q));
+  $("latest").innerHTML = runs.length ? runs.map((r) => {
+    const badge = r.track === "ai" ? '<span class="badge ai">AI</span>' : "";
+    const degNotes = Array.isArray(r.degradation_notes) ? r.degradation_notes.join(" · ") : "";
+    const degLbl = Number(r.degradation || 0) > 1 ? `${t("degraded_lbl")} (${r.degradation})` : t("degraded_lbl");
+    const degHtml = r.degradation ? `<span class="badge warn" title="${esc(degNotes)}">${esc(degLbl)}</span>` : "";
+    return `<div class="card">
+      <div class="card-top">
+        <h3><span>${sname(r.strategy)}${badge}</span><span>${degHtml}<span class="badge">${esc(t("latest_n_picks", { n: r.picks.length }))}</span></span></h3>
+        <div class="sub">${esc(t("latest_sub", { d: r.date, snap: r.snapshot_count ?? "–", flt: r.after_filter_count ?? "–" }))}</div>
+      </div>
+      ${r.picks.length ? picksTable(r.picks, false) : `<div class="empty">${esc(t("no_picks_day"))}</div>`}
+    </div>`;
+  }).join("") : `<div class="empty">${esc(t("no_match_latest"))}</div>`;
+}
+
+async function renderDay(day) {
+  state.currentDay = day;
+  const reqId = ++state.dayReqId;
+  if (!day) { $("history").innerHTML = `<div class="empty">${esc(t("no_days"))}</div>`; return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(day))) {
+    $("history").innerHTML = `<div class="empty">${esc(t("load_fail", { msg: "invalid date" }))}</div>`;
+    return;
+  }
+  let data = state.dayCache[day];
+  if (!data) {
+    $("history").innerHTML = `<div class="empty">${esc(t("loading_day"))}</div>`;
+    try {
+      const res = await fetch(`site/days/${day}.json`, { cache: "no-cache" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json();
+      state.dayCache[day] = data;
+    } catch (err) {
+      if (reqId !== state.dayReqId) return;
+      $("history").innerHTML = `<div class="empty">${esc(t("load_fail", { msg: err.message }))}</div>`;
+      return;
+    }
+  }
+  if (reqId !== state.dayReqId) return;
+  const q = (state.searchQuery || "").trim().toLowerCase();
+  const runs = (data.runs || []).filter((r) => matchesSearch(r, q));
+  $("history").innerHTML = runs.length ? runs.map((r) => {
+    const ev = state.summary.windows.map((w) => {
+      const s = (r.evaluation || {})[w];
+      return s && s.evaluated ? `T+${w} ${pct(s.average_excess_return_pct, 1)}` : esc(t("t_win_pending", { w }));
+    }).join(" · ");
+    const badge = r.track === "ai" ? '<span class="badge ai">AI</span>' : "";
+    const picks = r.picks || [];
+    return `<div class="card">
+      <div class="card-top">
+        <h3><span>${esc(mname(r.market))} · ${sname(r.strategy)}${badge}</span></h3>
+        <div class="sub">${ev}</div>
+      </div>
+      ${picks.length ? picksTable(picks, true) : `<div class="empty">${esc(t("no_picks_day"))}</div>`}
+    </div>`;
+  }).join("") : `<div class="empty">${esc(t("no_match_day"))}</div>`;
+}
+
+function initExplorerControls() {
+  const modeWrap = $("explorer-mode");
+  const mktSel = $("market-latest");
+  const daySel = $("day");
+  const searchEl = $("pick-search");
+  const applyMode = (mode) => {
+    state.explorerMode = mode;
+    if (modeWrap) modeWrap.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+    $("tab-latest").classList.toggle("active", mode === "latest");
+    $("tab-history").classList.toggle("active", mode === "history");
+    if (mktSel) mktSel.style.display = mode === "latest" ? "" : "none";
+    if (daySel) daySel.style.display = mode === "history" ? "" : "none";
+  };
+  applyMode(state.explorerMode);
+  if (modeWrap) {
+    modeWrap.addEventListener("click", (e) => {
+      const btn = e.target.closest("button");
+      const mode = btn && btn.dataset && btn.dataset.mode;
+      if (!mode) return;
+      applyMode(mode);
+      syncQueryState();
+    });
+  }
+  if (searchEl) {
+    if (state.searchQuery) searchEl.value = state.searchQuery;
+    searchEl.addEventListener("input", () => {
+      state.searchQuery = searchEl.value || "";
+      syncQueryState();
+      renderLatest();
+      if (state.currentDay) renderDay(state.currentDay);
+    });
+  }
+}
+
+async function init() {
+  initTheme();
+  restoreQueryState();
+  initLang();
+  initExplorerControls();
+  try {
+    const res = await fetch("site/summary.json", { cache: "no-cache" });
+    state.summary = await res.json();
+  } catch (err) {
+    document.querySelector("main").insertAdjacentHTML("beforeend", `<div class="panel empty">${esc(t("load_fatal", { msg: err.message }))}</div>`);
+    return;
+  }
+  const art = (state.summary && state.summary.artifacts) || null;
+  const needPat = !art || !art.patterns || art.patterns.exists;
+  const needRep = !art || !art.report || art.report.exists;
+  const needRepHtml = !art || !art.daily_report_html || art.daily_report_html.exists;
+  const [patOutcome, repOutcome, repHtmlOutcome] = await Promise.allSettled([
+    needPat ? fetch("site/patterns.json", { cache: "no-cache" }) : Promise.resolve(null),
+    needRep ? fetch("site/report.json", { cache: "no-cache" }) : Promise.resolve(null),
+    needRepHtml ? fetch("site/daily_report.html", { method: "HEAD", cache: "no-cache" }) : Promise.resolve(null),
+  ]);
+  if (patOutcome.status === "fulfilled" && patOutcome.value && patOutcome.value.ok) {
+    try { state.patterns = await patOutcome.value.json(); } catch (_) { state.patterns = null; }
+  }
+  if (repOutcome.status === "fulfilled" && repOutcome.value && repOutcome.value.ok) {
+    try { state.report = await repOutcome.value.json(); } catch (_) { state.report = null; }
+  }
+  state.reportReady = Boolean(repHtmlOutcome.status === "fulfilled" && repHtmlOutcome.value && repHtmlOutcome.value.ok);
+  ["report-top-link", "footer-report-link"].forEach((id) => {
+    const el = $(id);
+    if (el) el.style.display = state.reportReady ? "" : "none";
+  });
+  syncReportLinks();
+
+  renderMetaAndKpis();
+  renderConsensusPane();
+  renderCnHero();
+  initScoreMarketPills();
+  segmented($("win-score"), "scoreWin", renderScorecard);
+  segmented($("win-compare"), "compareWin", renderTrackComparison);
+  segmented($("win-trend"), "trendWin", renderChart);
+  initTrackToggle();
+  initTrendDensity();
+  fillMarkets($("market-trend"), "trendMarket", renderChart);
+  fillMarkets($("market-latest"), "latestMarket", renderLatest);
+  renderScorecard();
+  renderTrackComparison();
+  renderPatternRadar();
+  renderChart();
+  renderLatest();
+  const days = (state.summary.days || []).map((d) => d.date);
+  $("day").innerHTML = days.map((d) => `<option value="${d}">${esc(t("day_opt", { d, n: state.summary.days.find((x) => x.date === d).runs }))}</option>`).join("");
+  $("day").addEventListener("change", (e) => renderDay(e.target.value));
+  renderDay(days[0] || "");
+}
+init();
+</script>
+</body>
+</html>

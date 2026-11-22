@@ -480,3 +480,228 @@ def test_api_unknown_route_returns_endpoint_index(tmp_path):
     assert status == 404
     assert payload["error"] == "not_found"
     assert "/doctor/data-sources" in payload["available_endpoints"]
+
+
+def test_api_report_rejects_path_traversal_and_blocks_llm_on_get(tmp_path):
+    outside = tmp_path / "secret.json"
+    outside.write_text('{"secret": 1}', encoding="utf-8")
+    cfg = _config(tmp_path)
+
+    bad_status, bad_payload = build_api_response(cfg, "/report", query=f"run={outside}")
+    assert bad_status == 400
+    assert bad_payload["error"] == "invalid_run_id"
+
+    trav_status, trav_payload = build_api_response(cfg, "/report", query="run=../secret")
+    assert trav_status == 400
+    assert trav_payload["error"] == "invalid_run_id"
+
+    llm_status, llm_payload = build_api_response(cfg, "/daily-report", query="ai_brief=on")
+    assert llm_status == 403
+    assert llm_payload["error"] == "llm_get_disabled"
+
+
+def test_api_report_rejects_cwd_shadow_and_symlinks(tmp_path, monkeypatch):
+    import json
+
+    cfg = _config(tmp_path)
+    runs_dir = cfg.data_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    real_run = runs_dir / "2026-11-21_balanced_alpha.json"
+    real_run.write_text(
+        json.dumps({"strategy": "balanced_alpha", "run_id": "2026-11-21_balanced_alpha", "picks": []}),
+        encoding="utf-8",
+    )
+
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    (cwd_dir / "shadow.json").write_text('{"strategy": "evil"}', encoding="utf-8")
+    monkeypatch.chdir(cwd_dir)
+
+    shadow_status, shadow_payload = build_api_response(cfg, "/report", query="run=shadow")
+    assert shadow_status == 404
+    assert shadow_payload["error"] == "run_not_found"
+
+    outside_target = tmp_path / "outside.json"
+    outside_target.write_text('{"strategy": "outside"}', encoding="utf-8")
+    sym_run = runs_dir / "symrun.json"
+    sym_run.symlink_to(outside_target)
+    sym_status, sym_payload = build_api_response(cfg, "/report", query="run=symrun")
+    assert sym_status == 400
+    assert sym_payload["error"] == "invalid_run_id"
+
+    dr_bad_status, dr_bad_payload = build_api_response(cfg, "/daily-report", query="run_id=../bad")
+    assert dr_bad_status == 400
+    assert dr_bad_payload["error"] == "invalid_run_id"
+
+
+def test_http_workbench_ui_content_negotiation_security_headers_and_js_syntax(tmp_path):
+    from http.server import ThreadingHTTPServer
+    import json
+    import subprocess
+    import threading
+    import urllib.request
+    from alphasift.server import _handler_for_config
+    from alphasift.workbench_ui import render_workbench_html
+
+    cfg = _config(tmp_path)
+    html_text = render_workbench_html()
+    assert "http://" not in html_text and "https://" not in html_text
+    assert "/strategy-compare?base=" in html_text
+    assert "/strategy-compare?names=" not in html_text
+    assert "noopener noreferrer" in html_text
+    # Workbench aligns with actual backend JSON schema fields
+    assert "s.market_scope" in html_text
+    assert "radLlm.configured" in html_text
+    assert 'p.status || "experimental"' in html_text
+    assert "ov.summary" in html_text
+    assert "snapshot_source_priority" in html_text
+    assert "!ep.startsWith(\"//\")" in html_text
+    assert "makeSvgKline" in html_text
+    assert "renderCompareBody" in html_text
+    assert "runPatternScan" in html_text
+    assert "with_kline=1" in html_text
+    assert "cols_strat" in html_text
+    assert "cols_fresh" in html_text
+
+    # Regression checks for Audit #4 security fixes
+    from alphasift.daily_report_html import render_daily_report_html
+
+    xss_html = render_daily_report_html({
+        "trade_date": "2026-11-21",
+        "pack_trade_date": "2026-11-21",
+        "detail_url": "</script><script>alert(1)</script>",
+    })
+    assert "</script><script>alert(1)" not in xss_html
+    assert 'href="javascript:' not in render_daily_report_html({"detail_url": "javascript:alert(1)"})
+
+    bad_pat_st, bad_pat = build_api_response(cfg, "/patterns/scan", query="pattern=/etc/passwd")
+    assert bad_pat_st in {400, 503}
+    if bad_pat_st == 400:
+        assert bad_pat["error"] == "invalid_pattern"
+
+    unknown_ov_st, unknown_ov = build_api_response(cfg, "/overview", query="strategy=missing_strat")
+    assert unknown_ov_st == 404
+    assert unknown_ov["error"] == "strategy_not_found"
+
+    conflict_doc_st, _ = build_api_response(cfg, "/doctor/data-sources", query="strategy=dual_low&all_strategies=1")
+    assert conflict_doc_st == 400
+
+    script_body = html_text.split("<script>", 1)[1].rsplit("</script>", 1)[0]
+    js_file = tmp_path / "wb.js"
+    js_file.write_text(script_body, encoding="utf-8")
+    subprocess.run(["node", "--check", str(js_file)], check=True)
+
+    # Pure build_api_response("/") stays pure JSON
+    idx_status, idx_payload = build_api_response(cfg, "/")
+    assert idx_status == 200
+    assert "/ui" in idx_payload["endpoints"]
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler_for_config(cfg))
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # 1. GET /ui returns Workbench HTML + strict hashed script CSP (no unsafe-inline script-src)
+        req_ui = urllib.request.Request(f"http://127.0.0.1:{port}/ui")
+        with urllib.request.urlopen(req_ui, timeout=5) as resp:
+            assert resp.status == 200
+            assert "text/html" in resp.headers.get("Content-Type", "")
+            assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+            assert resp.headers.get("X-Frame-Options") == "DENY"
+            csp = resp.headers.get("Content-Security-Policy", "")
+            assert "frame-ancestors 'none'" in csp
+            assert "'sha256-" in csp
+            assert "'unsafe-inline'" not in csp.split("style-src")[0]
+            assert "AlphaSift" in resp.read().decode("utf-8")
+
+        # 2. GET / with Accept: text/html serves Workbench UI + Vary: Accept
+        req_html = urllib.request.Request(
+            f"http://127.0.0.1:{port}/",
+            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+        )
+        with urllib.request.urlopen(req_html, timeout=5) as resp:
+            assert "text/html" in resp.headers.get("Content-Type", "")
+            assert resp.headers.get("Vary") == "Accept"
+
+        # 3. GET / with Accept: text/html;q=0, application/json OR ?format=json serves pure JSON without wildcard CORS
+        req_qzero = urllib.request.Request(
+            f"http://127.0.0.1:{port}/",
+            headers={"Accept": "text/html;q=0, application/json;q=0.9"},
+        )
+        with urllib.request.urlopen(req_qzero, timeout=5) as resp:
+            assert "application/json" in resp.headers.get("Content-Type", "")
+            assert resp.headers.get("Vary") == "Accept"
+            assert resp.headers.get("Access-Control-Allow-Origin") is None
+
+        req_json = urllib.request.Request(
+            f"http://127.0.0.1:{port}/",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req_json, timeout=5) as resp:
+            assert "application/json" in resp.headers.get("Content-Type", "")
+            assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+            assert resp.headers.get("Access-Control-Allow-Origin") is None
+            data = json.loads(resp.read().decode("utf-8"))
+            assert "/ui" in data["endpoints"]
+
+        req_fmt = urllib.request.Request(
+            f"http://127.0.0.1:{port}/?format=json",
+            headers={"Accept": "text/html"},
+        )
+        with urllib.request.urlopen(req_fmt, timeout=5) as resp:
+            assert "application/json" in resp.headers.get("Content-Type", "")
+
+        # 4. Live /daily-report.html enforces static script-src 'none' & strips dangerous detail_url schemes
+        req_dr = urllib.request.Request(
+            f"http://127.0.0.1:{port}/daily-report.html?detail_url=javascript:alert(1)",
+        )
+        try:
+            with urllib.request.urlopen(req_dr, timeout=5) as resp:
+                assert "script-src 'none'" in resp.headers.get("Content-Security-Policy", "")
+                body_dr = resp.read().decode("utf-8")
+                assert "javascript:alert(1)" not in body_dr
+        except urllib.error.HTTPError as err_dr:
+            assert err_dr.code in {400, 503}
+            assert "script-src 'none'" in err_dr.headers.get("Content-Security-Policy", "")
+
+        # 5. /daily-report.html 200 HTML also keeps script-src 'none'
+        from dataclasses import replace
+        import numpy as np
+        import pandas as _pd
+        from alphasift.pack import DailyPack, FIELDS, save_pack
+        from alphasift.server import build_html_response
+
+        assert build_html_response(cfg, "/daily-report.html")[0] in {200, 400, 503}
+        n_d = 25
+        mat = {f: np.full((n_d, 1), 10.0, dtype=np.float32) for f in FIELDS}
+        mat["open"][:, 0] = 10.0
+        mat["high"][:, 0] = 10.2
+        mat["low"][:, 0] = 9.9
+        mat["close"][:, 0] = 10.1
+        mat["volume"][:, 0] = 5_000_000.0
+        mat["amount"][:, 0] = 50_000_000.0
+        pack_dir_ok = tmp_path / "ok_pack"
+        save_pack(
+            pack_dir_ok,
+            DailyPack(
+                dates=np.asarray([d.strftime("%Y-%m-%d") for d in _pd.bdate_range("2026-10-01", periods=n_d)], dtype=str),
+                codes=np.asarray(["000001"], dtype=str),
+                matrices=mat,
+                meta=_pd.DataFrame([{"code": "000001", "name": "平安", "industry": "银行", "pe_ratio": 5.0, "pb_ratio": 0.6, "total_mv": 1e11, "circ_mv": 9e10, "list_date": "1991-04-03", "is_st": False}]),
+                sources=("test",),
+            ),
+        )
+        cfg_ok = replace(cfg, daily_pack_dir=pack_dir_ok)
+        srv_ok = ThreadingHTTPServer(("127.0.0.1", 0), _handler_for_config(cfg_ok))
+        t_ok = threading.Thread(target=srv_ok.serve_forever, daemon=True)
+        t_ok.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{srv_ok.server_address[1]}/daily-report.html?include_announcements=false", timeout=5) as resp_ok:
+                assert resp_ok.status == 200
+                assert "script-src 'none'" in resp_ok.headers.get("Content-Security-Policy", "")
+        finally:
+            srv_ok.shutdown()
+            srv_ok.server_close()
+    finally:
+        server.shutdown()
+        server.server_close()

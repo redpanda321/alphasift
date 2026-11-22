@@ -15,6 +15,20 @@ from alphasift.snapshot import (
 )
 
 
+def test_doctor_reports_unsupported_router_yaml_without_opening_it(monkeypatch, capsys):
+    monkeypatch.setenv("LITELLM_CONFIG", "/private/removed-router.yaml")
+    monkeypatch.setattr(sys, "argv", ["alphasift", "doctor", "data-sources", "--no-live", "--json"])
+
+    main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert any(
+        "Unset LITELLM_CONFIG" in note and "LLM_CHANNELS=primary,backup" in note
+        for note in payload["recommendations"]
+    )
+    assert "/private/removed-router.yaml" not in json.dumps(payload)
+
+
 def test_snapshot_source_health_snapshot_reports_disabled_failures(monkeypatch):
     _SOURCE_HEALTH.clear()
     monkeypatch.setattr("alphasift.snapshot.time.monotonic", lambda: 100.0)
@@ -493,3 +507,64 @@ def test_cli_doctor_data_sources_rejects_strategy_with_all_strategies(monkeypatc
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "--strategy and --all-strategies cannot be combined" in err
+
+
+def _doctor_fakes(monkeypatch, seen):
+    def fake_snapshot(sources, **kwargs):
+        seen["snapshot"] = (list(sources), kwargs["market"])
+        df = pd.DataFrame([{"code": "0700.HK", "name": "Tencent", "price": 400.0}])
+        df.attrs.update(snapshot_source="yahoo_screener", fallback_used=False, stale=False, source_errors=[])
+        return df
+
+    def fake_daily(code, **kwargs):
+        seen["daily"] = (code, kwargs["source"])
+        df = pd.DataFrame([{"date": "2026-01-01", "close": 10.0}])
+        df.attrs["daily_source"] = kwargs["source"]
+        return df
+
+    monkeypatch.setattr("alphasift.doctor.fetch_snapshot_with_fallback", fake_snapshot)
+    monkeypatch.setattr("alphasift.doctor.fetch_daily_history", fake_daily)
+
+
+def test_doctor_checks_non_cn_market_through_yahoo(monkeypatch, tmp_path):
+    seen = {}
+    _doctor_fakes(monkeypatch, seen)
+    config = Config(daily_source="auto", fallback_snapshot_path=tmp_path / "s.json")
+
+    payload = doctor_data_sources(config, market="HK").to_dict()
+
+    assert seen["snapshot"] == (["yahoo_screener"], "hk")
+    assert seen["daily"] == ("0700.HK", "yfinance")
+    assert payload["config"]["market"] == "hk"
+    assert payload["status"] == "ok"
+
+
+def test_doctor_infers_market_from_non_cn_strategy(monkeypatch, tmp_path):
+    seen = {}
+    _doctor_fakes(monkeypatch, seen)
+    config = Config(daily_source="auto", fallback_snapshot_path=tmp_path / "s.json")
+
+    payload = doctor_data_sources(config, strategy_name="global_value").to_dict()
+
+    assert seen["snapshot"] == (["yahoo_screener", "yfinance_tickers"], "us")
+    assert seen["daily"] == ("AAPL", "yfinance")
+    assert payload["config"]["market"] == "us"
+
+    with pytest.raises(ValueError, match="does not support market 'cn'"):
+        doctor_data_sources(config, strategy_name="global_value", market="cn")
+
+
+def test_doctor_all_strategies_only_counts_strategies_for_the_checked_market(tmp_path):
+    config = Config(strategies_dir=Path("strategies"), data_dir=tmp_path)
+
+    cn = doctor_data_sources(config, all_strategies=True, run_live=False).to_dict()
+    hk = doctor_data_sources(config, all_strategies=True, run_live=False, market="hk").to_dict()
+
+    cn_names = {item["strategy"] for item in cn["strategy_coverage"]}
+    hk_names = {item["strategy"] for item in hk["strategy_coverage"]}
+    # CN sources cannot carry global_value's USD liquidity column.
+    assert "global_value" not in cn_names and "dual_low" in cn_names
+    assert "avg_amount_usd" not in cn["snapshot"]["required_fields"]
+    assert hk_names == {"global_value"}
+    assert "avg_amount_usd" in hk["snapshot"]["required_fields"]
+    assert hk["strategy_requirements"]["market"] == "hk"

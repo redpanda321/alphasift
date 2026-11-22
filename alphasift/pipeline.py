@@ -2,6 +2,7 @@
 """Main pipeline — orchestrates L1 → L2 → result."""
 
 import logging
+import math
 import uuid
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from alphasift.candidate_context import collect_candidate_context
 from alphasift.context import build_llm_context
 from alphasift.daily import enrich_daily_features
 from alphasift.dsa_provider import apply_dsa_provider_context
+from alphasift.markets import get_market, latest_settled_close
 from alphasift.filter import (
     apply_hard_filters,
     hard_filter_rejection_summary,
@@ -20,6 +22,8 @@ from alphasift.filter import (
     without_daily_filters,
 )
 from alphasift.industry import enrich_industry_concepts
+from alphasift.lifecycle import enrich_lifecycle_features
+from alphasift.freshness import latest_completed_session
 from alphasift.models import Pick, ScreenResult
 from alphasift.normalize import (
     normalize_code,
@@ -28,11 +32,27 @@ from alphasift.normalize import (
     safe_int as _safe_int,
     safe_text,
 )
+from alphasift.daily import _DAILY_FEATURE_DEFAULTS
+from alphasift.pack import (
+    DailyPack,
+    PackError,
+    SnapshotStitchError,
+    expected_trade_date,
+    load_pack,
+    pack_dir,
+    stitch_snapshot,
+)
+from alphasift.pack_features import compute_pack_daily_features
 from alphasift.post_analysis import normalize_post_analyzers, run_post_analyzers
 from alphasift.ranker import rank_candidates_with_metadata
-from alphasift.risk import apply_portfolio_overlay, apply_risk_overlay
-from alphasift.scorer import compute_screen_scores, factor_score_columns
-from alphasift.snapshot import fetch_snapshot_with_fallback
+from alphasift.risk import (
+    PORTFOLIO_DIVERSITY_SKIPPED_NOTE,
+    apply_portfolio_overlay,
+    apply_risk_overlay,
+    summarize_portfolio_exposure,
+)
+from alphasift.scorer import compute_screen_scores, explain_topic_alignment, factor_score_columns
+from alphasift.snapshot import _missing_required_columns, fetch_snapshot_with_fallback
 from alphasift.strategy import load_all_strategies
 
 logger = logging.getLogger(__name__)
@@ -61,12 +81,16 @@ def screen(
     deep_analysis_max_picks: int | None = None,
     context: dict[str, object] | None = None,
     config: Config | None = None,
+    snapshot_df: pd.DataFrame | None = None,
+    allow_snapshot_refetch: bool = True,
+    daily_pack: DailyPack | None = None,
 ) -> ScreenResult:
     """Execute stock screening with the given strategy.
 
     Args:
         strategy: Strategy name (matches a YAML file in strategies/).
-        market: Market scope, currently only "cn".
+        market: Market id from ``alphasift.markets`` (cn, us, hk, jp, kr, tw, in). A strategy must declare the
+            market in its own market_scope to be runnable against it.
         max_output: Override max output count from strategy.
         use_llm: Whether to use LLM for L2 ranking.
         llm_context: Optional market/news/theme context supplied to the LLM ranker.
@@ -87,6 +111,14 @@ def screen(
         context: Optional host runtime context. DSA may provide LLM settings and
             callable data providers under context["dsa"].
         config: Runtime config. Defaults to Config.from_env().
+        snapshot_df: Optional pre-fetched snapshot DataFrame to reuse across multiple
+            screens of the same market. Copied internally; falls back to live
+            snapshot fetch if empty or missing strategy-required columns unless
+            ``allow_snapshot_refetch=False``.
+        allow_snapshot_refetch: Whether to call ``fetch_snapshot_with_fallback``
+            when ``snapshot_df`` is empty or lacks strategy-required columns.
+            Track-record sessions set this to ``False`` so an unvalidated
+            replacement snapshot can never bypass session freshness gates.
 
     Returns:
         ScreenResult with ranked picks.
@@ -94,8 +126,7 @@ def screen(
     if config is None:
         config = Config.from_env()
 
-    if market not in ("cn", "us"):
-        raise ValueError(f"Unsupported market: {market!r} (supported: cn, us)")
+    market = get_market(market).id
 
     run_id = uuid.uuid4().hex[:12]
     degradation: list[str] = []
@@ -128,13 +159,67 @@ def screen(
     daily_limit = daily_enrich_max_candidates or config.daily_enrich_max_candidates
     snapshot_filters = without_daily_filters(screening.hard_filters) if daily_needed else screening.hard_filters
 
-    # 2. Fetch snapshot
-    snapshot_df = fetch_snapshot_with_fallback(
-        config.snapshot_source_priority,
-        required_columns=_required_snapshot_columns(snapshot_filters),
-        fallback_snapshot_path=config.fallback_snapshot_path,
-        fallback_max_age_hours=config.snapshot_fallback_max_age_hours,
-        market=market,
+    lifecycle_requested = bool(screening.lifecycle_profile)
+    scan_started_at = pd.Timestamp.now(tz="UTC").isoformat()
+    expected_session = latest_completed_session(market, scan_started_at) if lifecycle_requested else ""
+    # 2. Fetch snapshot (or isolate a valid pre-fetched snapshot for reuse)
+    required_snapshot_columns = _required_snapshot_columns(snapshot_filters)
+    if snapshot_df is not None:
+        supplied_market = str(snapshot_df.attrs.get("market") or "").strip().lower()
+        if supplied_market and supplied_market != market:
+            raise ValueError(
+                f"snapshot_df market {supplied_market!r} does not match requested market {market!r}"
+            )
+    missing_supplied = (
+        _missing_required_columns(snapshot_df, required_snapshot_columns)
+        if snapshot_df is not None and not snapshot_df.empty
+        else []
+    )
+    reuse_snapshot = (
+        snapshot_df is not None
+        and not snapshot_df.empty
+        and not missing_supplied
+        and (not lifecycle_requested or not allow_snapshot_refetch)
+    )
+    if reuse_snapshot:
+        if lifecycle_requested and (snapshot_df.attrs.get("fallback_used") or snapshot_df.attrs.get("stale")):
+            raise RuntimeError("Lifecycle scan requires a fresh snapshot; cached/stale snapshot rejected")
+        working_snapshot = snapshot_df.copy()
+        working_snapshot.attrs = {
+            key: list(val) if isinstance(val, list) else val
+            for key, val in snapshot_df.attrs.items()
+        }
+        snapshot_df = working_snapshot
+    elif snapshot_df is not None and not allow_snapshot_refetch:
+        detail = (
+            f"missing required columns: {','.join(missing_supplied)}"
+            if missing_supplied
+            else "empty snapshot"
+        )
+        raise RuntimeError(
+            f"Supplied snapshot for market {market!r} cannot run {strategy!r} ({detail})"
+        )
+    else:
+        snapshot_df = fetch_snapshot_with_fallback(
+            config.snapshot_source_priority,
+            required_columns=required_snapshot_columns,
+            fallback_snapshot_path=None if lifecycle_requested else config.fallback_snapshot_path,
+            fallback_max_age_hours=config.snapshot_fallback_max_age_hours,
+            market=market,
+            source_health_path=config.source_health_path,
+        )
+    snapshot_retrieved_at = pd.Timestamp.now(tz="UTC").isoformat()
+    if lifecycle_requested and (snapshot_df.attrs.get("fallback_used") or snapshot_df.attrs.get("stale")):
+        raise RuntimeError("Lifecycle scan requires a fresh snapshot; cached/stale snapshot rejected")
+    freshness_metadata = dict(
+        scan_started_at=scan_started_at,
+        snapshot_retrieved_at=snapshot_retrieved_at,
+        expected_daily_session=expected_session,
+        freshness_policy=(
+            "prefetched_validated_snapshot" if lifecycle_requested and reuse_snapshot
+            else "network_refresh_completed_daily" if lifecycle_requested
+            else "standard"
+        ),
     )
     effective_industry_map_files = (
         list(industry_map_files)
@@ -147,6 +232,12 @@ def screen(
         else config.industry_provider
     )
     effective_industry_provider = str(effective_industry_provider or "none").strip().lower()
+    if market != "cn" and effective_industry_provider not in {"", "none", "off", "false"}:
+        # Board providers (akshare / eastmoney) only know A-share codes.
+        degradation.append(
+            f"Industry provider {effective_industry_provider} skipped: A-share only (market={market})"
+        )
+        effective_industry_provider = "none"
     if effective_industry_map_files or effective_industry_provider not in {"", "none", "off", "false"}:
         snapshot_df, industry_notes = enrich_industry_concepts(
             snapshot_df,
@@ -157,9 +248,28 @@ def screen(
             provider_cache_ttl_hours=config.industry_provider_cache_ttl_hours,
         )
         degradation.extend(f"Industry/concepts enrichment: {item}" for item in industry_notes)
+    elif (
+        market == "cn"
+        and config.industry_auto_backfill
+        and _industry_coverage(snapshot_df) < _INDUSTRY_BACKFILL_MIN_COVERAGE
+    ):
+        # Routine backfill is not a degradation; only report it when the run
+        # still lacks industry labels afterwards.
+        snapshot_df, industry_notes = enrich_industry_concepts(
+            snapshot_df,
+            provider="eastmoney",
+            provider_cache_dir=config.industry_provider_cache_dir,
+        )
+        if _industry_coverage(snapshot_df) < _INDUSTRY_BACKFILL_MIN_COVERAGE:
+            degradation.extend(f"Industry auto-backfill: {item}" for item in industry_notes)
+        else:
+            for item in industry_notes:
+                logger.info("Industry auto-backfill: %s", item)
     snapshot_count = len(snapshot_df)
     snapshot_source = str(snapshot_df.attrs.get("snapshot_source", ""))
     source_errors = [str(item) for item in snapshot_df.attrs.get("source_errors", [])]
+    for item in snapshot_df.attrs.get("source_order_notes", []):
+        logger.info("%s", item)
     degradation.extend(f"Snapshot source fallback: {item}" for item in source_errors)
     if bool(snapshot_df.attrs.get("fallback_used")):
         stale_age = snapshot_df.attrs.get("stale_age_hours")
@@ -173,7 +283,11 @@ def screen(
     # 3. L1 hard filter. If a strategy needs daily features, first apply only
     # snapshot-safe filters, then enrich a narrowed candidate pool.
     if explain_filters:
-        snapshot_waterfall = hard_filter_waterfall(snapshot_df, snapshot_filters)
+        snapshot_waterfall = hard_filter_waterfall(
+            snapshot_df,
+            snapshot_filters,
+            include_quantiles=True,
+        )
         if snapshot_waterfall:
             degradation.append(
                 "Snapshot hard-filter waterfall: "
@@ -189,8 +303,10 @@ def screen(
             snapshot_count=snapshot_count,
             after_filter_count=0,
             run_id=run_id,
+            track="rules",
             degradation=[*degradation, "No candidates after hard filter"],
             snapshot_source=snapshot_source,
+            **freshness_metadata,
             source_errors=source_errors,
             strategy_version=strat.version,
             strategy_category=strat.category,
@@ -200,81 +316,185 @@ def screen(
             portfolio_diversity_enabled=config.portfolio_diversity_enabled,
         )
 
-    daily_enriched = False
-    daily_enrich_count = 0
-    if daily_needed or daily_requested:
-        provisional = _sort_screened_candidates(compute_screen_scores(df, screening), screening)
-        enrich_count = min(daily_limit, len(provisional))
-        daily_candidates = provisional.head(enrich_count)
-        try:
-            enriched = enrich_daily_features(
-                daily_candidates,
-                max_rows=enrich_count,
-                lookback_days=config.daily_lookback_days,
-                source=config.daily_source,
-                fetch_retries=config.daily_fetch_retries,
-                max_workers=config.daily_fetch_max_workers,
-            )
-            daily_enriched = True
-            daily_errors = [str(item) for item in enriched.attrs.get("daily_errors", [])]
-            daily_enrich_count = int(enriched.attrs.get("daily_success_count", len(enriched)))
-            daily_source_counts = dict(enriched.attrs.get("daily_source_counts", {}) or {})
-            daily_quality_flag_counts = dict(enriched.attrs.get("daily_quality_flag_counts", {}) or {})
-            daily_source_order_notes = [str(item) for item in enriched.attrs.get("daily_source_order_notes", [])]
-            daily_source_health_notes = _daily_source_health_notes(
-                dict(enriched.attrs.get("daily_source_health", {}) or {})
-            )
-            degradation.append(
-                f"Daily K-line enrichment attempted {enrich_count} candidates, "
-                f"succeeded {daily_enrich_count} of {after_filter_count} snapshot-filtered candidates"
-            )
-            if daily_source_counts:
-                source_summary = ", ".join(
-                    f"{name}={count}" for name, count in sorted(daily_source_counts.items())
+    if lifecycle_requested:
+        lifecycle_df = enrich_lifecycle_features(
+            df,
+            market=market,
+            profile=screening.lifecycle_profile,
+            source=config.daily_source,
+            cache_dir=config.daily_history_cache_dir,
+            cache_ttl_seconds=config.daily_history_cache_ttl_hours * 3600,
+            expected_session=expected_session,
+        )
+        attempted = int(lifecycle_df.attrs.get("lifecycle_attempted", len(df)))
+        succeeded = int(lifecycle_df.attrs.get("lifecycle_success_count", len(lifecycle_df)))
+        lifecycle_errors = [str(item) for item in lifecycle_df.attrs.get("lifecycle_errors", [])]
+        degradation.append(
+            f"Lifecycle history analysis attempted {attempted} candidates, succeeded {succeeded}"
+        )
+        if lifecycle_errors:
+            sample = " | ".join(lifecycle_errors[:5])
+            suffix = f" | +{len(lifecycle_errors) - 5} more" if len(lifecycle_errors) > 5 else ""
+            degradation.append(f"Lifecycle history row errors: {sample}{suffix}")
+        if attempted and succeeded == 0:
+            raise RuntimeError("No usable latest-session lifecycle histories: " + " | ".join(lifecycle_errors[:5]))
+        df = lifecycle_df
+        after_filter_count = len(df)
+
+    daily_enriched = lifecycle_requested
+    daily_enrich_count = succeeded if lifecycle_requested else 0
+    daily_source_counts: dict[str, int] = {}
+    daily_quality_flag_counts: dict[str, int] = {}
+    if (daily_needed or daily_requested) and not lifecycle_requested:
+        active_pack = _resolve_cn_daily_pack(
+            market=market,
+            snapshot_df=snapshot_df,
+            config=config,
+            daily_pack=daily_pack,
+            degradation=degradation,
+        )
+        enriched: pd.DataFrame | None = None
+        if active_pack is not None:
+            try:
+                quote_date = str(snapshot_df.attrs.get("quote_date") or "").strip()[:10] or None
+                enriched, matched_count = _attach_pack_daily_features(
+                    df, active_pack, as_of_date=quote_date
                 )
-                degradation.append(f"Daily K-line sources: {source_summary}")
-            if daily_quality_flag_counts:
-                flag_summary = ", ".join(
-                    f"{name}={count}" for name, count in sorted(daily_quality_flag_counts.items())
+                daily_enriched = True
+                daily_enrich_count = matched_count
+                if matched_count > 0:
+                    daily_source_counts = {"pack": matched_count}
+                if "daily_quality_flags" in enriched.columns:
+                    for raw_flags in enriched["daily_quality_flags"]:
+                        if pd.isna(raw_flags):
+                            continue
+                        for part in str(raw_flags).replace(";", ",").replace("|", ",").split(","):
+                            flag = part.strip()
+                            if flag and flag not in {"none", "ok"}:
+                                daily_quality_flag_counts[flag] = daily_quality_flag_counts.get(flag, 0) + 1
+                used_date = quote_date if (quote_date and quote_date < active_pack.trade_date) else active_pack.trade_date
+                enrich_summary = (
+                    f"Daily K-line enrichment via CN pack ({used_date}) "
+                    f"matched {matched_count} of {after_filter_count} snapshot-filtered candidates"
                 )
-                degradation.append(f"Daily K-line quality flags: {flag_summary}")
-            if daily_source_order_notes:
-                degradation.append("Daily K-line source ordering: " + " | ".join(daily_source_order_notes[:3]))
-            if daily_source_health_notes:
-                degradation.append("Daily K-line source health: " + "; ".join(daily_source_health_notes))
-            if daily_errors:
-                sample = " | ".join(daily_errors[:5])
-                suffix = f" | +{len(daily_errors) - 5} more" if len(daily_errors) > 5 else ""
-                degradation.append(f"Daily K-line enrichment row errors: {sample}{suffix}")
+                if explain_filters or matched_count < after_filter_count:
+                    degradation.append(enrich_summary)
+                else:
+                    logger.info("%s", enrich_summary)
+                if explain_filters:
+                    degradation.append(f"Daily K-line sources: pack={matched_count}")
+            except Exception as exc:
+                degradation.append(f"CN daily pack fallback: {exc}")
+                enriched = None
+
+        if enriched is None:
+            provisional = _sort_screened_candidates(compute_screen_scores(df, screening), screening)
+            enrich_count = min(daily_limit, len(provisional))
+            daily_candidates = provisional.head(enrich_count)
+            # config.daily_source's "auto" chain (tushare/tencent/sina/akshare/baostock)
+            # is CN-only and cannot resolve Yahoo symbols, so default non-CN runs to
+            # the yfinance adapter unless the caller explicitly configured a source.
+            effective_daily_source = (
+                "yfinance" if market != "cn" and config.daily_source in ("auto", "")
+                else config.daily_source
+            )
+            try:
+                enriched = enrich_daily_features(
+                    daily_candidates,
+                    max_rows=enrich_count,
+                    lookback_days=config.daily_lookback_days,
+                    source=effective_daily_source,
+                    fetch_retries=config.daily_fetch_retries,
+                    max_workers=config.daily_fetch_max_workers,
+                    cache_policy=lambda: _screening_daily_cache_kwargs(config, market),
+                )
+                daily_enriched = True
+                daily_errors = [str(item) for item in enriched.attrs.get("daily_errors", [])]
+                daily_enrich_count = int(enriched.attrs.get("daily_success_count", len(enriched)))
+                daily_source_counts = dict(enriched.attrs.get("daily_source_counts", {}) or {})
+                daily_quality_flag_counts = dict(enriched.attrs.get("daily_quality_flag_counts", {}) or {})
+                daily_source_order_notes = [str(item) for item in enriched.attrs.get("daily_source_order_notes", [])]
+                daily_source_health_notes = _daily_source_health_notes(
+                    dict(enriched.attrs.get("daily_source_health", {}) or {})
+                )
+                enrich_summary = (
+                    f"Daily K-line enrichment attempted {enrich_count} candidates, "
+                    f"succeeded {daily_enrich_count} of {after_filter_count} snapshot-filtered candidates"
+                )
+                if explain_filters or daily_enrich_count < enrich_count:
+                    degradation.append(enrich_summary)
+                else:
+                    logger.info("%s", enrich_summary)
+                if daily_source_counts:
+                    source_summary = ", ".join(
+                        f"{name}={count}" for name, count in sorted(daily_source_counts.items())
+                    )
+                    if explain_filters:
+                        degradation.append(f"Daily K-line sources: {source_summary}")
+                    else:
+                        logger.info("Daily K-line sources: %s", source_summary)
+                if daily_quality_flag_counts:
+                    flag_summary = ", ".join(
+                        f"{name}={count}" for name, count in sorted(daily_quality_flag_counts.items())
+                    )
+                    degradation.append(f"Daily K-line quality flags: {flag_summary}")
+                if daily_source_order_notes:
+                    degradation.append("Daily K-line source ordering: " + " | ".join(daily_source_order_notes[:3]))
+                if daily_source_health_notes:
+                    degradation.append("Daily K-line source health: " + "; ".join(daily_source_health_notes))
+                if daily_errors:
+                    sample = " | ".join(daily_errors[:5])
+                    suffix = f" | +{len(daily_errors) - 5} more" if len(daily_errors) > 5 else ""
+                    degradation.append(f"Daily K-line enrichment row errors: {sample}{suffix}")
+            except Exception as exc:
+                if daily_needed:
+                    raise RuntimeError(
+                        "Daily K-line enrichment is required by this strategy but failed: "
+                        f"{exc}"
+                    ) from exc
+                degradation.append(f"Daily K-line enrichment skipped: {exc}")
+                enriched = None
+
+        if enriched is not None:
             if daily_needed:
                 if explain_filters:
-                    daily_waterfall = hard_filter_waterfall(enriched, screening.hard_filters)
+                    daily_waterfall = hard_filter_waterfall(
+                        enriched,
+                        screening.hard_filters,
+                        include_quantiles=True,
+                    )
                     if daily_waterfall:
                         degradation.append(
                             "Daily hard-filter waterfall: "
                             + _format_filter_waterfall(daily_waterfall)
                         )
-                daily_filter_rejections = hard_filter_rejection_summary(
-                    enriched,
-                    screening.hard_filters,
-                    limit=6,
-                )
-                df = apply_hard_filters(enriched, screening.hard_filters)
-                after_filter_count = len(df)
-                if daily_filter_rejections:
-                    degradation.append(
-                        "Daily hard-filter rejections: "
-                        + "; ".join(daily_filter_rejections)
+                    daily_filter_rejections = hard_filter_rejection_summary(
+                        enriched,
+                        screening.hard_filters,
+                        limit=6,
                     )
+                    df = apply_hard_filters(enriched, screening.hard_filters)
+                    after_filter_count = len(df)
+                    if daily_filter_rejections:
+                        degradation.append(
+                            "Daily hard-filter rejections: "
+                            + "; ".join(daily_filter_rejections)
+                        )
+                else:
+                    df = apply_hard_filters(enriched, screening.hard_filters)
+                    after_filter_count = len(df)
             else:
                 df = enriched
-        except Exception as exc:
-            if daily_needed:
-                raise RuntimeError(
-                    "Daily K-line enrichment is required by this strategy but failed: "
-                    f"{exc}"
-                ) from exc
-            degradation.append(f"Daily K-line enrichment skipped: {exc}")
+
+            if not df.empty and active_pack is not None and "daily_quality_flags" in df.columns:
+                daily_quality_flag_counts = {}
+                for raw_flags in df["daily_quality_flags"]:
+                    if pd.isna(raw_flags):
+                        continue
+                    for part in str(raw_flags).replace(";", ",").replace("|", ",").split(","):
+                        flag = part.strip()
+                        if flag and flag not in {"none", "ok"}:
+                            daily_quality_flag_counts[flag] = daily_quality_flag_counts.get(flag, 0) + 1
 
     if df.empty:
         return ScreenResult(
@@ -285,12 +505,16 @@ def screen(
             snapshot_count=snapshot_count,
             after_filter_count=0,
             run_id=run_id,
+            track="rules",
             degradation=[*degradation, "No candidates after daily hard filter"],
             snapshot_source=snapshot_source,
+            **freshness_metadata,
             source_errors=source_errors,
             post_analyzers=analyzer_names,
             daily_enriched=daily_enriched,
             daily_enrich_count=daily_enrich_count,
+            daily_source_counts=daily_source_counts,
+            daily_quality_flag_counts=daily_quality_flag_counts,
             risk_enabled=config.risk_enabled,
             portfolio_diversity_enabled=config.portfolio_diversity_enabled,
         )
@@ -299,11 +523,14 @@ def screen(
     df = _sort_screened_candidates(compute_screen_scores(df, screening), screening)
 
     # 5. Take Top K for LLM ranking
-    top_k = min(
-        max(output_count * config.llm_candidate_multiplier, output_count),
-        config.llm_max_candidates,
-        len(df),
-    )
+    if use_llm:
+        top_k = min(
+            max(output_count * config.llm_candidate_multiplier, output_count),
+            config.llm_max_candidates,
+            len(df),
+        )
+    else:
+        top_k = min(output_count, len(df))
     df_top = df.head(top_k)
 
     # 6. Build Pick list
@@ -328,7 +555,12 @@ def screen(
             if collect_llm_candidate_context is None
             else collect_llm_candidate_context
         )
-        if should_collect_candidate_context:
+        if should_collect_candidate_context and market != "cn":
+            # News/announcement/fund-flow providers are A-share (EastMoney) only.
+            degradation.append(
+                f"Candidate context skipped: providers support market cn only (market={market})"
+            )
+        elif should_collect_candidate_context:
             candidate_context_rows, candidate_context_errors = collect_candidate_context(
                 df_top,
                 max_rows=(
@@ -343,7 +575,7 @@ def screen(
                 news_limit=config.llm_candidate_context_news_limit,
                 announcement_limit=config.llm_candidate_context_announcement_limit,
                 cache_dir=(
-                    config.data_dir / "candidate_context"
+                    (config.llm_candidate_context_cache_dir or (config.data_dir / "candidate_context"))
                     if config.llm_candidate_context_cache_enabled
                     else None
                 ),
@@ -382,6 +614,7 @@ def screen(
             config.llm_model,
             config.llm_base_url,
             context=effective_context,
+            candidate_context_rows=candidate_context_rows,
             rank_weight=config.llm_rank_weight,
             max_retries=config.llm_max_retries,
             min_coverage=config.llm_min_coverage,
@@ -402,7 +635,7 @@ def screen(
         llm_portfolio_risk = llm_result.portfolio_risk
         llm_coverage = llm_result.coverage
         llm_parse_errors = llm_result.errors
-        llm_ranked = any(p.llm_score is not None for p in picks)
+        llm_ranked = bool(llm_result.ranked)
         if not llm_ranked:
             degradation.append("LLM ranking failed: fell back to screen_score")
             for i, p in enumerate(picks):
@@ -435,8 +668,11 @@ def screen(
             concentration_penalty=config.portfolio_concentration_penalty,
             profile=screening.portfolio_profile,
         )
+        if PORTFOLIO_DIVERSITY_SKIPPED_NOTE in portfolio_concentration_notes:
+            degradation.append(PORTFOLIO_DIVERSITY_SKIPPED_NOTE)
 
-    # 10. Trim to max_output
+    # 10. Trim to max_output (retaining deferred candidates for exposure diagnostics)
+    overflow_picks = picks[output_count:]
     picks = picks[:output_count]
 
     # 11. Optional L3 post-analysis, DSA is only one possible analyzer.
@@ -451,6 +687,22 @@ def screen(
         )
         degradation.extend(post_degradation)
 
+    raw_bucket_cap = (screening.portfolio_profile or {}).get("max_same_bucket")
+    effective_bucket_cap = (
+        int(raw_bucket_cap)
+        if isinstance(raw_bucket_cap, (int, float))
+        and not isinstance(raw_bucket_cap, bool)
+        and math.isfinite(float(raw_bucket_cap))
+        and int(raw_bucket_cap) > 0
+        else config.portfolio_max_same_llm_sector
+    )
+    portfolio_topic_exposure, overconcentrated_topics, replacement_candidates = summarize_portfolio_exposure(
+        picks,
+        candidate_pool=overflow_picks,
+        max_same_bucket=effective_bucket_cap,
+        buckets=(screening.portfolio_profile or {}).get("buckets"),
+    )
+
     return ScreenResult(
         strategy=strategy,
         market=market,
@@ -460,6 +712,7 @@ def screen(
         after_filter_count=after_filter_count,
         picks=picks,
         run_id=run_id,
+        track="ai" if llm_ranked else "rules",
         llm_ranked=llm_ranked,
         llm_market_view=llm_market_view,
         llm_selection_logic=llm_selection_logic,
@@ -468,14 +721,20 @@ def screen(
         llm_parse_errors=llm_parse_errors,
         degradation=degradation,
         snapshot_source=snapshot_source,
+        **freshness_metadata,
         source_errors=source_errors,
         deep_analysis_requested=("dsa" in analyzer_names),
         post_analyzers=analyzer_names,
         daily_enriched=daily_enriched,
         daily_enrich_count=daily_enrich_count,
+        daily_source_counts=daily_source_counts,
+        daily_quality_flag_counts=daily_quality_flag_counts,
         risk_enabled=config.risk_enabled,
         portfolio_diversity_enabled=config.portfolio_diversity_enabled,
         portfolio_concentration_notes=portfolio_concentration_notes,
+        portfolio_topic_exposure=portfolio_topic_exposure,
+        overconcentrated_topics=overconcentrated_topics,
+        replacement_candidates=replacement_candidates,
     )
 
 
@@ -489,22 +748,30 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             for factor, col in factor_cols.items()
             if col in df.columns
         }
+        raw_industry = row.get("industry", row.get("行业", row.get("所属行业", "")))
+        raw_concepts = row.get("concepts", row.get("概念", row.get("概念题材", "")))
+        raw_board_summary = row.get("board_heat_summary")
+        align = explain_topic_alignment(raw_industry, raw_concepts, raw_board_summary)
+        industry_val = _safe_text(raw_industry)
+        concepts_val = _safe_text(raw_concepts)
+        board_summary_val = _safe_text(raw_board_summary)
+        screen_val = _safe_float(row.get("screen_score")) or 0.0
         picks.append(Pick(
             rank=i + 1,
             code=normalize_code(row.get("code", row.get("代码", "")), allow_ticker=True),
             name=str(row.get("name", row.get("名称", row.get("股票名称", "")))),
-            screen_score=float(row.get("screen_score", 0)),
-            final_score=float(row.get("screen_score", 0)),
-            price=float(row.get("price", row.get("最新价", 0)) or 0),
-            change_pct=float(row.get("change_pct", row.get("涨跌幅", 0)) or 0),
-            amount=float(row.get("amount", row.get("成交额", 0)) or 0),
+            screen_score=screen_val,
+            final_score=screen_val,
+            price=_safe_float(row.get("price", row.get("最新价"))) or 0.0,
+            change_pct=_safe_float(row.get("change_pct", row.get("涨跌幅"))) or 0.0,
+            amount=_safe_float(row.get("amount", row.get("成交额"))) or 0.0,
             total_mv=_safe_float(row.get("total_mv", row.get("总市值"))),
             turnover_rate=_safe_float(row.get("turnover_rate", row.get("换手率"))),
             volume_ratio=_safe_float(row.get("volume_ratio", row.get("量比"))),
             pe_ratio=_safe_float(row.get("pe_ratio", row.get("市盈率"))),
             pb_ratio=_safe_float(row.get("pb_ratio", row.get("市净率"))),
-            industry=_safe_text(row.get("industry", row.get("行业", row.get("所属行业", "")))),
-            concepts=_safe_text(row.get("concepts", row.get("概念", row.get("概念题材", "")))),
+            industry=industry_val,
+            concepts=concepts_val,
             industry_rank=_safe_int(row.get("industry_rank")),
             industry_change_pct=_safe_float(row.get("industry_change_pct")),
             industry_heat_score=_safe_float(row.get("industry_heat_score")),
@@ -516,7 +783,7 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             board_heat_cooling_score=_safe_float(row.get("board_heat_cooling_score")),
             board_heat_observations=_safe_int(row.get("board_heat_observations")),
             board_heat_state=_safe_text(row.get("board_heat_state")),
-            board_heat_summary=_safe_text(row.get("board_heat_summary")),
+            board_heat_summary=board_summary_val,
             change_60d=_safe_float(row.get("change_60d")),
             signal_score=_safe_float(row.get("signal_score")),
             ma_bullish=_safe_bool(row.get("ma_bullish")),
@@ -529,6 +796,38 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             body_pct=_safe_float(row.get("body_pct")),
             pullback_to_ma20_pct=_safe_float(row.get("pullback_to_ma20_pct")),
             consolidation_days_20d=_safe_int(row.get("consolidation_days_20d")),
+            a_score=_safe_float(row.get("a_score")),
+            h_score=_safe_float(row.get("h_score")),
+            a_eligible=_safe_bool(row.get("a_eligible")),
+            h_eligible=_safe_bool(row.get("h_eligible")),
+            fundamental_risk_status=_safe_text(row.get("fundamental_risk_status")) or "unverified",
+            data_source=_safe_text(row.get("data_source")),
+            data_granularity=_safe_text(row.get("data_granularity")),
+            max_drawdown_pct=_safe_float(row.get("max_drawdown_pct")),
+            max_drawdown_from_d_pct=_safe_float(row.get("max_drawdown_from_d_pct")),
+            distance_post_d_low_pct=_safe_float(row.get("distance_post_d_low_pct")),
+            atr14_pct=_safe_float(row.get("atr14_pct")),
+            history_sessions=_safe_int(row.get("history_sessions")),
+            lifecycle_stage=_safe_text(row.get("lifecycle_stage")),
+            lifecycle_action=_safe_text(row.get("lifecycle_action")),
+            data_as_of=_safe_text(row.get("data_as_of")),
+            distance_3y_low_pct=_safe_float(row.get("distance_3y_low_pct")),
+            history_start=_safe_text(row.get("history_start")),
+            history_scope=_safe_text(row.get("history_scope")),
+            history_retrieved_at=_safe_text(row.get("history_retrieved_at")),
+            snapshot_price=_safe_float(row.get("snapshot_price")),
+            data_timestamp=_safe_text(row.get("data_timestamp")),
+            low_52w=_safe_float(row.get("low_52w")),
+            distance_52w_low_pct=_safe_float(row.get("distance_52w_low_pct")),
+            cycle_high=_safe_float(row.get("cycle_high")),
+            cycle_high_date=_safe_text(row.get("cycle_high_date")),
+            drawdown_from_cycle_high_pct=_safe_float(row.get("drawdown_from_cycle_high_pct")),
+            distance_cycle_low_pct=_safe_float(row.get("distance_cycle_low_pct")),
+            prior_runup_pct=_safe_float(row.get("prior_runup_pct")),
+            lower_high_count=_safe_int(row.get("lower_high_count")),
+            lower_low_count=_safe_int(row.get("lower_low_count")),
+            bottom_divergence=_safe_bool(row.get("bottom_divergence")),
+            lifecycle_reasons=list(row.get("lifecycle_reasons") or []),
             volatility_20d_pct=_safe_float(row.get("volatility_20d_pct")),
             max_drawdown_20d_pct=_safe_float(row.get("max_drawdown_20d_pct")),
             atr_20_pct=_safe_float(row.get("atr_20_pct")),
@@ -536,6 +835,11 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             daily_quality_flags=_safe_text(row.get("daily_quality_flags")),
             daily_source=_safe_text(row.get("daily_source")),
             factor_scores=factor_scores,
+            topic_alignment_status=str(align["status"]),
+            topic_alignment_role=str(align["role"]),
+            topic_alignment_reason=str(align["reason"]),
+            matched_topics=list(align["matched_topics"]),
+            unmatched_topics=list(align["unmatched_topics"]),
         ))
     return picks
 
@@ -565,12 +869,38 @@ def _sort_screened_candidates(df: pd.DataFrame, screening=None) -> pd.DataFrame:
     return df.sort_values(sort_columns, ascending=ascending, kind="mergesort")
 
 
+def _screening_daily_cache_kwargs(config: Config, market: str) -> dict[str, object]:
+    """Daily-history cache settings for screening.
+
+    After the latest close has settled, a history fetched since then that
+    reaches that session cannot change before the next open, so it is
+    reused. During the session (and just before the open) nothing is read
+    as fresh or written: a partial-day bar must not reach evaluation, which
+    shares the cache. If every source fails, the last cached history is
+    still used, flagged ``stale_cache``. Called per fetch, so a batch that
+    runs across the open switches over.
+    """
+    if config.daily_history_cache_dir is None:
+        return {"cache_dir": None}
+    settled = latest_settled_close(market)
+    if settled is None:
+        return {"cache_dir": config.daily_history_cache_dir, "cache_ttl_seconds": 0.0, "cache_write": False}
+    session, elapsed = settled
+    return {
+        "cache_dir": config.daily_history_cache_dir,
+        "cache_ttl_seconds": min(elapsed, float(config.daily_history_cache_ttl_hours) * 3600.0),
+        "cache_min_last_date": session,
+    }
+
+
 def _required_snapshot_columns(filters) -> list[str]:
     columns: list[str] = []
     if filters.exclude_st:
         columns.append("name")
     if filters.amount_min is not None:
         columns.append("amount")
+    if filters.avg_amount_usd_min is not None:
+        columns.append("avg_amount_usd")
     if filters.price_min is not None or filters.price_max is not None:
         columns.append("price")
     if filters.market_cap_min is not None or filters.market_cap_max is not None:
@@ -670,5 +1000,100 @@ def _format_filter_waterfall(steps: list[dict[str, object]], *, limit: int = 8) 
     return "; ".join(parts)
 
 
+def _resolve_cn_daily_pack(
+    *,
+    market: str,
+    snapshot_df: pd.DataFrame,
+    config: Config,
+    daily_pack: DailyPack | None,
+    degradation: list[str],
+) -> DailyPack | None:
+    if not get_market(market).supports_daily_pack:
+        return None
+    if daily_pack is None and not config.daily_pack_enabled:
+        return None
+    if daily_pack is not None:
+        active_pack = daily_pack
+    else:
+        pack_path = config.daily_pack_dir or pack_dir(config)
+        if not (pack_path / "manifest.json").is_file():
+            return None
+        try:
+            active_pack = load_pack(pack_path)
+        except (PackError, OSError) as exc:
+            degradation.append(f"CN daily pack fallback: {exc}")
+            return None
+
+    quote_date = str(snapshot_df.attrs.get("quote_date") or "").strip()[:10]
+    target_date = quote_date or expected_trade_date()
+    if active_pack.trade_date < target_date:
+        try:
+            active_pack = stitch_snapshot(active_pack, snapshot_df, trade_date=target_date)
+        except SnapshotStitchError as exc:
+            degradation.append(
+                f"CN daily pack stale ({active_pack.trade_date} < {target_date}; {exc}); "
+                "falling back to per-code daily enrichment"
+            )
+            return None
+        if active_pack.trade_date < target_date:
+            degradation.append(
+                f"CN daily pack stale ({active_pack.trade_date} < {target_date}); "
+                "falling back to per-code daily enrichment"
+            )
+            return None
+    return active_pack
+
+
+def _attach_pack_daily_features(
+    df: pd.DataFrame,
+    active_pack: DailyPack,
+    *,
+    as_of_date: str | None = None,
+) -> tuple[pd.DataFrame, int]:
+    enriched = df.copy()
+    code_col = "code" if "code" in enriched.columns else "代码"
+    norm_codes = [normalize_code(v, allow_ticker=False) for v in enriched[code_col]]
+    target_trade_date: str | None = None
+    if as_of_date and as_of_date < active_pack.trade_date:
+        eligible = [str(d) for d in active_pack.dates if str(d) <= as_of_date]
+        if eligible:
+            target_trade_date = eligible[-1]
+    features_df = compute_pack_daily_features(
+        active_pack, codes=norm_codes, trade_date=target_trade_date
+    )
+    by_code = features_df.set_index("code").to_dict(orient="index") if not features_df.empty else {}
+    matched = sum(1 for c in norm_codes if c in by_code)
+
+    columns: dict[str, list[object]] = {col: [] for col in _DAILY_FEATURE_DEFAULTS}
+    for code in norm_codes:
+        feat = by_code.get(code)
+        if feat is None:
+            for col, default in _DAILY_FEATURE_DEFAULTS.items():
+                if col == "daily_quality_score":
+                    columns[col].append(0.0)
+                elif col == "daily_quality_flags":
+                    columns[col].append("missing_in_pack")
+                else:
+                    columns[col].append(default)
+        else:
+            for col, default in _DAILY_FEATURE_DEFAULTS.items():
+                columns[col].append(feat.get(col, default))
+
+    for col, values in columns.items():
+        enriched[col] = values
+    return enriched, matched
+
+
 def _safe_text(v: object) -> str:
     return safe_text(v, max_len=120)
+
+
+_INDUSTRY_BACKFILL_MIN_COVERAGE = 0.5
+
+
+def _industry_coverage(df: pd.DataFrame) -> float:
+    """Share of snapshot rows that carry a non-empty industry label."""
+    if df.empty or "industry" not in df.columns:
+        return 0.0
+    labels = df["industry"].fillna("").astype(str).str.strip()
+    return float((labels != "").mean())

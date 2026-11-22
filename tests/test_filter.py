@@ -311,3 +311,79 @@ def test_apply_hard_filters_matches_one_pass_numeric_and_daily_filters():
         & (df["atr_20_pct"] <= 5)
     )
     assert result["name"].tolist() == df.loc[expected_mask, "name"].tolist()
+
+
+def test_exclude_st_blocks_romanized_st_prefixes_while_preserving_english_names():
+    df = pd.DataFrame([
+        {"name": "*ST Alpha", "amount": 100_000_000},
+        {"name": "S*ST Beta", "amount": 100_000_000},
+        {"name": "ST", "amount": 100_000_000},
+        {"name": "SST", "amount": 100_000_000},
+        {"name": "*ST华泰", "amount": 100_000_000},
+        {"name": "ST Engineering", "amount": 100_000_000},
+        {"name": "COST", "amount": 100_000_000},
+        {"name": "STERIS", "amount": 100_000_000},
+        {"name": "FIRST SOLAR", "amount": 100_000_000},
+    ])
+    filtered = apply_hard_filters(df, HardFilterConfig(exclude_st=True))
+    assert filtered["name"].tolist() == ["ST Engineering", "COST", "STERIS", "FIRST SOLAR"]
+
+
+def test_hard_filter_waterfall_attaches_quantiles_and_tight_threshold_hints():
+    from alphasift.filter import hard_filter_waterfall
+
+    df = pd.DataFrame([
+        {"name": f"S{i}", "amount": 100_000_000 * (i + 1), "pe_ratio": 10.0 + i * 2.0, "ma_bullish": i % 2 == 0}
+        for i in range(10)
+    ])
+    steps = hard_filter_waterfall(
+        df,
+        HardFilterConfig(exclude_st=True, amount_min=950_000_000, pe_ttm_max=15.0, require_ma_bullish=True),
+        include_quantiles=True,
+    )
+    amt_step = next(s for s in steps if s["filter"] == "amount_min")
+    assert amt_step["threshold"] == 950_000_000
+    assert amt_step["removed"] == 9
+    assert amt_step["after"] == 1
+    assert amt_step["quantiles"]["valid_count"] == 10
+    assert amt_step["quantiles"]["p50"] == 550_000_000.0
+    assert "p50=" in amt_step["suggestion"]
+
+    pe_step = next(s for s in steps if s["filter"] == "pe_ttm_max")
+    assert pe_step["after"] == 0
+    assert pe_step["threshold"] == 15.0
+    assert "p50=" in pe_step["suggestion"]
+
+    bool_step = next(s for s in steps if s["filter"] == "require_ma_bullish")
+    assert "quantiles" not in bool_step
+
+    import json
+
+    inf_df = pd.DataFrame([
+        {"name": "A", "amount": 1.0},
+        {"name": "B", "amount": float("inf")},
+        {"name": "C", "amount": float("-inf")},
+        {"name": "D", "amount": 5.0},
+    ])
+    inf_steps = hard_filter_waterfall(
+        inf_df,
+        HardFilterConfig(amount_min=10.0),
+        include_quantiles=True,
+    )
+    inf_amt = next(s for s in inf_steps if s["filter"] == "amount_min")
+    assert inf_amt["quantiles"]["valid_count"] == 2
+    assert inf_amt["quantiles"]["p50"] == 3.0
+    json.dumps(inf_steps, allow_nan=False)
+
+    # Object dtype bool + pd.NA columns should NOT produce numeric quantiles
+    obj_bool_df = pd.DataFrame([
+        {"name": "X1", "amount": 200_000_000, "ma_bullish": True},
+        {"name": "X2", "amount": 200_000_000, "ma_bullish": False},
+        {"name": "X3", "amount": 200_000_000, "ma_bullish": pd.NA},
+    ])
+    obj_steps = hard_filter_waterfall(
+        obj_bool_df,
+        HardFilterConfig(require_ma_bullish=True),
+        include_quantiles=True,
+    )
+    assert "quantiles" not in obj_steps[0]

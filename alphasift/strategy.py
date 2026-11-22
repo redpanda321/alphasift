@@ -3,6 +3,7 @@
 
 import hashlib
 import logging
+import math
 from dataclasses import asdict, fields
 from pathlib import Path
 
@@ -40,6 +41,7 @@ _SCREENING_KEYS = {
     "portfolio_profile",
     "scorecard_profile",
     "event_profile",
+    "lifecycle_profile",
     "ranking_hints",
     "max_output",
 }
@@ -108,6 +110,7 @@ _SCORING_PROFILE_KEYS = {
     "theme_heat_cooling_score_penalty_cap",
     "theme_heat_overheat_score",
     "theme_heat_overheat_penalty_slope",
+    "factor_rank_blend",
 }
 _RISK_PROFILE_KEYS = {
     "chase_change_pct",
@@ -138,7 +141,8 @@ _RISK_PROFILE_KEYS = {
     "fallback_daily_errors_points",
     "fetch_failed_daily_points",
 }
-_PORTFOLIO_PROFILE_KEYS = {"max_same_bucket", "concentration_penalty", "buckets"}
+_PORTFOLIO_PROFILE_KEYS = {"mode", "max_same_bucket", "concentration_penalty", "buckets"}
+_PORTFOLIO_MODES = {"soft", "hard_cap"}
 _SCORECARD_PROFILE_KEYS = {
     "value_quality_value_min",
     "value_quality_stability_min",
@@ -170,6 +174,25 @@ _EVENT_PROFILE_KEYS = {
     "avoided_announcement_categories",
     "source_weights",
     "notes",
+}
+_LIFECYCLE_PROFILE_KEYS = {
+    "mode",
+    "lookback_days",
+    "min_history_days",
+    "max_candidates",
+    "max_workers",
+    "min_score",
+    "top_per_stage",
+    "market_cap_min_us",
+    "near_52w_low_pct",
+    "panic_20d_pct",
+    "panic_60d_pct",
+    "h_min_prior_runup_pct",
+    "h_min_drawdown_pct",
+    "pivot_window_weeks",
+    "monthly_min_bars",
+    "five_year_days",
+    "weekly_min_bars",
 }
 _STYLE_KEYS = {
     "risk_profile",
@@ -213,20 +236,19 @@ def load_strategy(filepath: Path) -> Strategy:
         hard_filters=hard_filters,
         tech_weight=screening_data.get("tech_weight", 0.35),
         factor_weights=screening_data.get("factor_weights", {}),
-        scoring_profile=_optional_mapping(
-            screening_data, "scoring_profile", filepath, allowed_keys=_SCORING_PROFILE_KEYS
-        ),
+        scoring_profile=_scoring_profile(screening_data, filepath),
         risk_profile=_optional_mapping(
             screening_data, "risk_profile", filepath, allowed_keys=_RISK_PROFILE_KEYS
         ),
-        portfolio_profile=_optional_mapping(
-            screening_data, "portfolio_profile", filepath, allowed_keys=_PORTFOLIO_PROFILE_KEYS
-        ),
+        portfolio_profile=_portfolio_profile(screening_data, filepath),
         scorecard_profile=_optional_mapping(
             screening_data, "scorecard_profile", filepath, allowed_keys=_SCORECARD_PROFILE_KEYS
         ),
         event_profile=_optional_mapping(
             screening_data, "event_profile", filepath, allowed_keys=_EVENT_PROFILE_KEYS
+        ),
+        lifecycle_profile=_optional_mapping(
+            screening_data, "lifecycle_profile", filepath, allowed_keys=_LIFECYCLE_PROFILE_KEYS
         ),
         ranking_hints=screening_data.get("ranking_hints", ""),
         max_output=screening_data.get("max_output", 5),
@@ -792,6 +814,8 @@ def _required_snapshot_fields(filters_config: HardFilterConfig) -> list[str]:
         fields.append("name")
     if filters_config.amount_min is not None:
         fields.append("amount")
+    if filters_config.avg_amount_usd_min is not None:
+        fields.append("avg_amount_usd")
     if filters_config.price_min is not None or filters_config.price_max is not None:
         fields.append("price")
     if filters_config.market_cap_min is not None or filters_config.market_cap_max is not None:
@@ -1037,6 +1061,40 @@ def _raise_unknown_keys(data: dict, allowed_keys: set[str], context: str) -> Non
         raise ValueError(
             f"Unknown keys in {context}: {', '.join(unknown_keys)}"
         )
+
+
+def _scoring_profile(screening_data: dict, filepath: Path) -> dict:
+    profile = _optional_mapping(
+        screening_data, "scoring_profile", filepath, allowed_keys=_SCORING_PROFILE_KEYS
+    )
+    if "factor_rank_blend" in profile:
+        raw = profile["factor_rank_blend"]
+        err = (
+            f"Invalid scoring_profile.factor_rank_blend in {filepath.name}: {raw!r} "
+            "(expected finite float between 0.0 and 1.0)"
+        )
+        if isinstance(raw, bool):
+            raise ValueError(err)
+        try:
+            val = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(err) from exc
+        if not math.isfinite(val) or not (0.0 <= val <= 1.0):
+            raise ValueError(err)
+    return profile
+
+
+def _portfolio_profile(screening_data: dict, filepath: Path) -> dict:
+    profile = _optional_mapping(
+        screening_data, "portfolio_profile", filepath, allowed_keys=_PORTFOLIO_PROFILE_KEYS
+    )
+    mode = str(profile.get("mode", "soft")).strip().lower()
+    if mode not in _PORTFOLIO_MODES:
+        raise ValueError(
+            f"Invalid portfolio_profile.mode in {filepath.name}: {profile.get('mode')!r} "
+            f"(expected one of: {', '.join(sorted(_PORTFOLIO_MODES))})"
+        )
+    return profile
 
 
 def _optional_mapping(

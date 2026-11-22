@@ -102,10 +102,10 @@ JSON 输出同时包含原始 `source_health` counters、聚合后的 `health_su
 alphasift screen balanced_alpha
 ```
 
-复用其他项目的 LiteLLM 配置文件：
+复用其他项目的 `.env` 模型与渠道配置（如 `daily_stock_analysis`）：
 
 ```bash
-alphasift --env-file /home/ubuntu/daily_ai_assistant/.env screen balanced_alpha
+alphasift --env-file /path/to/daily_stock_analysis/.env screen balanced_alpha
 ```
 
 带市场、主题或新闻背景的 LLM 排序：
@@ -180,6 +180,68 @@ curl "http://127.0.0.1:8765/strategy-run-summary?limit=50"
 alphasift evaluate <run_id> --with-price-path --explain
 ```
 
+## A 股离线日线包
+
+> 离线日线包仅供研究者**在本地或 GitHub Actions 私有缓存（`actions/cache`）中自建自用**，主仓库**不提供公开下载或二次分发**。
+
+```bash
+alphasift pack build --days 250
+alphasift pack info --trade-date 2026-11-18
+ALPHASIFT_PACK_DIR=data/pack/sample alphasift pack build --days 250 --codes-limit 30
+python3 scripts/build_pack.py backfill --days 250 --trade-date 2026-11-18
+python3 scripts/build_pack.py update --days 250 --trade-date 2026-11-19
+```
+
+`info` 输出校验后的清单和 `fresh` 字段。省略 `--trade-date` 时，按 A 股收盘时间和工作日估算预期交易日，节假日可显式指定。只有当用户显式设置 `ALPHASIFT_PACK_REPO` 指向自己的私有仓库（配合 `GITHUB_TOKEN`）时，`alphasift pack pull` 才会从对应仓库拉取并校验 SHA-256；默认不指向任何公开仓库。
+
+默认保留 250 个交易日，数据全部来自项目现有数据源。省略 `--codes-limit` 可构建全量包。
+
+- **回填与补缺口**：按代码在 `.backfill/` 保存断点结果并支持续传。`--source auto`（默认）在 Baostock 可连时优先用它（自带交易所昨收）；否则走批量 `yfinance`（按 100 只分批取 `auto_adjust=False, actions=True`，用 `Stock Splits` 还原不复权 OHLCV，并用 `Adj Close` 比值还原除权日昨收，北交所等无 Yahoo 代码的标的回退现有日线源）。`--source daily` 强制走新浪不复权日线加腾讯前复权日线。
+- **每日增量**：`update` 优先尝试现有全市场快照源（`sina`、`efinance`、`akshare_em`），拿不到开高低和昨收时自动降级到腾讯批量行情（`qt.gtimg.cn`，含当日开高低收、昨收、成交量和成交额），只适用于最近一个已收盘交易日；仍失败时再按代码从日线补齐。
+- **TickPlus（可选）**：设置 `TICKPLUS_API_KEY` 后，`update` 优先用它取当日全市场日线。
+
+批量 `yfinance` 与新浪加腾讯路径的历史成交额均留空（每日增量进来的记录带有真实成交额）；单个代码取数失败会跳过并在下次运行重试，失败超过 5% 则中止。
+
+`daily.npz` 保存不复权价格和交易所昨收，停牌及未上市的日期留空。Python 接口 `load_pack` 读取原始矩阵，`forward_adjust` 按昨收动态计算前复权（**历史特征与形态回放先按目标日期截断再前复权，避免未来除权回改历史均值**），成交量（股）和成交额（元）保留原值。`stitch_snapshot` 仅在内存中拼接当日快照，需要代码、开高低收（收盘可用 `price`）、昨收、成交量和成交额。`sina`、`efinance`、`akshare_em` 与 `em_datacenter`（含北交所）快照均带完整 OHLCV 与 `MAX_TRADE_DATE` 日期校验并会自动映射，未成交的行不写入；`tushare` 快照缺少部分字段，会返回明确的降级错误。
+
+当本地存在有效且新鲜的 A 股数据包时（默认 `ALPHASIFT_DAILY_PACK_ENABLED=1`），`screen` 运行 `volume_breakout`、`shrink_pullback` 等需要日 K 的 A 股策略会自动使用 `alphasift/pack_features.py` 向量化计算全部初筛候选的日线指标，不再受默认 Top-100 补日线截断限制；若包缺失、损坏或过期且无法从快照拼接，则自动回退现有逐只补日线路径并记录 `degradation`。其他 6 个市场不触发数据包路径。
+
+## A 股盘面统计与无状态形态引擎
+
+两项能力均**仅适用于 A 股数据包（其他 6 个市场不动）**：
+
+```bash
+# 查看盘面宽度、涨跌停/封板率、连板梯队与客观阶段标签（仅供报告和切片，不调整策略权重）
+alphasift market-stats --explain
+alphasift market-stats --days 10 --json
+
+# 列出与扫描无状态形态；默认仅扫描通过 250 日门槛的 active 形态，加 --include-experimental 包含观察期形态
+alphasift patterns list --include-experimental
+alphasift patterns scan --include-experimental --explain
+
+# 250 日 next_open 回放、形态 × 阶段切片、上方 10% 筹码切片及毕业判定（样本 >= 200 且 T+5 超额 > 0）
+alphasift patterns replay --output-json local/pattern_replay.json --output-md local/pattern_replay.md
+```
+
+短线接力谱系仅提供盘面连板梯队与昨涨停溢价统计，不出个股买卖信号；`overhead_supply_10pct` 仅作特征输出与切片观测，不做硬筛一票否决。
+
+## 结构化日报、IM 推送与就绪诊断
+
+```bash
+# 打包与推送就绪自检（不会打印任何 Webhook 或 Token 密钥）
+alphasift doctor radar --explain
+
+# 生成结构化 report.json、<1200 字 IM 卡片与可打印独立 HTML 研报（公告排雷预警置顶，完整候选/AI简评详见 HTML 与看板）
+alphasift daily-report --expected-trade-date 2026-11-20 --allow-stale-pack --ai-brief auto --output-json local/report.json --output-card local/card.md --output-html local/daily_report.html --push --explain
+```
+
+- **数据源稳定性**：默认 A 股快照优先级调整为 `em_datacenter -> sina -> efinance -> akshare_em`（`_fetch_em_datacenter` 改用 `FREE_CAP` 映射流通市值），减少海外环境下多源超时触发的降级。
+- **跨策略共识、AI 综述简报与独立 HTML 研报**：`alphasift/daily_brief.py` 计算多策略共识（`>= 2` 策略命中）、行业集中度与策略×形态共振，并在配置 LLM Key 时由 `--ai-brief auto` 生成结构化 `ai_brief`（无 Key 或调用异常时自动回退规则合成）；`alphasift/daily_report_html.py` 与 HTTP `GET /daily-report.html` 提供零外部依赖、支持打印与 PDF 导出的独立投研日报。
+- **IM 渠道环境变量**：支持企业微信（`WECOM_WEBHOOK_URL`）、飞书机器人（`FEISHU_WEBHOOK_URL`，可选加签密钥 `FEISHU_WEBHOOK_SECRET`）与 Telegram（`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`），以及卡片详情跳转链接 `ALPHASIFT_DASHBOARD_URL`（或 `--detail-url`）。同一交易日同一渠道加进程/文件锁并发去重，失败自动落盘并允许下次自动重试；若 `--expected-trade-date` 检出旧包（`pack_is_stale=True`），默认跳过未强制推送（`skipped_stale_pack`）。未配置任何渠道时静默跳过。
+- **CLI 与 HTTP 同源输入**：`alphasift daily-report` 与 HTTP `/daily-report` 共用 `load_daily_report_runs()`（按沪深交易时段归属日加载规则榜与 AI 榜并生成 `ai_highlights`）。
+- **公告排雷**：默认对重点候选做近期公告负面关键词抽检，**卡片内优先预留公告预警篇幅并置于策略与形态概览之前**；离线或接口异常时降级写入 `degradation`，不影响日报生成。
+- **公开战绩双赛道（`scripts/track_record.py`）**：保留原有规则榜（`track=rules`）；当环境配置了 LLM Key 时，会在规则 pass 完成后自动追加 A 股 `AI` 赛道（`track=ai`，默认 `--ai-track auto`，LLM 超时/降级不影响规则榜落盘，无 Key 的 fork 自动仅跑规则榜）。**规则 vs AI 严格按同一策略共同信号日配对计算差值（配对天数 < 10 隐藏差值），单列 AI 缺失率与重合度。** 若有本地日线包，会一并记录盘面 7 桶收益分布、中位数收益与形态雷达快照（含 20 日迷你 K 线）到 `site/patterns.json`。Fork 启用、GitHub Pages 与 Cloudflare Pages 镜像步骤见 [deployment.md](deployment.md)。
+
 ## Python 调用
 
 ```python
@@ -200,8 +262,29 @@ alphasift evaluate-batch --limit 20 --explain
 alphasift runs --strategy dual_low --json
 ```
 
-评估会用保存时价格与评估时最新快照价格计算 T+N 收益、胜率、缺失报价、交易成本扣减、等权组合摘要和形态后验标签。启用 `--with-price-path` 后，会额外估算最大回撤和最大浮盈。
+未指定 `--window` 时，评估用保存时价格与最新快照价格计算收益、胜率、缺失报价、交易成本扣减、等权组合摘要和形态后验标签。启用 `--with-price-path` 后，会额外估算最大回撤和最大浮盈。
 `evaluate-batch` / `evaluate-strategies` 还会输出 `failure_review` 和 `event_signal_review`，用于定位反复失效的策略、事件信号、风险 flag、形态状态和数据问题，并沉淀可偏好/规避的事件标签。`event_signal_review.strategy_patch_suggestions` 会把策略级事件胜率转换成可审阅的 `screening.event_profile` YAML 片段，方便后续把稳定的 prefer/avoid 结论落回策略。
+
+多窗口 T+N 基准对比（例如同时检查 T+5 / T+10 / T+20 相对于市场基准指数的超额收益）：
+
+```bash
+alphasift evaluate-strategies --market cn --window 5,10,20 --explain
+alphasift evaluate-strategies --market us --window 5,10,20 --entry-mode next_open --json
+alphasift evaluate <run_id> --window 5 --entry-mode next_open --explain
+```
+
+`--entry-mode close` 是默认的收盘入场口径。`--entry-mode next_open` 适用于收盘后才拿到报告的场景，从入场截止日后首根可用日 K 的开盘价算起。首根日 K 计为 T+1，包含其最高和最低价，第 N 根日 K 的收盘价为计划退出价。停牌或缺日 K 时等待个股首个可用交易日入场，基准有对应的更早交易日时会标记 `entry_delayed_missing_bar`。个股缺开盘价时显示 `no_entry_open`。基准采用个股实际入场日的开盘价和退出日的收盘价，缺价时仅展示个股收益，并提示原因。
+
+A 股开盘一字涨停的候选记为 `untradable_limit_up`，摘要单列数量和占候选总数的百分比。计划退出日一字跌停时，标记 `exit_delayed_limit_down` 并顺延到首个可退出日的收盘。未能退出或日 K 数量不足的窗口显示 `pending`。不可成交和未完成样本均不计入平均收益和胜率。
+
+自动化公开跟踪脚本（`scripts/track_record.py`）支持分段成交口径（默认 `--entry-mode auto`，由 `ALPHASIFT_NEXT_OPEN_SWITCH_DATE` 控制，默认 `2026-11-21`，可用 `--next-open-from` 覆盖）：切换日之前的历史运行保留 `close` 口径并将不可成交比例标记为 `未评估`（`untradable_share_pct = null`）；切换日起自动按 `--entry-mode next_open` 结合 DailyPack 未复权原始价格判定 A 股一字涨跌停。脚本批量跑完同一交易时段的全部分市场策略、执行多窗口基准评估并生成看板站点数据：
+
+```bash
+python scripts/track_record.py screen --session asia --track track --pack-dir "$ALPHASIFT_PACK_DIR"
+python scripts/track_record.py patterns --track track --pack-dir "$ALPHASIFT_PACK_DIR" --expected-trade-date 2026-11-20 --with-replay
+python scripts/track_record.py evaluate --markets cn,hk --track track --pack-dir "$ALPHASIFT_PACK_DIR"
+python scripts/track_record.py build --track track
+```
 
 ## 自定义策略
 

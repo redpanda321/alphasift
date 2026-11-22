@@ -1,4 +1,5 @@
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ def test_disabled_strategies_are_not_listed():
     assert "oversold_reversal" in strategies
     assert "quality_value" in strategies
     assert "shrink_pullback" in strategies
+    assert "us_momentum_quality" in strategies
     assert "volume_breakout" in strategies
 
 
@@ -37,11 +39,14 @@ def test_list_strategies_returns_enabled_strategies_only():
         "blue_chip_income",
         "capital_heat",
         "dual_low",
+        "global_value",
+        "lifecycle_ah",
         "low_volatility_quality",
         "momentum_quality",
         "oversold_reversal",
         "quality_value",
         "shrink_pullback",
+        "us_momentum_quality",
         "volume_breakout",
     ]
 
@@ -50,7 +55,8 @@ def test_dual_low_strategy_uses_dynamic_snapshot_signals():
     strat = load_strategy(Path("strategies/dual_low.yaml"))
     screening = strat.screening
 
-    assert strat.version == "1.2"
+    assert strat.version == "1.3"
+    assert screening.portfolio_profile["mode"] == "hard_cap"
     assert "dynamic_signal" in strat.tags
     assert screening.hard_filters.pe_ttm_min == 0
     assert screening.hard_filters.pb_min == 0
@@ -69,13 +75,32 @@ def test_builtin_strategy_factor_weights_are_normalized_and_diversified():
     for strat in strategies.values():
         weights = strat.screening.factor_weights
         assert sum(weights.values()) == pytest.approx(1.0), strat.name
-        assert len([factor for factor, weight in weights.items() if weight > 0]) >= 4, strat.name
+        if strat.screening.lifecycle_profile:
+            # The lifecycle factor is itself a documented multi-component
+            # A/H score built from price position, pivots, momentum and volume.
+            assert weights == {"lifecycle": 1.0}
+        else:
+            assert len([factor for factor, weight in weights.items() if weight > 0]) >= 4, strat.name
 
     for name in ("dual_low", "quality_value"):
         weights = strategies[name].screening.factor_weights
         assert weights["value"] <= 0.34
         assert weights["momentum"] > 0
         assert weights["activity"] > 0
+
+
+def test_cn_strategies_enforce_hard_cap_and_mirror_sync():
+    repo_dir = Path("strategies")
+    bundled_dir = Path("alphasift/strategies")
+    strategies = load_all_strategies(repo_dir)
+    cn_strats = [s for s in strategies.values() if "cn" in s.screening.market_scope]
+    assert len(cn_strats) >= 10
+    for strat in cn_strats:
+        pp = strat.screening.portfolio_profile
+        if not strat.screening.lifecycle_profile:
+            assert pp.get("mode") == "hard_cap", strat.name
+            assert pp.get("max_same_bucket") == 1, strat.name
+        assert (bundled_dir / f"{strat.name}.yaml").read_bytes() == (repo_dir / f"{strat.name}.yaml").read_bytes(), strat.name
 
 
 def test_strategy_info_exposes_catalog_capabilities():
@@ -412,3 +437,71 @@ def test_load_strategy_rejects_unknown_profile_key(tmp_path):
 
     with pytest.raises(ValueError, match="Unknown keys"):
         load_strategy(path)
+
+
+def test_git_tracked_strategies_are_bundled_in_package():
+    repo_dir = Path("strategies")
+    bundled_dir = Path("alphasift/strategies")
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "strategies/*.yaml"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        proc = None
+
+    if proc is not None and proc.returncode == 0 and proc.stdout.strip():
+        tracked_files = [
+            Path(line.strip())
+            for line in proc.stdout.splitlines()
+            if line.strip() and Path(line.strip()).parent == repo_dir
+        ]
+    else:
+        tracked_files = [repo_dir / "us_momentum_quality.yaml"]
+
+    assert tracked_files
+    for repo_file in tracked_files:
+        bundled_file = bundled_dir / repo_file.name
+        assert bundled_file.is_file(), f"Missing bundled strategy mirror: {bundled_file}"
+        assert repo_file.read_bytes() == bundled_file.read_bytes()
+
+
+def test_builtin_momentum_and_defensive_strategies_enable_dispersion_and_hard_caps():
+    strategies = load_all_strategies(Path("strategies"))
+
+    for name in ("balanced_alpha", "momentum_quality", "low_volatility_quality", "us_momentum_quality"):
+        strat = strategies[name]
+        assert strat.screening.scoring_profile["factor_rank_blend"] == pytest.approx(1.0)
+        assert strat.screening.portfolio_profile["mode"] == "hard_cap"
+
+    blue_chip = strategies["blue_chip_income"]
+    assert blue_chip.screening.portfolio_profile["mode"] == "hard_cap"
+    assert "factor_rank_blend" not in blue_chip.screening.scoring_profile
+
+
+def test_load_strategy_validates_factor_rank_blend_bounds(tmp_path):
+    def _write_cfg(value: str) -> Path:
+        path = tmp_path / "blend.yaml"
+        path.write_text(
+            "\n".join([
+                "name: blend_test",
+                "display_name: Blend Test",
+                "description: demo",
+                "screening:",
+                "  enabled: true",
+                "  market_scope: [cn]",
+                "  scoring_profile:",
+                f"    factor_rank_blend: {value}",
+            ]),
+            encoding="utf-8",
+        )
+        return path
+
+    valid = load_strategy(_write_cfg("0.6"))
+    assert valid.screening.scoring_profile["factor_rank_blend"] == pytest.approx(0.6)
+
+    for bad_value in ("1.2", "-0.1", "true", '"bad"', "null"):
+        with pytest.raises(ValueError, match="factor_rank_blend"):
+            load_strategy(_write_cfg(bad_value))

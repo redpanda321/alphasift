@@ -87,6 +87,7 @@ def screen(
         "strategy_category": result.strategy_category,
         "market": result.market,
         "snapshot_count": result.snapshot_count,
+        "snapshot_source": result.snapshot_source,
         "after_filter_count": result.after_filter_count,
         "llm_ranked": result.llm_ranked,
         "llm_market_view": result.llm_market_view,

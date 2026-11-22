@@ -4,19 +4,25 @@
 Pluggable adapter for AlphaSift's L1 pipeline. Fetches a configurable
 equity universe and returns the standard snapshot DataFrame schema.
 
-HK is not supported yet: there is no HK universe source or ticker
-configuration path, so ``market="hk"`` is rejected at the pipeline level
-rather than silently screening the US pool.
+Since the market registry, US runs use the Yahoo screener
+(``snapshot_yahoo``) first; this per-ticker adapter is the fallback, and the
+only path when ``ALPHASIFT_US_TICKERS`` pins an explicit list.
 """
 
 import logging
 import os
+import random
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 _SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+_US_LISTED_EXCHANGES = ("NMS", "NGM", "NCM", "NYQ", "ASE")
+_US_SCREEN_PAGE_SIZE = 250
+_US_SCREEN_MAX_RETRIES = 3
 
 _DEFAULT_US_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "BRK-B",
@@ -29,25 +35,16 @@ _DEFAULT_US_UNIVERSE = [
 
 
 def fetch_us_universe(source: str = "auto") -> list[str]:
-    """Return a list of US equity tickers.
-
-    Sources:
-        sp500   — scrape S&P 500 from Wikipedia
-        env     — read ALPHASIFT_US_TICKERS (comma-separated)
-        default — hardcoded top-50 US large-caps
-        auto    — try sp500 → env → default
-    """
+    """Return US equity tickers from a full or explicitly limited source."""
     src = source.lower()
-    if src == "auto":
-        for s in ("sp500", "env", "default"):
-            try:
-                tickers = fetch_us_universe(s)
-                if tickers:
-                    logger.info("US universe from %s: %d tickers", s, len(tickers))
-                    return tickers
-            except Exception as e:
-                logger.debug("US universe source %s failed: %s", s, e)
-        return list(_DEFAULT_US_UNIVERSE)
+    if src in {"auto", "full", "yahoo_screen"}:
+        quotes = _fetch_yahoo_screen_quotes()
+        tickers = [str(item.get("symbol") or "").strip() for item in quotes]
+        tickers = [ticker for ticker in tickers if ticker]
+        if not tickers:
+            raise RuntimeError("Yahoo listed-equity screen returned no US tickers")
+        logger.info("US universe from yahoo_screen: %d tickers", len(tickers))
+        return tickers
 
     if src == "sp500":
         return _fetch_sp500_tickers()
@@ -60,6 +57,113 @@ def fetch_us_universe(source: str = "auto") -> list[str]:
         return list(_DEFAULT_US_UNIVERSE)
     else:
         raise ValueError(f"Unknown US universe source: {source}")
+
+
+def _fetch_yahoo_screen_quotes() -> list[dict]:
+    """Fetch every exchange-listed US equity, rejecting partial pagination."""
+    import yfinance as yf
+
+    query = yf.EquityQuery("and", [
+        yf.EquityQuery("eq", ["region", "us"]),
+        yf.EquityQuery("is-in", ["exchange", *_US_LISTED_EXCHANGES]),
+    ])
+    quotes: list[dict] = []
+    expected_total: int | None = None
+    offset = 0
+
+    while expected_total is None or offset < expected_total:
+        response = None
+        last_error: Exception | None = None
+        for attempt in range(_US_SCREEN_MAX_RETRIES):
+            try:
+                response = yf.screen(
+                    query,
+                    offset=offset,
+                    size=_US_SCREEN_PAGE_SIZE,
+                    sortField="ticker",
+                    sortAsc=True,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < _US_SCREEN_MAX_RETRIES:
+                    time.sleep(0.25 * (attempt + 1))
+        if response is None:
+            raise RuntimeError(
+                f"Yahoo US equity screen failed at offset {offset}: {last_error}"
+            ) from last_error
+
+        page = response.get("quotes") or []
+        page_total = int(response.get("total") or 0)
+        if expected_total is None:
+            expected_total = page_total
+        elif page_total != expected_total:
+            logger.warning(
+                "Yahoo US equity total changed during pagination: %d -> %d",
+                expected_total,
+                page_total,
+            )
+            expected_total = max(expected_total, page_total)
+        if not page and offset < expected_total:
+            raise RuntimeError(
+                f"Yahoo US equity screen returned a partial result at offset {offset} "
+                f"of {expected_total}"
+            )
+        quotes.extend(item for item in page if isinstance(item, dict))
+        offset += len(page)
+
+    deduplicated: dict[str, dict] = {}
+    for quote in quotes:
+        symbol = str(quote.get("symbol") or "").strip()
+        if symbol:
+            deduplicated[symbol] = quote
+    if expected_total and len(deduplicated) < expected_total:
+        raise RuntimeError(
+            "Yahoo US equity screen was incomplete after de-duplication: "
+            f"expected {expected_total}, received {len(deduplicated)}"
+        )
+    return list(deduplicated.values())
+
+
+def _screen_quotes_to_snapshot(quotes: list[dict]) -> pd.DataFrame:
+    """Map Yahoo screener records to AlphaSift's snapshot schema."""
+    rows = []
+    for quote in quotes:
+        symbol = str(quote.get("symbol") or "").strip()
+        price = quote.get("regularMarketPrice")
+        if not symbol or price is None:
+            continue
+        volume = quote.get("regularMarketVolume") or 0
+        average_volume = quote.get("averageDailyVolume3Month") or 0
+        shares = quote.get("sharesOutstanding") or quote.get("impliedSharesOutstanding") or 0
+        rows.append({
+            "code": symbol,
+            "name": quote.get("shortName") or quote.get("longName") or symbol,
+            "price": price,
+            "change_pct": quote.get("regularMarketChangePercent"),
+            "amount": float(volume) * float(price),
+            "total_mv": quote.get("marketCap"),
+            "circ_mv": quote.get("marketCap"),
+            "pe_ratio": quote.get("trailingPE"),
+            "pb_ratio": quote.get("priceToBook"),
+            "volume_ratio": round(float(volume) / float(average_volume), 2) if average_volume else None,
+            "turnover_rate": round(float(volume) / float(shares) * 100, 4) if shares else None,
+            "industry": quote.get("industry") or quote.get("sector") or "",
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        raise RuntimeError("Yahoo listed-equity screen returned no valid quote rows")
+    numeric_cols = [
+        "price", "change_pct", "amount", "total_mv", "circ_mv",
+        "pe_ratio", "pb_ratio", "volume_ratio", "turnover_rate",
+    ]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["price"])
+    df = df[df["price"] > 0].reset_index(drop=True)
+    df.attrs["snapshot_source"] = "yahoo_screen"
+    return df
 
 
 def _fetch_sp500_tickers() -> list[str]:
@@ -78,20 +182,25 @@ def fetch_us_snapshot(
 ) -> pd.DataFrame:
     """Fetch US equity snapshot in AlphaSift standard schema.
 
-    Uses yfinance to fetch current data for each ticker. Returns a
-    DataFrame matching the standard snapshot columns: code, name, price,
-    change_pct, amount, total_mv, pe_ratio, pb_ratio, volume_ratio,
-    turnover_rate, industry.
+    The default path paginates Yahoo's complete listed-equity screen.
+    Explicit tickers and explicitly limited universe sources retain the
+    historical-price path. The returned frame uses the standard snapshot
+    columns consumed by AlphaSift filters.
     """
     import yfinance as yf
+
+    if tickers is None and universe_source.lower() in {"auto", "full", "yahoo_screen"}:
+        df = _screen_quotes_to_snapshot(_fetch_yahoo_screen_quotes())
+        logger.info("US snapshot: %d rows from yahoo_screen", len(df))
+        return df
 
     if tickers is None:
         tickers = fetch_us_universe(universe_source)
 
     logger.info("Fetching US snapshot for %d tickers", len(tickers))
 
-    hist_end = pd.Timestamp.now().normalize()
-    hist_start = hist_end - pd.Timedelta(days=30)
+    hist_end = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None) + pd.Timedelta(days=2)
+    hist_start = hist_end - pd.Timedelta(days=32)
     data = yf.download(
         tickers,
         start=hist_start.strftime("%Y-%m-%d"),
@@ -103,8 +212,9 @@ def fetch_us_snapshot(
     )
 
     rows = []
+    quote_dates: list[str] = []
 
-    def _process_ticker(ticker: str) -> dict | None:
+    def _process_ticker(ticker: str) -> tuple[dict, str] | None:
         try:
             if len(tickers) == 1:
                 hist = data.copy()
@@ -121,6 +231,17 @@ def fetch_us_snapshot(
             if len(hist) < 2:
                 return None
 
+            raw_idx = hist.index[-1]
+            bar_date = ""
+            if isinstance(raw_idx, (pd.Timestamp, datetime, date)) or (
+                isinstance(raw_idx, str) and raw_idx.strip()
+            ):
+                latest_ts = pd.to_datetime(raw_idx, errors="coerce")
+                if pd.notna(latest_ts):
+                    if getattr(latest_ts, "tzinfo", None) is not None:
+                        latest_ts = latest_ts.tz_convert("America/New_York")
+                    bar_date = latest_ts.strftime("%Y-%m-%d")
+
             latest = hist.iloc[-1]
             prev = hist.iloc[-2]
             price = float(latest["Close"])
@@ -129,6 +250,7 @@ def fetch_us_snapshot(
             change_pct = ((price - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
 
             vol_20d = float(hist["Volume"].tail(20).mean())
+            vol_10d = float(hist["Volume"].tail(10).mean())
             volume_ratio = (volume / vol_20d) if vol_20d > 0 else 1.0
 
             info = yf.Ticker(ticker).fast_info
@@ -136,20 +258,25 @@ def fetch_us_snapshot(
             shares = getattr(info, "shares", None) or 0
             turnover_rate = (volume / shares * 100) if shares > 0 else 0.0
 
-            return {
-                "code": ticker,
-                "name": ticker,
-                "price": price,
-                "change_pct": round(change_pct, 2),
-                "amount": round(volume * price, 0),
-                "total_mv": market_cap,
-                "circ_mv": market_cap,
-                "pe_ratio": None,
-                "pb_ratio": None,
-                "volume_ratio": round(volume_ratio, 2),
-                "turnover_rate": round(turnover_rate, 4),
-                "industry": "",
-            }
+            return (
+                {
+                    "code": ticker,
+                    "name": ticker,
+                    "price": price,
+                    "change_pct": round(change_pct, 2),
+                    "amount": round(volume * price, 0),
+                    "avg_amount": round(vol_10d * price, 0),
+                    "avg_amount_usd": round(vol_10d * price, 0),
+                    "total_mv": market_cap,
+                    "circ_mv": market_cap,
+                    "pe_ratio": None,
+                    "pb_ratio": None,
+                    "volume_ratio": round(volume_ratio, 2),
+                    "turnover_rate": round(turnover_rate, 4),
+                    "industry": "",
+                },
+                bar_date,
+            )
         except Exception as e:
             logger.debug("Failed to process %s: %s", ticker, e)
             return None
@@ -159,7 +286,10 @@ def fetch_us_snapshot(
         for future in as_completed(futures):
             result = future.result()
             if result:
-                rows.append(result)
+                row, bar_date = result
+                rows.append(row)
+                if bar_date:
+                    quote_dates.append(bar_date)
 
     if not rows:
         raise RuntimeError("yfinance returned no valid data for any ticker")
@@ -167,7 +297,7 @@ def fetch_us_snapshot(
     df = pd.DataFrame(rows)
 
     numeric_cols = [
-        "price", "change_pct", "amount", "total_mv", "circ_mv",
+        "price", "change_pct", "amount", "avg_amount", "avg_amount_usd", "total_mv", "circ_mv",
         "pe_ratio", "pb_ratio", "volume_ratio", "turnover_rate",
     ]
     for col in numeric_cols:
@@ -180,6 +310,9 @@ def fetch_us_snapshot(
     _enrich_info_fields(df)
 
     df.attrs["snapshot_source"] = "yfinance"
+    df.attrs["market"] = "us"
+    if quote_dates:
+        df.attrs["quote_date"] = max(quote_dates)
     logger.info("US snapshot: %d rows from yfinance", len(df))
     return df
 
@@ -187,6 +320,8 @@ def fetch_us_snapshot(
 def _enrich_info_fields(df: pd.DataFrame) -> None:
     """Best-effort enrichment of pe_ratio, pb_ratio, industry from yfinance info."""
     import yfinance as yf
+
+    from alphasift.snapshot_yahoo import sanitize_yahoo_pb
 
     needs_pe = df["pe_ratio"].isna().sum() > len(df) * 0.5
     if not needs_pe:
@@ -199,7 +334,13 @@ def _enrich_info_fields(df: pd.DataFrame) -> None:
             if pd.isna(df.at[idx, "pe_ratio"]) or df.at[idx, "pe_ratio"] == 0:
                 df.at[idx, "pe_ratio"] = info.get("trailingPE")
             if pd.isna(df.at[idx, "pb_ratio"]) or df.at[idx, "pb_ratio"] == 0:
-                df.at[idx, "pb_ratio"] = info.get("priceToBook")
+                trading_currency = str(info.get("currency") or "")
+                financial_currency = str(info.get("financialCurrency") or trading_currency)
+                df.at[idx, "pb_ratio"] = sanitize_yahoo_pb(
+                    info.get("priceToBook"),
+                    trading_currency=trading_currency,
+                    financial_currency=financial_currency,
+                )
             if not df.at[idx, "industry"]:
                 df.at[idx, "industry"] = info.get("industry", "")
             if not df.at[idx, "name"] or df.at[idx, "name"] == ticker:
@@ -212,34 +353,75 @@ def fetch_daily_history_yfinance(
     ticker: str,
     *,
     lookback_days: int = 120,
+    retries: int = 3,
 ) -> pd.DataFrame:
     """Fetch daily OHLCV history for a US ticker via yfinance.
 
     Returns a DataFrame with columns: date, open, high, low, close, volume
     matching the schema expected by alphasift.daily's enrichment logic.
+
+    Thousands of tickers get fetched per daily scan from a single provider
+    (deliberately, so both cross-check windows share one adjustment basis);
+    transient rate-limiting or network blips on any single request otherwise
+    excludes that stock from the whole scan. Retries with backoff turn most
+    of those transient failures into successes instead of a permanent FAILED.
     """
     import yfinance as yf
 
-    end = pd.Timestamp.now().normalize()
+    # Yahoo's end date is exclusive. Include today's completed session; never
+    # silently lag one session merely because the machine is in US time.
+    timezone = "Asia/Shanghai" if ticker.endswith((".SS", ".SZ", ".BJ")) else "America/New_York"
+    local_now = pd.Timestamp.now(tz=timezone)
+    end = local_now.normalize().tz_localize(None) + pd.Timedelta(days=1)
     start = end - pd.Timedelta(days=max(lookback_days * 2, 180))
-    hist = yf.download(
-        ticker,
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
-        auto_adjust=True,
-        progress=False,
-    )
+    history_range = {"period": "max"} if lookback_days == 0 else {
+        "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")
+    }
+    attempts = max(1, int(retries))
+    hist = None
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            # The scan already parallelizes by symbol. Disabling yfinance's
+            # nested downloader threads avoids curl_cffi lock contention in
+            # long-lived jobs; an explicit timeout prevents a single ticker
+            # from blocking a full scan.
+            hist = yf.download(
+                ticker,
+                **history_range,
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+                timeout=20,
+            )
+        except Exception as exc:  # noqa: BLE001 -- retried below; final attempt re-raises
+            last_error = exc
+            hist = None
+        if hist is not None and not hist.empty:
+            break
+        if attempt + 1 < attempts:
+            time.sleep(min(1.5 * (2**attempt), 10) + random.uniform(0, 0.5))
     if hist is None or hist.empty:
+        if last_error is not None:
+            raise RuntimeError(f"yfinance daily history empty for {ticker}") from last_error
         raise RuntimeError(f"yfinance daily history empty for {ticker}")
 
     if isinstance(hist.columns, pd.MultiIndex):
         hist.columns = hist.columns.droplevel("Ticker")
 
-    hist = hist.tail(max(lookback_days, 30)).copy()
+    from alphasift.freshness import latest_completed_session
+
+    completed_session = latest_completed_session(
+        "cn" if timezone == "Asia/Shanghai" else "us", local_now
+    )
+    hist = hist[hist.index.strftime("%Y-%m-%d") <= completed_session]
+    hist = hist.tail(max(lookback_days, 30)).copy() if lookback_days else hist.copy()
     hist = hist.rename(columns={
         "Open": "开盘", "High": "最高", "Low": "最低",
         "Close": "收盘", "Volume": "成交量",
     })
     hist.index.name = "日期"
     hist = hist.reset_index()
+    hist.attrs["data_source"] = "Yahoo Finance/yfinance adjusted daily OHLCV"
+    hist.attrs["retrieved_at"] = pd.Timestamp.now(tz="UTC").isoformat()
     return hist

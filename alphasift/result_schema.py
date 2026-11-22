@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import copy
+
 SCREEN_RESULT_SCHEMA_VERSION = 1
+DAILY_REPORT_SCHEMA_VERSION = 1
 
 SCREEN_RESULT_SCHEMA: dict[str, object] = {
     "schema_version": SCREEN_RESULT_SCHEMA_VERSION,
@@ -11,6 +14,7 @@ SCREEN_RESULT_SCHEMA: dict[str, object] = {
     "top_level_fields": [
         "strategy",
         "market",
+        "track",
         "strategy_version",
         "strategy_category",
         "snapshot_count",
@@ -30,6 +34,11 @@ SCREEN_RESULT_SCHEMA: dict[str, object] = {
         "risk_enabled",
         "portfolio_diversity_enabled",
         "portfolio_concentration_notes",
+        "portfolio_topic_exposure",
+        "overconcentrated_topics",
+        "replacement_candidates",
+        "daily_source_counts",
+        "daily_quality_flag_counts",
         "created_at",
     ],
     "pick_fields": [
@@ -48,6 +57,11 @@ SCREEN_RESULT_SCHEMA: dict[str, object] = {
         "portfolio_flags",
         "industry",
         "concepts",
+        "topic_alignment_status",
+        "topic_alignment_role",
+        "topic_alignment_reason",
+        "matched_topics",
+        "unmatched_topics",
         "board_heat_score",
         "board_heat_summary",
         "daily_quality_score",
@@ -69,6 +83,8 @@ SCREEN_RESULT_SCHEMA: dict[str, object] = {
         "deep_analysis_operation_advice",
         "deep_analysis_trend_prediction",
         "deep_analysis_risk_flags",
+        "llm_watch_items",
+        "llm_invalidators",
     ],
     "ui_card_fields": {
         "identity": ["rank", "code", "name", "final_score", "screen_score"],
@@ -77,8 +93,22 @@ SCREEN_RESULT_SCHEMA: dict[str, object] = {
             "source_errors",
             "daily_source",
             "daily_quality_flags",
+            "daily_source_counts",
+            "daily_quality_flag_counts",
         ],
         "risk": ["risk_level", "risk_flags", "portfolio_flags", "risk_summary"],
+        "topic_alignment": [
+            "topic_alignment_status",
+            "topic_alignment_role",
+            "topic_alignment_reason",
+            "matched_topics",
+            "unmatched_topics",
+        ],
+        "portfolio_exposure": [
+            "portfolio_topic_exposure",
+            "overconcentrated_topics",
+            "replacement_candidates",
+        ],
         "watch": [
             "llm_watch_items",
             "llm_invalidators",
@@ -100,11 +130,50 @@ SCREEN_RESULT_SCHEMA: dict[str, object] = {
 
 def screen_result_schema() -> dict[str, object]:
     """Return a copy of the stable ScreenResult schema metadata."""
+    return copy.deepcopy(SCREEN_RESULT_SCHEMA)
+
+
+DAILY_REPORT_SCHEMA: dict[str, object] = {
+    "schema_version": DAILY_REPORT_SCHEMA_VERSION,
+    "object": "DailyReport",
+    "top_level_fields": [
+        "schema_version",
+        "object",
+        "trade_date",
+        "pack_trade_date",
+        "expected_trade_date",
+        "pack_is_stale",
+        "stale_reason",
+        "detail_url",
+        "market",
+        "generated_at",
+        "usage_policy",
+        "market_regime",
+        "strategies",
+        "ai_highlights",
+        "cross_strategy_synthesis",
+        "ai_brief",
+        "patterns",
+        "announcement_risks",
+        "market_news",
+        "degradation",
+        "im_card_markdown",
+        "im_card_chars",
+        "non_goals",
+    ],
+    "pattern_sections": ["active", "experimental"],
+    "im_card_max_chars": 1199,
+    "non_goals": [
+        "量化形态观测与回测基准，非投资建议。",
+        "Market regime stage is reporting and slice metadata only; never adjusts strategy weights.",
+        "Relay statistics do not generate stock-picking signals.",
+    ],
+}
+
+
+def daily_report_schema() -> dict[str, object]:
+    """Return a copy of the stable DailyReport schema metadata."""
     return {
-        key: value.copy()
-        if isinstance(value, dict)
-        else list(value)
-        if isinstance(value, list)
-        else value
-        for key, value in SCREEN_RESULT_SCHEMA.items()
+        key: list(value) if isinstance(value, list) else value
+        for key, value in DAILY_REPORT_SCHEMA.items()
     }

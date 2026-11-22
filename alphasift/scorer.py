@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """screen_score calculation."""
 
+import math
+import re
+
 import pandas as pd
 
 from alphasift.models import ScreeningConfig
@@ -14,8 +17,10 @@ _FACTOR_COLUMNS = {
     "stability": "factor_stability_score",
     "size": "factor_size_score",
     "theme_heat": "factor_theme_heat_score",
+    "lifecycle": "factor_lifecycle_score",
     "topic_alignment": "factor_topic_alignment_score",
 }
+_RANK_BLENDABLE_FACTORS = frozenset({"momentum", "reversal", "activity", "stability"})
 _DEFAULT_SCORING_PROFILE = {
     "momentum_base": 60.0,
     "momentum_intraday_slope": 5.0,
@@ -84,7 +89,37 @@ _DEFAULT_SCORING_PROFILE = {
     "topic_alignment_match_bonus": 25.0,
     "topic_alignment_heat_weight": 0.25,
     "topic_alignment_unmatched_penalty": 12.0,
+    "factor_rank_blend": 0.0,
 }
+
+
+def _effective_rank_blend(raw_blend: object, sample_size: int) -> float:
+    """Compute sample-size-tapered rank blend weight in [0.0, 1.0]."""
+    if raw_blend is None or isinstance(raw_blend, bool):
+        return 0.0
+    try:
+        val = float(raw_blend)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(val):
+        return 0.0
+    clamped = min(max(val, 0.0), 1.0)
+    if clamped <= 0.0 or sample_size <= 5:
+        return 0.0
+    if sample_size >= 30:
+        return clamped
+    return clamped * ((sample_size - 5) / 25.0)
+
+
+def _blend_factor_rank(series: pd.Series, effective_blend: float) -> pd.Series:
+    """Blend a raw continuous factor score with its cross-sectional rank percentile."""
+    if effective_blend <= 0.0:
+        return series
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.nunique(dropna=True) <= 1:
+        return series
+    ranked = _rank_score(numeric, lower_is_better=False, na_score=50.0)
+    return ((1.0 - effective_blend) * numeric.fillna(50.0) + effective_blend * ranked).clip(0, 100)
 
 
 def compute_screen_scores(df: pd.DataFrame, config: ScreeningConfig) -> pd.DataFrame:
@@ -97,11 +132,18 @@ def compute_screen_scores(df: pd.DataFrame, config: ScreeningConfig) -> pd.DataF
     for name, series in factors.items():
         result[_FACTOR_COLUMNS[name]] = series.round(4)
 
+    profile = _scoring_profile(config)
+    effective_blend = _effective_rank_blend(profile.get("factor_rank_blend", 0.0), len(result))
     weights = _normalized_factor_weights(config)
     result["screen_score"] = 0.0
     for factor, weight in weights.items():
         if factor in factors:
-            result["screen_score"] += factors[factor] * weight
+            component = (
+                _blend_factor_rank(factors[factor], effective_blend)
+                if factor in _RANK_BLENDABLE_FACTORS and effective_blend > 0.0
+                else factors[factor]
+            )
+            result["screen_score"] += component * weight
 
     result["screen_score"] = result["screen_score"].clip(0, 100)
 
@@ -145,6 +187,7 @@ def _compute_factor_scores(df: pd.DataFrame, config: ScreeningConfig | None = No
         "stability": _compute_stability_score(df, profile),
         "size": _compute_size_score(df),
         "theme_heat": _compute_theme_heat_score(df, profile),
+        "lifecycle": _compute_lifecycle_score(df),
         "topic_alignment": _compute_topic_alignment_score(df, profile),
     }
 
@@ -152,8 +195,14 @@ def _compute_factor_scores(df: pd.DataFrame, config: ScreeningConfig | None = No
 def _scoring_profile(config: ScreeningConfig) -> dict[str, float]:
     profile = dict(_DEFAULT_SCORING_PROFILE)
     for key, value in (config.scoring_profile or {}).items():
-        if key in profile:
-            profile[key] = float(value)
+        if key not in profile or value is None or isinstance(value, bool):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            profile[key] = numeric
     return profile
 
 
@@ -382,6 +431,13 @@ def _compute_size_score(df: pd.DataFrame) -> pd.Series:
     return _rank_score(log_mv.where(mv > 0), lower_is_better=False, na_score=35)
 
 
+def _compute_lifecycle_score(df: pd.DataFrame) -> pd.Series:
+    """Return the absolute A/H lifecycle score computed from multi-year history."""
+    if "lifecycle_score" not in df.columns:
+        return pd.Series(0.0, index=df.index)
+    return pd.to_numeric(df["lifecycle_score"], errors="coerce").fillna(0).clip(0, 100)
+
+
 def _compute_theme_heat_score(df: pd.DataFrame, profile: dict[str, float]) -> pd.Series:
     base = pd.Series(profile["theme_heat_unknown_score"], index=df.index)
     if "board_heat_score" in df.columns:
@@ -464,15 +520,62 @@ def _compute_topic_alignment_score(df: pd.DataFrame, profile: dict[str, float]) 
     return pd.Series(scores, index=df.index).clip(0, 100)
 
 
+def explain_topic_alignment(
+    industry: object,
+    concepts: object,
+    board_heat_summary: object,
+) -> dict[str, object]:
+    """Return deterministic topic alignment metadata for one candidate."""
+    ind_tokens = _topic_tokens(industry)
+    con_tokens = _topic_tokens(concepts)
+    cand_tokens = ind_tokens | con_tokens
+    route_tokens = _topic_tokens(board_heat_summary)
+    if not cand_tokens or not route_tokens:
+        return {
+            "status": "unassessed",
+            "role": "none" if cand_tokens else "",
+            "reason": "缺少题材或热点路线标签，无法评估对齐",
+            "matched_topics": [],
+            "unmatched_topics": sorted(route_tokens),
+        }
+    matched = sorted(cand_tokens & route_tokens)
+    unmatched = sorted(route_tokens - cand_tokens)
+    if matched:
+        direct_ind = bool(ind_tokens & route_tokens)
+        role = "direct_industry" if direct_ind else "concept_match"
+        reason = f"{'直接行业' if direct_ind else '概念题材'}命中热点路线: {', '.join(matched[:4])}"
+        return {
+            "status": "aligned",
+            "role": role,
+            "reason": reason,
+            "matched_topics": matched,
+            "unmatched_topics": unmatched,
+        }
+    return {
+        "status": "unmatched",
+        "role": "none",
+        "reason": f"候选标签({', '.join(sorted(cand_tokens)[:3])})未命中当前热点({', '.join(unmatched[:3])})",
+        "matched_topics": [],
+        "unmatched_topics": unmatched,
+    }
+
+
 def _topic_tokens(value: object) -> set[str]:
-    text = str(value or "").strip()
+    if value is None:
+        return set()
+    try:
+        if bool(pd.isna(value)):
+            return set()
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
     if not text or text.lower() in {"nan", "none", "<na>"}:
         return set()
-    normalized = text
-    for sep in ["|", ",", "，", ";", "；", "/"]:
-        normalized = normalized.replace(sep, " ")
     tokens = set()
-    for raw in normalized.split():
+    for part in re.split(r"[|,，;；/\n、]+", text):
+        raw = " ".join(part.split()).strip()
+        if not raw:
+            continue
         token = raw.split(":", 1)[0].strip()
         if token and token.lower() not in {"rank", "nan", "none", "<na>"}:
             tokens.add(token)

@@ -42,6 +42,7 @@ screen_score = Σ(factor_score × normalized_factor_weight)
 
 因子评分有默认曲线，但不再要求所有策略共用同一套硬编码阈值。策略 YAML 可以通过 `scoring_profile` 覆盖关键参数，例如：
 
+- `factor_rank_blend`：`0.0–1.0`，默认 `0.0`；在合成 `screen_score` 时将 `momentum`、`reversal`、`activity`、`stability` 按比例混入截面百分位排名以对齐估值/流动性因子的截面离散度（样本数 $n \le 5$ 自动归零、$5 < n < 30$ 线性过渡；`Pick.factor_scores` 仍保留原始公式分供 L3 `scorecard` 与解释层使用）
 - `momentum_chase_start_pct`：动量分开始惩罚追高的涨幅
 - `activity_ideal_volume_ratio`：活跃度分偏好的量比中心
 - `activity_ideal_turnover_rate`：活跃度分偏好的换手中心
@@ -140,11 +141,11 @@ LLM 输出：
 8. `watch_items` 和 `invalidators`：后续跟踪项和会推翻候选逻辑的观察点
 
 LLM 只能在候选池内重排，不能推荐候选池外股票，也不能替代硬筛条件。
-LLM 输出会经过 JSON 解析、代码覆盖率校验、重复代码/未知代码检查；不满足阈值时会重试，仍失败则回退到 `screen_score`。调用层支持 LiteLLM JSON mode、fallback models、多渠道 key/base_url 解析和高级 Router YAML。
+LLM 输出会经过 JSON 解析、代码覆盖率校验、重复代码/未知代码检查；不满足阈值时会重试，仍失败则回退到 `screen_score`。调用层采用零依赖 `requests` OpenAI/Gemini HTTP 客户端，支持 JSON mode、fallback models、多渠道 key/base_url 解析与来源隔离。
 
 ## 后验评估与形态标签
 
-`alphasift evaluate` 和 `evaluate-batch` 会用保存时价格与最新快照价格计算 T+N 收益，可通过 `EVALUATION_COST_BPS` 扣除往返成本。对带日 K 形态字段的候选，还会输出：
+`alphasift evaluate-strategies --window 5,10,20` 按入场交易日收盘到其后第 N 个交易日收盘计算真正的 T+N 收益（与基准同口径、同一复权基础；盘中选出的股票也以当日收盘为入场价），同时给出基准指数同期收益、超额收益（`average_excess_return_pct`）、跑赢基准比例（`beat_benchmark_rate`）和未到期数量（`pending_count`）。`alphasift evaluate` 和 `evaluate-batch` 会用保存时价格与最新快照价格计算至今收益，可通过 `EVALUATION_COST_BPS` 扣除往返成本。对带日 K 形态字段的候选，还会输出：
 
 - `breakout_follow_through`：突破候选达到 `EVALUATION_FOLLOW_THROUGH_PCT`
 - `failed_breakout`：突破候选跌破 `EVALUATION_FAILED_BREAKOUT_PCT`
@@ -177,12 +178,11 @@ LLM 输出会经过 JSON 解析、代码覆盖率校验、重复代码/未知代
 
 ### LLM 配置
 
-为便于复用 `daily_stock_analysis` 的配置，AlphaSift 支持同一套 LiteLLM 环境变量：
+为便于复用 `daily_stock_analysis` 的配置，AlphaSift 支持同一套多渠道与标准模型环境变量（v0.3 已移除 `LITELLM_CONFIG` Router YAML）：
 
-- `LITELLM_MODEL`
-- `LITELLM_FALLBACK_MODELS`
+- `LITELLM_MODEL`（默认 `gemini/gemini-3.8-flash`）
+- `LITELLM_FALLBACK_MODELS`（默认 `gemini/gemini-4-hydrogen`）
 - `LLM_CHANNELS` + `LLM_{NAME}_PROTOCOL/BASE_URL/API_KEY/API_KEYS/MODELS/ENABLED`
-- `LITELLM_CONFIG`
 - `OPENAI_API_KEY` / `OPENAI_BASE_URL`
 - `GEMINI_API_KEY` / `GEMINI_API_KEYS`
 - `DEEPSEEK_API_KEY`
