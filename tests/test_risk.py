@@ -254,3 +254,66 @@ def test_invalid_portfolio_mode_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="portfolio_profile.mode"):
         load_strategy(bad)
+
+
+def test_summarize_portfolio_exposure_flags_overconcentration_and_suggests_replacements():
+    from alphasift.models import Pick
+    from alphasift.risk import summarize_portfolio_exposure
+
+    selected = [
+        Pick(rank=1, code="601398", name="工商银行", final_score=88.0, screen_score=88.0, industry="银行"),
+        Pick(rank=2, code="601997", name="贵阳银行", final_score=86.0, screen_score=86.0, industry="银行"),
+        Pick(rank=3, code="600519", name="贵州茅台", final_score=82.0, screen_score=82.0, industry="白酒"),
+    ]
+    pool = [
+        Pick(rank=4, code="600036", name="招商银行", final_score=81.0, screen_score=81.0, industry="银行"),
+        Pick(rank=5, code="600030", name="中信证券", final_score=80.0, screen_score=80.0, industry="证券"),
+        Pick(rank=6, code="688981", name="中芯国际", final_score=79.0, screen_score=79.0, industry="半导体"),
+    ]
+    exposure, over, replacements = summarize_portfolio_exposure(
+        selected,
+        candidate_pool=pool,
+        max_same_bucket=1,
+    )
+    assert "金融" in exposure
+    assert exposure["金融"]["count"] == 2
+    assert exposure["金融"]["overconcentrated"] is True
+    assert over == ["金融"]
+    # Bank and broker candidates in crowded 金融 bucket are excluded; diverse candidates remain
+    rep_codes = [item["code"] for item in replacements]
+    assert "600036" not in rep_codes
+    assert "600030" not in rep_codes
+    assert rep_codes == ["688981"]
+
+    # Overlay & summary must agree even when picks carry non-theme concepts (e.g. "半导体" on 煤炭开采)
+    coal = [
+        Pick(rank=1, code="601088", name="中国神华", final_score=85.0, screen_score=85.0, industry="煤炭开采"),
+        Pick(
+            rank=2,
+            code="601225",
+            name="陕西煤业",
+            final_score=84.0,
+            screen_score=84.0,
+            industry="煤炭开采",
+            concepts="半导体|高股息",
+        ),
+    ]
+    coal_pool = [Pick(rank=3, code="601898", name="中煤能源", final_score=83.0, screen_score=83.0, industry="煤炭开采", concepts="芯片")]
+    coal_exp, coal_over, coal_rep = summarize_portfolio_exposure(coal, candidate_pool=coal_pool, max_same_bucket=1)
+    assert coal_over == ["煤炭开采"]
+    assert coal_exp["煤炭开采"]["count"] == 2
+    assert coal_rep == []
+
+    # replacement_limit=0 returns []; empty-sector pick with unmatched concept maps to "unclassified"; full bucket (== limit) excluded
+    zero_exp, _, zero_rep = summarize_portfolio_exposure(selected, candidate_pool=pool, max_same_bucket=1, replacement_limit=0)
+    assert zero_exp["消费"]["count"] == 1
+    assert zero_rep == []
+    same_cap_pool = [Pick(rank=7, code="000858", name="五粮液", final_score=89.0, screen_score=89.0, industry="白酒")]
+    _, _, cap_rep = summarize_portfolio_exposure(selected, candidate_pool=same_cap_pool, max_same_bucket=1)
+    assert cap_rep == []
+    uncls_exp, uncls_over, _ = summarize_portfolio_exposure(
+        [Pick(rank=1, code="000002", name="测试", final_score=70.0, screen_score=70.0, industry="", concepts="高股息")],
+        max_same_bucket=1,
+    )
+    assert "" not in uncls_exp
+    assert "unclassified" in uncls_exp and uncls_over == []

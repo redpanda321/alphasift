@@ -21,15 +21,15 @@ description: "全市场选股 Skill。Use when: 用户要按策略筛选 A 股�
 
 - 默认 `market="cn"`；`market` 也可以是 `us` / `hk` / `jp` / `kr` / `tw` / `in`（Yahoo 筛选器快照 + yfinance 日 K，代码为 Yahoo 代码如 `0700.HK`；无 hotspot/board_heat/tushare/候选级新闻等 A 股专属数据），需使用 `market_scope` 包含该市场的策略：`global_value`（us/hk/jp/kr/tw/in）或 `us_momentum_quality`（us）。韩国 PE/PB 来自 Naver Finance
 - 需要先在仓库根目录安装包：`pip install -e .`
-- 如需 LLM 排序，可设置 `LITELLM_MODEL`、`LLM_CHANNELS`、`LITELLM_CONFIG` 或旧变量 `LLM_API_KEY/LLM_MODEL/LLM_BASE_URL`
-- 可直接复用 `daily_stock_analysis` 的 LiteLLM 配置字段，包括 `OPENAI_*`、`GEMINI_*`、`DEEPSEEK_API_KEY`、`OLLAMA_API_BASE`
+- 如需 LLM 排序，可设置 `GEMINI_API_KEY`（默认主模型 `gemini/gemini-3.8-flash`，未覆盖时自动挂载 `gemini/gemini-4-hydrogen` 备选）、`OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`LITELLM_MODEL`、`LLM_CHANNELS` 或旧变量 `LLM_API_KEY/LLM_MODEL/LLM_BASE_URL`
+- LLM 排序直接通过轻量 HTTP 客户端调用 OpenAI 兼容 `/chat/completions` 接口；`LITELLM_MODEL`、`AGENT_LITELLM_MODEL` 和 `LITELLM_FALLBACK_MODELS` 变量名仅为兼容 `daily_stock_analysis` 配置而保留，供应商密钥与地址环境变量均可复用。若曾设置 `LITELLM_CONFIG`，请删除该变量并迁移到 `LLM_CHANNELS`
 - 策略 YAML 可通过 `scoring_profile`、`risk_profile`、`portfolio_profile`、`scorecard_profile` 覆盖默认规则
 - 策略 YAML 可通过 `event_profile` 配置偏好/规避事件、公告类别和候选上下文来源权重
 - LLM 会输出候选行业/主题标签；如候选提供 `industry/concepts/board_heat_score/board_heat_trend_score`，会作为 LLM、主题热度因子与组合分散层锚点；history sidecar 可回填持续性、降温和状态字段。默认组合分散层会用这些标签映射风险桶，降低同一拥挤交易重复占位
 - L3 默认启用本地 `scorecard` 后置评分器，也可追加 `dsa` 或 `external_http`
 - 如需 DSA 后置分析，设置 `DSA_API_URL`，默认调用 `POST /api/v1/analysis/analyze`
 - 依赖日 K 的策略会在 L1 后自动对 Top N 候选做日 K 增强
-- 日 K 数据源 `DAILY_SOURCE` 支持 `akshare`（默认）、`baostock` 或 `auto`，`auto` 会在 akshare 失败时自动降级到 baostock 作为免费兜底
+- 日 K 数据源 `DAILY_SOURCE` 支持 `auto`（默认，优先走 `tushare`（若配置 token）、`tencent`、`sina` 直连源，再降级到 `akshare`、`baostock`）或显式指定单源
 
 ## Operations
 
@@ -54,7 +54,7 @@ alphasift screen volume_breakout --max-output 10
 alphasift screen balanced_alpha --no-llm
 alphasift screen capital_heat
 alphasift screen balanced_alpha --context "今日券商板块放量，低估值金融获得资金回流"
-alphasift --env-file /home/ubuntu/daily_ai_assistant/.env screen balanced_alpha
+alphasift --env-file /path/to/daily_stock_analysis/.env screen balanced_alpha
 alphasift screen balanced_alpha --explain
 alphasift screen balanced_alpha --candidate-context-file candidate_context.csv
 alphasift screen dual_low --no-post-analysis
@@ -67,6 +67,12 @@ alphasift runs
 alphasift evaluate <run_id> --explain
 alphasift evaluate-batch --limit 20 --explain
 alphasift evaluate <run_id> --with-price-path --explain
+alphasift patterns list --include-experimental
+alphasift patterns scan --pack-dir data/pack/cn
+alphasift patterns replay --pack-dir data/pack/cn --output-md replay.md
+alphasift daily-report --pack-dir data/pack/cn --output-html report.html --push
+alphasift notify status
+alphasift notify test --dry-run
 ```
 
 ### 3. Python 调用
@@ -96,6 +102,9 @@ evaluate_saved_runs(limit=20)
 - `llm_coverage`
 - `post_analyzers`
 - `daily_enriched`
+- `daily_enrich_count`
+- `daily_source_counts`
+- `daily_quality_flag_counts`
 - `risk_enabled`
 - `portfolio_concentration_notes`
 - `degradation`

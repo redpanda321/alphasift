@@ -152,10 +152,10 @@ def test_config_prefers_tushare_when_token_is_configured(monkeypatch):
 
     assert config.snapshot_source_priority == [
         "tushare",
+        "em_datacenter",
         "sina",
         "efinance",
         "akshare_em",
-        "em_datacenter",
     ]
 
 
@@ -167,10 +167,10 @@ def test_config_omits_tushare_from_default_priority_without_token(monkeypatch):
     config = Config.from_env()
 
     assert config.snapshot_source_priority == [
+        "em_datacenter",
         "sina",
         "efinance",
         "akshare_em",
-        "em_datacenter",
     ]
 
 
@@ -312,3 +312,78 @@ def test_config_from_env_loads_env_file_once_per_process(monkeypatch, tmp_path):
     assert os.getenv("LITELLM_MODEL") is None
     assert os.getenv("OPENAI_API_KEY") is None
     assert third.llm_model == DEFAULT_LLM_MODEL
+
+
+def test_default_gemini_model_and_hydrogen_fallback(monkeypatch):
+    for name in (
+        "LITELLM_MODEL",
+        "LLM_MODEL",
+        "AGENT_LITELLM_MODEL",
+        "LITELLM_FALLBACK_MODELS",
+        "GEMINI_MODEL",
+        "OPENAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OLLAMA_API_BASE",
+        "AIHUBMIX_KEY",
+        "LLM_CHANNELS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-key")
+    cfg = Config.from_env()
+    assert DEFAULT_LLM_MODEL == "gemini/gemini-3.8-flash"
+    assert cfg.llm_model == "gemini/gemini-3.8-flash"
+    assert cfg.llm_fallback_models == ["gemini/gemini-4-hydrogen"]
+
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-4-hydrogen")
+    cfg_h = Config.from_env()
+    assert cfg_h.llm_model == "gemini/gemini-4-hydrogen"
+    assert cfg_h.llm_fallback_models == []
+
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.setenv("LITELLM_FALLBACK_MODELS", "none")
+    cfg_none = Config.from_env()
+    assert cfg_none.llm_fallback_models == []
+
+    monkeypatch.setenv("LITELLM_FALLBACK_MODELS", "")
+    cfg_empty = Config.from_env()
+    assert cfg_empty.llm_fallback_models == []
+
+    # Keyless non-Ollama channel with models should NOT mark LLM config as usable
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_CHANNELS", "primary")
+    monkeypatch.setenv("LLM_PRIMARY_PROTOCOL", "openai")
+    monkeypatch.setenv("LLM_PRIMARY_MODELS", "deepseek-chat")
+    monkeypatch.setenv("LLM_PRIMARY_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("LLM_PRIMARY_API_KEY", "")
+    cfg_keyless = Config.from_env()
+    assert cfg_keyless.has_usable_llm_config() is False
+
+
+def test_config_resolves_fork_safe_dashboard_url_and_search_keys(monkeypatch):
+    for var in ("ALPHASIFT_DASHBOARD_URL", "GITHUB_REPOSITORY", "ALPHASIFT_ENABLE_PAGES", "TAVILY_API_KEYS", "SERPAPI_API_KEYS"):
+        monkeypatch.delenv(var, raising=False)
+
+    # 1. Local default (no explicit URL) omits author's public site
+    assert Config.from_env().dashboard_url == ""
+
+    # 2. Upstream ZhuLinsen/alphasift resolves canonical site
+    monkeypatch.setenv("GITHUB_REPOSITORY", "ZhuLinsen/alphasift")
+    assert Config.from_env().dashboard_url == "https://alphasift.zhulinsen.tech/"
+
+    # 3. Fork without ALPHASIFT_ENABLE_PAGES=true omits author's URL
+    monkeypatch.setenv("GITHUB_REPOSITORY", "SomeUser/alphasift")
+    assert Config.from_env().dashboard_url == ""
+
+    # 4. Fork with ALPHASIFT_ENABLE_PAGES=true derives fork Pages URL automatically
+    monkeypatch.setenv("ALPHASIFT_ENABLE_PAGES", "true")
+    assert Config.from_env().dashboard_url == "https://someuser.github.io/alphasift/"
+
+    # 5. Explicit ALPHASIFT_DASHBOARD_URL=none disables URL and reads search keys
+    monkeypatch.setenv("ALPHASIFT_DASHBOARD_URL", "none")
+    monkeypatch.setenv("TAVILY_API_KEYS", "tvly-a, tvly-b")
+    monkeypatch.setenv("SERPAPI_API_KEYS", "serp-1")
+    cfg = Config.from_env()
+    assert cfg.dashboard_url == ""
+    assert cfg.tavily_api_keys == ["tvly-a", "tvly-b"]
+    assert cfg.serpapi_api_keys == ["serp-1"]

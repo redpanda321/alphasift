@@ -19,8 +19,8 @@ Consumers should treat these top-level fields as stable integration points:
 - `llm_ranked`, `llm_coverage`, `llm_parse_errors`
 - `degradation`, `snapshot_source`, `source_errors`
 - `deep_analysis_requested`, `post_analyzers`
-- `daily_enriched`, `daily_enrich_count`
-- `risk_enabled`, `portfolio_diversity_enabled`, `portfolio_concentration_notes`
+- `daily_enriched`, `daily_enrich_count`, `daily_source_counts`, `daily_quality_flag_counts`
+- `risk_enabled`, `portfolio_diversity_enabled`, `portfolio_concentration_notes`, `portfolio_topic_exposure`, `overconcentrated_topics`, `replacement_candidates`
 
 ## Stable pick fields
 
@@ -29,7 +29,7 @@ Important UI/API fields on each pick include:
 - identity: `rank`, `code`, `name`, `final_score`, `screen_score`
 - factor diagnostics: `factor_scores`, `ranking_reason`
 - risk: `risk_summary`, `risk_score`, `risk_level`, `risk_flags`, `portfolio_penalty`, `portfolio_flags`
-- topic/source context: `industry`, `concepts`, `board_heat_score`, `board_heat_summary`
+- topic/source context: `industry`, `concepts`, `topic_alignment_status`, `topic_alignment_role`, `topic_alignment_reason`, `matched_topics`, `unmatched_topics`, `board_heat_score`, `board_heat_summary`
 - daily quality: `daily_quality_score`, `daily_quality_flags`, `daily_source`
 - post-analysis: `post_analysis_status`, `post_analysis_summaries`, `post_analysis_score_deltas`, `post_analysis_tags`
 - optional DSA context: `dsa_context`, `dsa_news`, `dsa_analysis_summary`
@@ -39,9 +39,11 @@ Important UI/API fields on each pick include:
 
 For upstream UI / DSA / agent integrations, use these field groups:
 
-- source health: `snapshot_source`, `source_errors`, `daily_source`, `daily_quality_flags`
+- source health: `snapshot_source`, `source_errors`, `daily_source`, `daily_quality_flags`, `daily_source_counts`, `daily_quality_flag_counts`
 - filter/source degradation: `degradation`
 - risk flags: `risk_level`, `risk_flags`, `portfolio_flags`, `risk_summary`
+- topic alignment: `topic_alignment_status`, `topic_alignment_role`, `topic_alignment_reason`, `matched_topics`, `unmatched_topics`
+- portfolio exposure: `portfolio_topic_exposure`, `overconcentrated_topics`, `replacement_candidates`
 - watch items / invalidators: `llm_watch_items`, `llm_invalidators`, `deep_analysis_operation_advice`
 - post-analysis: `post_analysis_status`, `post_analysis_summaries`, `post_analysis_tags`
 
@@ -60,7 +62,18 @@ The current `RunReport` schema version is `1`. Stable top-level fields:
 - `summary_cards`: compact metric cards with `label`, `value`, and `status`.
 - `source_health`: snapshot source, source errors, degradation notes, daily enrichment status.
 - `top_picks`: UI-ready pick cards with identity, scores, risk, topic, daily quality, and post-analysis fields.
-- `evaluation`: optional T+N evaluation summary and evaluated pick cards when `--evaluate` is used.
+- `evaluation`: optional evaluation summary and evaluated pick cards when `--evaluate` is used.
+
+## T+N 窗口评估
+
+`evaluate <run_id> --window N` 的 JSON 和 JSONL 评估头部包含 `horizon_days`、`entry_mode`（`close` 或 `next_open`）、`pending_count`、`untradable_count` 和 `untradable_share_pct`。不可成交比例以所有候选为分母，结果单位为百分比，候选数为零时为 `null`。
+
+- `entry_price` 为保存时的选股价。`next_open` 模式使用 `entry_open` 记录候选入场日的历史开盘价，缺失时为 `null`。`entry_date` 和 `exit_date` 采用 `YYYY-MM-DD` 格式，未确定日期为 `null`。`exit_date` 为实际退出日期。
+- `status` 和 `path_status` 可为 `untradable_limit_up`，此时收益为空。缺少有效入场开盘价的候选以 `missing` 为 `status`，`no_entry_open` 为 `path_status`。
+- `tradability_flags` 可包含 `entry_delayed_missing_bar` 或 `exit_delayed_limit_down`。一字跌停后尚无可退出日时，`status` 和 `path_status` 均为 `pending`。
+- `benchmark_return_pct` 在评估头部表示基准自身 T+N 窗口的收益，在候选中表示与候选实际入场及退出日期匹配的基准收益。基准缺对应日期或开盘价时，候选的基准收益和 `excess_return_pct` 为 `null`，`degradation` 记录原因。
+
+`evaluate-strategies --window ... --json` 在顶层包含 `entry_mode`。每个策略的 `window_summaries` 包含 `untradable_count`、`untradable_share_pct`、`pick_status_counts`、`tradability_flag_counts` 和 `benchmark_errors`。
 
 ## Run index metadata
 
@@ -71,7 +84,7 @@ Stable fields include:
 - identity: `run_id`, `strategy`, `market`, `strategy_version`, `strategy_category`, `created_at`
 - counts: `picks`, `snapshot_count`, `after_filter_count`
 - source status: `snapshot_source`, `source_error_count`, `source_errors`, `degradation_count`, `degradation`
-- enrichment status: `llm_ranked`, `llm_coverage`, `daily_enriched`, `daily_enrich_count`, `post_analyzers`
+- enrichment status: `llm_ranked`, `llm_coverage`, `daily_enriched`, `daily_enrich_count`, `daily_source_counts`, `daily_quality_flag_counts`, `post_analyzers`
 - paths: `path`, `report_path`
 
 ## Strategy run summary payload
@@ -113,6 +126,7 @@ The same commands also include `event_signal_review` for success/failure attribu
 - `signals`: one row per combined signal such as `tag:<label>`, `catalyst:<label>`, `risk:<label>`, or `post:<label>`, with sample count, evaluated count, average/median/best/worst returns, win rate, failure count/rate, sample codes, and an `action` of `prefer`, `avoid`, `watch`, or `insufficient_data`.
 - `strategy_patch_suggestions`: per-strategy review items that convert positive/negative signal evidence into reviewable `screening.event_profile.preferred_event_tags` and `avoided_event_tags` append suggestions. Each item includes `field_changes`, compact `evidence`, and a YAML fragment under `yaml_patch`; the command does not modify strategy files automatically.
 - `recommendations`: UI-ready next actions that suggest which signals should be reviewed as preferred or avoided event tags.
+- `data_quality_review` (also included in each `window_reviews[]` item on `evaluate-strategies --window`): aggregates `run_count`, `clean_run_count`, `degraded_run_count`, `snapshot_source_counts`, `daily_source_counts`, `daily_quality_flag_counts`, `degraded_reason_counts`, `clean_vs_degraded` (`clean`/`degraded` pick return stats and `return_gap_pct`), and correlation `hints`; paired per-run fields preserved on `EvaluationResult` include `run_snapshot_source`, `run_source_errors`, `run_degradation`, `daily_source_counts`, and `daily_quality_flag_counts`.
 
 ## Data-source doctor payload
 

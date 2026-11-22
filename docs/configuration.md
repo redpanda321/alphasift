@@ -1,6 +1,6 @@
 # 配置参考
 
-这份文档集中说明 `.env`、LiteLLM、数据源和 L3 后置分析器配置。最小运行不需要 LLM key，只要在命令里加 `--no-llm`。
+这份文档集中说明 `.env`、OpenAI 兼容 LLM 排序、数据源和 L3 后置分析器配置。最小运行不需要 LLM key，只要在命令里加 `--no-llm`。
 
 ## 最小配置
 
@@ -18,7 +18,7 @@ alphasift screen dual_low --no-llm
 
 ```env
 GEMINI_API_KEY=...
-LITELLM_MODEL=gemini/gemini-2.5-flash
+LITELLM_MODEL=gemini/gemini-3.8-flash
 ```
 
 使用 Tushare 兜底数据源时，填入：
@@ -31,19 +31,18 @@ TUSHARE_TOKEN=...
 
 | 变量 | 必须 | 说明 | 默认值 |
 |------|------|------|--------|
-| `LITELLM_MODEL` | 推荐 | 主模型，兼容 daily_stock_analysis，格式 `provider/model` | `gemini/gemini-2.5-flash` |
-| `LITELLM_FALLBACK_MODELS` | 否 | 备选模型，逗号分隔 | - |
+| `LITELLM_MODEL` | 推荐 | 主模型，兼容 daily_stock_analysis，格式 `provider/model` | `gemini/gemini-3.8-flash` |
+| `LITELLM_FALLBACK_MODELS` | 否 | 备选模型，逗号分隔 | 默认主模型时为 `gemini/gemini-4-hydrogen` |
 | `LLM_CHANNELS` | 否 | 多渠道配置，配合 `LLM_{NAME}_*` 使用 | - |
-| `LITELLM_CONFIG` | 否 | 高级 LiteLLM Router YAML 配置文件路径 | - |
-| `GEMINI_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | LLM 排序时至少一种 | 供应商 API Key，兼容 daily_stock_analysis 配置 | - |
+| `GEMINI_API_KEY` / `GEMINI_API_KEYS` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | LLM 排序时至少一种 | 供应商 API Key，兼容 daily_stock_analysis 配置 | - |
 | `OPENAI_BASE_URL` / `OLLAMA_API_BASE` | 否 | OpenAI 兼容接口或 Ollama 地址 | - |
 | `LLM_API_KEY` | 否 | 旧版兼容 API Key，会优先覆盖供应商 key | - |
-| `LLM_MODEL` | 否 | 旧版兼容模型名；`LITELLM_MODEL` 优先 | `gemini/gemini-2.5-flash` |
+| `LLM_MODEL` | 否 | 旧版兼容模型名；`LITELLM_MODEL` 优先 | `gemini/gemini-3.8-flash` |
 | `LLM_BASE_URL` | 否 | 旧版兼容自定义 API 地址 | - |
 | `LLM_CONTEXT` | 否 | 传给 LLM 的市场、新闻或主题上下文 | - |
 | `LLM_TEMPERATURE` | 否 | LLM 排序温度，默认偏确定性 | `0.2` |
 | `LLM_JSON_MODE` | 否 | 是否请求 JSON response_format，不支持时自动降级 | `true` |
-| `LLM_SILENT` | 否 | 是否抑制 LiteLLM 调用日志，避免污染 CLI JSON 或摘要输出 | `true` |
+| `LLM_SILENT` | 否 | 是否抑制 LLM HTTP 调试日志 | `true` |
 | `LLM_RANK_WEIGHT` | 否 | LLM 排序对最终分数的权重 | `0.40` |
 | `LLM_CANDIDATE_MULTIPLIER` | 否 | 送入 LLM 的候选倍数，相对 max_output | `6` |
 | `LLM_MAX_CANDIDATES` | 否 | 单次最多送入 LLM 的候选数 | `30` |
@@ -59,7 +58,7 @@ TUSHARE_TOKEN=...
 | `INDUSTRY_PROVIDER` | 否 | 可选行业、概念、板块热度 provider，如 `akshare`；默认关闭 | `none` |
 | `INDUSTRY_AUTO_BACKFILL` | 否 | A 股快照缺少行业字段时，自动用东财行业映射补全（本地缓存 7 天），让组合分散度控制能够生效 | `true` |
 | `INDUSTRY_PROVIDER_MAX_BOARDS` | 否 | provider 模式最多反查板块数 | `80` |
-| `SNAPSHOT_SOURCE_PRIORITY` | 否 | 数据源优先级，逗号分隔；不设置时若配置了 Tushare token 会优先 `tushare` | 无 token: `sina,efinance,akshare_em,em_datacenter` |
+| `SNAPSHOT_SOURCE_PRIORITY` | 否 | 数据源优先级，逗号分隔；不设置时若配置了 Tushare token 会优先 `tushare` | 无 token: `em_datacenter,sina,efinance,akshare_em` |
 | `SNAPSHOT_FALLBACK_MAX_AGE_HOURS` | 否 | last-good 快照缓存最大可接受年龄；为空/`none` 表示不限制 | - |
 | `ALPHASIFT_SOURCE_HEALTH_PATH` | 否 | 跨运行记录快照数据源成败的文件；最近 6 小时内失败过的源会排到后面再试。设为 `off` 关闭 | `$ALPHASIFT_DATA_DIR/source_health.json` |
 | `ALPHASIFT_SOURCE_CALL_TIMEOUT_SEC` | 否 | 第三方 wrapper 数据源调用的全局等待超时；`0`/`off` 表示关闭 | - |
@@ -96,28 +95,36 @@ TUSHARE_TOKEN=...
 | `ALPHASIFT_DATA_DIR` | 否 | 运行记录和评估结果目录 | `./data` |
 | `STRATEGIES_DIR` | 否 | 策略目录路径 | 自动查找 |
 
-## LiteLLM 配置兼容
+## OpenAI 兼容网关与渠道配置
 
-AlphaSift 兼容 `daily_stock_analysis` 的 LiteLLM 配置习惯：
+AlphaSift 无需安装 `litellm`，直接通过轻量 `requests` 客户端调用 OpenAI 兼容 `/chat/completions`，并兼容 `daily_stock_analysis` 的环境变量命名习惯（主模型按 `LITELLM_MODEL > LLM_MODEL > AGENT_LITELLM_MODEL > 首个渠道模型 > 供应商默认模型` 解析；`LLM_API_KEY` 与 `LLM_BASE_URL` 优先于主模型默认网关）：
+
+| 前缀 | 默认 Base URL | 密钥变量 |
+|---|---|---|
+| `openai` | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `deepseek` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `gemini` | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEYS` / `GEMINI_API_KEY` |
+| `anthropic` | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
+| `ollama` | `http://localhost:11434/v1` | 可不填 |
+| `openrouter` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| `dashscope` / `qwen` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` / `QWEN_API_KEY` |
+| `zhipu` | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPU_API_KEY` / `ZAI_API_KEY` |
+| `moonshot` | `https://api.moonshot.cn/v1` | `MOONSHOT_API_KEY` |
+| `aihubmix` | `https://aihubmix.com/v1` | `AIHUBMIX_KEY` / `AIHUBMIX_API_KEY` |
+
+如果旧配置曾使用 `LITELLM_CONFIG` 或原生非 OpenAI 渠道协议，请删除 `LITELLM_CONFIG` 并迁移为 `LLM_CHANNELS`：
 
 ```env
-LLM_CHANNELS=primary
+LLM_CHANNELS=primary,backup
 LLM_PRIMARY_PROTOCOL=openai
 LLM_PRIMARY_BASE_URL=https://api.deepseek.com/v1
-LLM_PRIMARY_API_KEYS=sk-xxx,sk-yyy
+LLM_PRIMARY_API_KEYS=key1,key2
 LLM_PRIMARY_MODELS=deepseek-chat,deepseek-reasoner
-LITELLM_MODEL=openai/deepseek-chat
-LITELLM_FALLBACK_MODELS=openai/gpt-4o-mini,anthropic/claude-3-5-sonnet
+LLM_BACKUP_PROTOCOL=openai
+LLM_BACKUP_BASE_URL=https://api.openai.com/v1
+LLM_BACKUP_API_KEY=your_openai_key
+LLM_BACKUP_MODELS=gpt-4o-mini
 ```
-
-也支持更简单的单供应商配置：
-
-```env
-GEMINI_API_KEY=...
-LITELLM_MODEL=gemini/gemini-2.5-flash
-```
-
-如果已有 `daily_stock_analysis` 的 `.env`，通常可以复用其中的 `LITELLM_MODEL`、`LITELLM_FALLBACK_MODELS`、`LLM_CHANNELS`、`LLM_{NAME}_*`、`OPENAI_*`、`GEMINI_*`、`DEEPSEEK_*`、`OLLAMA_API_BASE` 等字段。
 
 CLI 也支持显式加载外部 `.env`，可重复传入：
 
@@ -132,13 +139,13 @@ alphasift --env-file /path/to/daily_stock_analysis/.env \
 支持五种 A 股全市场快照数据源，自动按优先级降级。默认未配置 Tushare token 时使用：
 
 ```text
-sina -> efinance -> akshare_em -> em_datacenter
+em_datacenter -> sina -> efinance -> akshare_em
 ```
 
 若配置了 `TUSHARE_TOKEN` / `TUSHARE_API_TOKEN`，且没有手工设置 `SNAPSHOT_SOURCE_PRIORITY`，默认链路改为：
 
 ```text
-tushare -> sina -> efinance -> akshare_em -> em_datacenter
+tushare -> em_datacenter -> sina -> efinance -> akshare_em
 ```
 
 | 数据源 | 接口 | 特点 |
@@ -156,9 +163,42 @@ tushare -> sina -> efinance -> akshare_em -> em_datacenter
 | 能力 | 默认链路 | 主要字段 |
 |------|----------|----------|
 | 日 K 增强 | 有 token: `tushare,tencent,sina,akshare,baostock`；无 token: `tencent,sina,akshare,baostock`，并按 source-health 动态后移不健康源 | OHLCV、前复权（支持源）、技术指标、20日波动/ATR/回撤、逐行 `daily_source` 来源标记、`daily_quality_score`/flags（含 `fetch_failed` 行级失败标记）、source-health 统计；screen degradation 会汇总日K来源、质量 flags、异常 source-health 与 hard-filter 淘汰摘要；低质量、拉取失败或 stale cache 行会进入最终风险扣分 |
-| 全市场快照 | 有 token: `tushare,sina,efinance,akshare_em,em_datacenter`；无 token: `sina,efinance,akshare_em,em_datacenter` | 价格、涨跌幅、成交额、市值、PE/PB、换手率 |
+| 全市场快照 | 有 token: `tushare,em_datacenter,sina,efinance,akshare_em`；无 token: `em_datacenter,sina,efinance,akshare_em` | 价格、涨跌幅、成交额、市值、PE/PB、换手率 |
 | 候选级上下文 | `news,fund_flow,announcement,quote` | 新闻、资金流、公告、腾讯行情估值/换手率 |
 | 失败降级 | source health 熔断 + daily history cache + snapshot last-good cache | stale/fallback/source_errors 元数据 |
+
+### A 股离线日线包
+
+| 环境变量 | 默认值 | 用途 |
+|----------|--------|------|
+| `ALPHASIFT_PACK_DIR` | `<ALPHASIFT_DATA_DIR>/pack/cn` | 包文件及按日期范围保存的 `.backfill/` 续传缓存 |
+| `ALPHASIFT_PACK_REPO` | 未设置（默认禁用公开拉取） | 可选，仅当你自己在私有仓库维护打包资产时，供 `pack pull` 指向你的 `owner/repo`（配合 `GITHUB_TOKEN`） |
+| `TICKPLUS_API_KEY` | 未设置 | 可选，与 daily_stock_analysis 同名。设置后 `scripts/build_pack.py update` 优先用 TickPlus 取当日日线；未设置时依次尝试现有快照源、腾讯批量行情（`qt.gtimg.cn`）与历史日线源 |
+
+TickPlus `updatedaykline` 约提供最近一周的不复权日线，接口使用 HTTP 并在查询串传递密钥。本次仅用按文档字段构造的离线样例验证，尚未进行实盘接口验证。名称、行业、估值和市值等元数据来自构建或更新时的最新可用快照，源缺失的可选字段可省略。
+
+### 通知推送与订阅
+
+`alphasift daily-report --push` 支持 **1 行 `NOTIFY_URLS` 自动协议嗅探**（也兼容分渠道独立变量），内置 **12 种零额外依赖原生通道** + 可选 `apprise` 兜底，按 `trade_date` + `target` 幂等去重；未配置时静默跳过：
+
+| 环境变量 / 协议格式 | 渠道 | 说明 |
+|---|---|---|
+| `NOTIFY_URLS`（最简 1 行） | 全渠道通配 | 逗号/换行分隔，自动识别：`qyapi.weixin.qq.com`（企微）、`open.feishu.cn`（飞书，支持 `#secret=`）、`oapi.dingtalk.com`（钉钉，支持 `#secret=`）、`pushplus://<token>[/<topic>]`（PushPlus 个人微信）、`sct://<sendkey>`（Server酱 / Server酱³）、`bark://<key>` 或 `api.day.app/<key>`（iOS Bark）、`mailto://user:pass@qq.com?to=a@b.com`（SMTP 邮件，自动识别 QQ/163/Gmail/Outlook/iCloud/Aliyun）、`tgram://<token>/<chat_id>`（Telegram）、`discord.com/api/webhooks/...`、`hooks.slack.com/services/...`、`ntfy://<topic>`、任意 HTTP(S)（Custom JSON，支持 `#token=`）及其他 URI（若安装 `apprise` 则自动接管 90+ 长尾平台） |
+| `WECOM_WEBHOOK_URL` | 企业微信 | `< 1200` 字符预警优先 Markdown 群机器人卡片 |
+| `FEISHU_WEBHOOK_URL` / `FEISHU_WEBHOOK_SECRET` | 飞书 | 交互式蓝色标题卡片，支持 HMAC-SHA256 签名 |
+| `DINGTALK_WEBHOOK_URL` / `DINGTALK_WEBHOOK_SECRET` | 钉钉 | Markdown 消息，支持 URL query HMAC-SHA256 签名 |
+| `PUSHPLUS_TOKEN` / `PUSHPLUS_TOPIC` | PushPlus | 个人微信一对一/群发推送 |
+| `SERVERCHAN_SENDKEY` | Server酱 / ³ | 免建群个人微信推送（自动识别经典 `SCT` 与 Turbo³ `sctp<uid>t`） |
+| `BARK_URL` | Bark (iOS) | 直接弹窗送达 iPhone（`api.day.app/<key>` 或自建地址） |
+| `EMAIL_SENDER` / `EMAIL_PASSWORD` / `EMAIL_RECEIVERS` | 邮件 | 纯标准库 SMTP/SSL 推送（自动匹配常见邮箱 SMTP，或设 `EMAIL_SMTP_HOST`/`PORT`） |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram | Bot API 精简推送 |
+| `DISCORD_WEBHOOK_URL` / `SLACK_WEBHOOK_URL` / `NTFY_URL` | Discord/Slack/ntfy | Embed 卡片 / Slack Markdown / ntfy 推送 |
+| `CUSTOM_WEBHOOK_URL` / `CUSTOM_WEBHOOK_TOKEN` | 自定义 Webhook | POST 结构化 JSON（含 `trade_date`、`markdown`、`summary`），可选 Bearer Token |
+| `ALPHASIFT_NOTIFY_STATE_PATH` / `ALPHASIFT_NOTIFY_TIMEOUT_SEC` | 账本与超时 | 默认 `<data_dir>/notify_state.json`，超时 `10s` |
+| `ALPHASIFT_CANDIDATE_CONTEXT_CACHE_DIR` | 情报缓存目录 | 覆盖 L2 新闻/公告上下文缓存目录（CI 中指向临时 `state/`） |
+| `ALPHASIFT_DASHBOARD_URL` | 卡片跳转基址 | 覆盖推送消息中的看板 URL（默认 `https://alphasift.zhulinsen.tech/`） |
+
+可用 `alphasift notify status` 检查已就绪渠道（不打印任何密钥），用 `alphasift notify test` 验证连通性。公开看板同时在 `site/feed.xml` 提供零配置 Atom 1.0 RSS 订阅源。
 
 ## L3 后置分析器
 

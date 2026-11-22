@@ -4,16 +4,46 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alphasift"
-version = "0.2.0"
+version = "0.3.0"
 description = "Full-market stock discovery for AI agents: YAML strategies, optional LLM ranking, sector-diversified picks and T+N evaluation across CN, US, HK, JP, KR, TW and IN"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
+keywords = [
+    "stock-screener",
+    "a-shares",
+    "a-stock",
+    "china-equities",
+    "multi-market",
+    "track-record",
+    "mcp",
+    "quant",
+    "quantitative-trading",
+    "quantitative-finance",
+    "algorithmic-trading",
+    "ai-agent",
+    "agent-skill",
+    "openclaw",
+    "claude-code",
+    "llm",
+    "akshare",
+    "yfinance",
+    "backtesting",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
 dependencies = [
     "pandas>=2.0",
     "pyyaml>=6.0",
-    "litellm>=1.0",
     "efinance>=0.4",
     "akshare>=1.10",
     "baostock>=0.8.9",
@@ -26,6 +56,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 
+[project.urls]
+Homepage = "https://alphasift.zhulinsen.tech/"
+Repository = "https://github.com/ZhuLinsen/alphasift"
+Documentation = "https://github.com/ZhuLinsen/alphasift/tree/main/docs"
+Issues = "https://github.com/ZhuLinsen/alphasift/issues"
+
 [project.scripts]
 alphasift = "alphasift.cli:main"
 
@@ -36,7 +72,7 @@ include-package-data = true
 include = ["alphasift*"]
 
 [tool.setuptools.package-data]
-alphasift = ["strategies/*.yaml"]
+alphasift = ["strategies/*.yaml", "patterns/*.yaml"]
 
 [tool.setuptools.data-files]
 "." = ["SKILL.md", ".env.example", "LICENSE"]

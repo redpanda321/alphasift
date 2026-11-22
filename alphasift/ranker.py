@@ -3,9 +3,13 @@
 
 import json
 import logging
-import os
+import re
+from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
+from typing import Any
 
+from alphasift.llm_client import LLMClientError, build_attempts, complete, configuration_error
 from alphasift.models import Pick
 from alphasift.normalize import (
     bounded_float as _bounded_float,
@@ -20,9 +24,60 @@ def _normalize_code(value: object) -> str:
     # US tickers may pass through (see normalize_code docstring).
     return normalize_code(value, allow_ticker=True)
 
+
 logger = logging.getLogger(__name__)
 _DEFAULT_RANKING_PROMPT_MAX_CHARS = 24_000
 _PROMPT_TRIM_MARKER = "[prompt_trimmed]"
+_ADVERSE_FILING_MARKERS = (
+    "unresolved adverse filing",
+    "adverse filing",
+    "red_flag_capped",
+    "立案调查",
+    "监管调查",
+    "证监会调查",
+    "被调查",
+    "立案",
+    "股东减持",
+    "拟减持",
+    "大股东减持",
+    "业绩预亏",
+    "亏损",
+    "*st",
+    "冻结",
+    "留置",
+    "退市",
+    "终止上市",
+    "st风险",
+    "警示函",
+    "监管函",
+    "问询函",
+    "行政处罚",
+    "处罚",
+    "造假",
+    "违约",
+    "大幅下滑",
+    "under investigation",
+    "pending investigation",
+    "regulatory investigation",
+    "delisting",
+    "regulatory penalty",
+    "regulatory_penalty",
+)
+_NEGATED_RISK_RE = re.compile(
+    r"(?:无|未发生|不存在|不涉及|未受|未遭到|已解除|已撤销|撤销)"
+    r"(?:任何|重大|相关|新的)?"
+    r"(?:立案调查|监管调查|证监会调查|调查|行政处罚|处罚|退市风险警示|警示|违约|冻结|留置|减持)"
+    r"|\b(?:no|not|without|resolved|cleared|lifted)\s+"
+    r"(?:pending\s+|under\s+|any\s+)?"
+    r"(?:investigation|adverse filing|delisting|penalty)\b",
+    re.I,
+)
+_SEVERE_CONTEXT_FLAGS = frozenset({"监管", "退市风险", "财务风险", "业绩压力", "减持", "诉讼风险", "质押冻结"})
+_LLM_RED_FLAG_MAX_SCORE = 35.0
+
+
+def _strip_negated_risk_phrases(text: str) -> str:
+    return _NEGATED_RISK_RE.sub(" ", text)
 
 
 @dataclass
@@ -33,6 +88,8 @@ class RankingParseResult:
     market_view: str = ""
     selection_logic: str = ""
     portfolio_risk: str = ""
+    matched_codes: set[str] | None = None
+    matched_count: int = 0
 
 
 @dataclass
@@ -118,10 +175,27 @@ def rank_candidates_with_metadata(
     max_prompt_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
     degradation: list[str] | None = None,
     max_tokens: int | None = 2048,
+    candidate_context_rows: list[dict[str, object]] | None = None,
 ) -> LLMRankingResult:
     """Use LLM to re-rank candidates and return global research metadata."""
     if not candidates:
         return LLMRankingResult(picks=candidates)
+
+    adverse_context_by_code: dict[str, list[str]] = {}
+    for row in candidate_context_rows or []:
+        norm_code = _normalize_code(row.get("code", ""))
+        if not norm_code:
+            continue
+        raw_flags = row.get("negative_event_flags")
+        if isinstance(raw_flags, (list, tuple, set)):
+            flags = [str(x).strip() for x in raw_flags if str(x).strip()]
+        elif isinstance(raw_flags, str) and raw_flags.strip():
+            flags = [x.strip() for x in raw_flags.replace("，", ",").split(",") if x.strip()]
+        else:
+            flags = []
+        severe = [f for f in flags if f in _SEVERE_CONTEXT_FLAGS]
+        if severe:
+            adverse_context_by_code[norm_code] = severe
 
     prompt = _build_ranking_prompt(
         candidates,
@@ -155,23 +229,63 @@ def rank_candidates_with_metadata(
                 timeout_sec=timeout_sec,
                 max_tokens=max_tokens,
             )
-            parsed = _parse_ranking_response_detail(response, candidates)
+            parsed = _parse_ranking_response_detail(
+                response,
+                [deepcopy(pick) for pick in candidates],
+            )
             last_errors = parsed.errors
-            if parsed.coverage >= min_coverage:
+            if parsed.coverage >= min_coverage and parsed.matched_count > 0:
                 break
-        if parsed is None or parsed.coverage < min_coverage:
+        if parsed is None or parsed.coverage < min_coverage or parsed.matched_count == 0:
             raise ValueError(
                 "LLM ranking response coverage below threshold: "
                 f"{0 if parsed is None else parsed.coverage:.2f}; "
                 f"errors={last_errors}"
             )
         ranked = parsed.picks
+        matched_codes = parsed.matched_codes
+        weight = min(max(rank_weight, 0.0), 1.0)
+        pre_risk_by_code = {
+            _normalize_code(p.code): str(p.risk_summary)
+            for p in candidates
+            if _normalize_code(p.code) and p.risk_summary
+        }
         for i, pick in enumerate(ranked):
-            pick.rank = i + 1
+            norm_code = _normalize_code(pick.code)
+            was_matched = matched_codes is None or norm_code in matched_codes
+            prior_risk = pre_risk_by_code.get(norm_code, "")
+            if prior_risk and not pick.risk_summary:
+                pick.risk_summary = prior_risk
+            adverse_reasons = _unresolved_adverse_reasons(
+                pick,
+                context_flags=adverse_context_by_code.get(norm_code, ()),
+                extra_texts=(prior_risk,),
+            )
+            if not was_matched:
+                pick.llm_score = None
+                if "llm_omitted" not in pick.risk_flags:
+                    pick.risk_flags = [*pick.risk_flags, "llm_omitted"]
+                if adverse_reasons:
+                    cap_final = float(pick.screen_score) * (1.0 - weight) + _LLM_RED_FLAG_MAX_SCORE * weight
+                    pick.final_score = min(float(pick.screen_score), cap_final)
+                    if "red_flag_capped" not in pick.risk_flags:
+                        pick.risk_flags = [*pick.risk_flags, "red_flag_capped"]
+                    note = f"触发红线上限({_LLM_RED_FLAG_MAX_SCORE:.0f}): {', '.join(adverse_reasons[:3])}"
+                    pick.risk_summary = f"{pick.risk_summary}; {note}" if pick.risk_summary else note
+                else:
+                    pick.final_score = float(pick.screen_score)
+                continue
             if pick.llm_score is None:
                 pick.llm_score = 100.0 - i * (100.0 / max(len(ranked), 1))
-            weight = min(max(rank_weight, 0.0), 1.0)
-            pick.final_score = pick.screen_score * (1 - weight) + (pick.llm_score or 0) * weight
+            if adverse_reasons and pick.llm_score > _LLM_RED_FLAG_MAX_SCORE:
+                pick.llm_score = _LLM_RED_FLAG_MAX_SCORE
+                if "red_flag_capped" not in pick.llm_risks:
+                    pick.llm_risks = [*pick.llm_risks, "red_flag_capped"]
+                if "red_flag_capped" not in pick.risk_flags:
+                    pick.risk_flags = [*pick.risk_flags, "red_flag_capped"]
+                note = f"触发红线上限({_LLM_RED_FLAG_MAX_SCORE:.0f}): {', '.join(adverse_reasons[:3])}"
+                pick.risk_summary = f"{pick.risk_summary}; {note}" if pick.risk_summary else note
+            pick.final_score = pick.screen_score * (1 - weight) + (pick.llm_score or 0.0) * weight
         ranked.sort(key=lambda item: item.final_score, reverse=True)
         for i, pick in enumerate(ranked, start=1):
             pick.rank = i
@@ -187,6 +301,43 @@ def rank_candidates_with_metadata(
     except Exception as e:
         logger.warning("LLM ranking failed, falling back to screen_score: %s", e)
         return LLMRankingResult(picks=candidates, errors=[str(e)])
+
+
+def _unresolved_adverse_reasons(
+    pick: Pick,
+    *,
+    context_flags: tuple[str, ...] | list[str] = (),
+    extra_texts: tuple[str, ...] | list[str] = (),
+) -> list[str]:
+    reasons: list[str] = []
+    for flag in context_flags:
+        if flag and flag not in reasons:
+            reasons.append(str(flag))
+    news_items = list(pick.dsa_news or [])
+    if not news_items and isinstance(pick.dsa_context, dict):
+        news_payload = pick.dsa_context.get("news")
+        if isinstance(news_payload, dict) and isinstance(news_payload.get("results"), list):
+            news_items = [item for item in news_payload["results"] if isinstance(item, dict)]
+    news_titles = [
+        str(item.get("title") or "").strip()
+        for item in news_items
+        if isinstance(item, dict) and item.get("title")
+    ]
+    text_sources = [
+        *pick.llm_risks,
+        *pick.risk_flags,
+        *pick.deep_analysis_risk_flags,
+        pick.risk_summary,
+        pick.dsa_analysis_summary,
+        *extra_texts,
+        *news_titles,
+    ]
+    cleaned_sources = [_strip_negated_risk_phrases(str(x)) for x in text_sources if x]
+    combined = " | ".join(cleaned_sources).lower()
+    for marker in _ADVERSE_FILING_MARKERS:
+        if marker in combined and marker not in reasons:
+            reasons.append(marker)
+    return reasons
 
 
 def _build_ranking_prompt(
@@ -213,12 +364,11 @@ def _build_ranking_prompt(
 
 
 def _render_ranking_prompt(hints: str, context: str, candidates_text: str) -> str:
-    return f"""你是一个专业的股票研究员，任务是在“已经由代码硬筛过”的候选池内做相对排序。
-你不能推荐候选池外股票，不能修改硬筛条件，不能给目标价或承诺收益。你的价值在于：
-1. 结合策略偏好，对候选之间做跨股票比较；
-2. 识别结构化数据暴露不出的潜在催化、风格匹配和风险点；
-3. 对行业/概念热度和 DSA 补充的行情、基本面、新闻做语义归因，但不能把单日热度当作唯一买入理由；
-4. 给出简短、可审计、可复核的排序理由。
+    return f"""你是一个兼具深度基本面与风险排雷视角的股票研究员，任务是在“已经由代码硬筛过”的候选池内做相对排序。
+你不能推荐候选池外股票，不能修改硬筛条件，不能给目标价或承诺收益。请重点发挥代码公式无法替代的语义判断与排雷能力：
+1. **情报优先排雷（红旗一票降权）**：认真核查市场/情报上下文与 DSA 信息中的公告类别、新闻标题和负面关键词；若发现未消化重大利空（股东减持、立案调查、监管/问询函、业绩预亏或大幅下滑、商誉/债务/违约风险、退市警戒或纯粹高位蹭热点透支），必须将其 `llm_score` 严格压低到 `<= 35`，并在 `risk_flags` 与 `risk` 中写明依据；
+2. **禁止品牌/名气偏见**：严禁仅凭耳熟能详的大盘白马或银行股名气给高分；优先奖励业绩预增/扭亏、大额回购增持、重大合同中标且公告干净、资金与产业逻辑共振的标的；
+3. **跨候选可审计对比**：结合策略偏好、行业/概念持续性热度（不追单日过热炒作）对比相对强弱，所有结论必须锚定输入字段或上下文事实，不得编造未提供的数据。
 
 ## 排序依据
 {hints}
@@ -244,8 +394,8 @@ def _render_ranking_prompt(hints: str, context: str, candidates_text: str) -> st
       "sector": "行业/主题短标签，优先参考候选的 industry/concepts，并尽量统一，如 券商、银行、医药、AI算力",
       "theme": "主要交易逻辑或主题",
       "thesis": "该候选入选的核心投资假设",
-      "reason": "一句话排序理由",
-      "risk": "一句话主要风险",
+      "reason": "一句话排序理由（需锚定具体情报/催化或因子对比）",
+      "risk": "一句话主要排雷风险（红旗项须直指具体隐患）",
       "catalysts": ["潜在催化1", "潜在催化2"],
       "risk_flags": ["风险标签1"],
       "tags": ["价值", "趋势", "防守", "事件", "流动性"],
@@ -470,6 +620,77 @@ def _truncate_text(value: str, limit: int) -> str:
     return text[: max(limit - 1, 0)] + "…"
 
 
+def _call_llm_with_metadata(
+    prompt: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    *,
+    fallback_models: list[str] | None = None,
+    temperature: float = 0.2,
+    json_mode: bool = True,
+    silent: bool = True,
+    channels: list[dict[str, object]] | None = None,
+    config_path: str = "",
+    timeout_sec: float = 60.0,
+    max_tokens: int | None = 2048,
+    reasoning_effort: str | None = None,
+    validator: Callable[[str], Any] | None = None,
+) -> tuple[str, str]:
+    """Try configured OpenAI-compatible endpoints and return (content, used_model)."""
+    if error := configuration_error(channels or [], config_path):
+        raise LLMClientError(error)
+
+    attempts = build_attempts(
+        model,
+        api_key=api_key,
+        base_url=base_url,
+        channels=channels or [],
+        fallback_models=fallback_models or [],
+    )
+    if not attempts:
+        raise RuntimeError("No LLM model configured")
+
+    messages = [{"role": "user", "content": prompt}]
+    response_format = {"type": "json_object"} if json_mode else None
+    formats = (response_format, None) if json_mode else (None,)
+    last_error: LLMClientError | None = None
+
+    for attempt in attempts:
+        for requested_format in formats:
+            try:
+                text = complete(
+                    attempt,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=requested_format,
+                    reasoning_effort=reasoning_effort,
+                    timeout=timeout_sec,
+                    silent=silent,
+                )
+            except LLMClientError as exc:
+                last_error = exc
+                if exc.timed_out:
+                    # Do not blindly retry the SAME endpoint without response_format
+                    # after a timeout, but fall through to remaining fallback models/channels.
+                    break
+                if requested_format is not None and exc.json_mode_rejected:
+                    continue
+                break
+            if validator is not None:
+                try:
+                    validator(text)
+                except (ValueError, KeyError, TypeError) as exc:
+                    last_error = LLMClientError(f"Invalid LLM structured output: {exc}")
+                    break
+            return text, attempt.model
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No LLM model configured")
+
+
 def _call_llm(
     prompt: str,
     api_key: str,
@@ -485,92 +706,22 @@ def _call_llm(
     timeout_sec: float = 60.0,
     max_tokens: int | None = 2048,
 ) -> str:
-    """Call LLM via litellm with fallback models and channel configs."""
-    import litellm
-
-    if silent:
-        _silence_litellm_logs(litellm)
-
-    messages = [{"role": "user", "content": prompt}]
-    model_chain = _dedupe([model, *(fallback_models or [])])
-    last_error: Exception | None = None
-
-    if config_path:
-        router_result = _call_litellm_router(
-            litellm,
-            config_path=config_path,
-            model_chain=model_chain,
-            messages=messages,
-            temperature=temperature,
-            json_mode=json_mode,
-            timeout_sec=timeout_sec,
-            max_tokens=max_tokens,
-        )
-        if router_result is not None:
-            return router_result
-
-    for candidate_model in model_chain:
-        for kwargs in _build_litellm_attempts(
-            candidate_model,
-            api_key=api_key,
-            base_url=base_url,
-            channels=channels or [],
-        ):
-            kwargs["messages"] = messages
-            kwargs["temperature"] = temperature
-            kwargs["timeout"] = timeout_sec
-            kwargs["num_retries"] = 0
-            if max_tokens is not None and int(max_tokens) > 0:
-                kwargs["max_tokens"] = int(max_tokens)
-            if json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
-            try:
-                response = litellm.completion(**kwargs)
-                return response.choices[0].message.content or ""
-            except Exception as exc:
-                last_error = exc
-                if _is_timeout_error(exc):
-                    raise
-                if json_mode and "response_format" in kwargs and _is_json_mode_unsupported(exc):
-                    # Some providers do not support JSON mode. Retry the same
-                    # request without it before moving to fallback models. Do
-                    # not do this for timeout/connection failures: a local
-                    # OpenAI-compatible server may keep generating after the
-                    # client timeout, so a blind retry can duplicate expensive
-                    # work while the first request is still running.
-                    retry_kwargs = dict(kwargs)
-                    retry_kwargs.pop("response_format", None)
-                    try:
-                        response = litellm.completion(**retry_kwargs)
-                        return response.choices[0].message.content or ""
-                    except Exception as retry_exc:
-                        last_error = retry_exc
-                        continue
-                continue
-
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("No LLM model configured")
-
-
-def _is_json_mode_unsupported(exc: Exception) -> bool:
-    """Return True only for provider errors that clearly reject JSON mode."""
-    if _is_timeout_error(exc):
-        return False
-    text = str(exc).lower()
-    return (
-        "response_format" in text
-        or "json mode" in text
-        or "json_object" in text
-        or ("not support" in text and "json" in text)
-        or ("unsupported" in text and "json" in text)
+    """Try configured OpenAI-compatible endpoints for one LLM prompt."""
+    text, _ = _call_llm_with_metadata(
+        prompt,
+        api_key,
+        model,
+        base_url,
+        fallback_models=fallback_models,
+        temperature=temperature,
+        json_mode=json_mode,
+        silent=silent,
+        channels=channels,
+        config_path=config_path,
+        timeout_sec=timeout_sec,
+        max_tokens=max_tokens,
     )
-
-
-def _is_timeout_error(exc: Exception) -> bool:
-    text = str(exc).lower()
-    timeout_markers = ("timeout", "timed out", "readtimeout", "apitimeout")
-    return any(marker in text for marker in timeout_markers)
+    return text
 
 
 def _parse_ranking_response(response: str, candidates: list[Pick]) -> list[Pick]:
@@ -584,13 +735,13 @@ def _parse_ranking_response_detail(response: str, candidates: list[Pick]) -> Ran
     if not response or not response.strip():
         errors.append("empty_response")
         logger.warning("Empty LLM ranking response")
-        return RankingParseResult(candidates, 0.0, errors)
+        return RankingParseResult(candidates, 0.0, errors, matched_codes=set(), matched_count=0)
 
     parsed = _extract_ranking_json(response, errors)
     if parsed is None:
         errors.append("no_json_found")
         logger.warning("No JSON object or array found in LLM response")
-        return RankingParseResult(candidates, 0.0, errors)
+        return RankingParseResult(candidates, 0.0, errors, matched_codes=set(), matched_count=0)
     if isinstance(parsed, dict):
         items = parsed.get("ranked", [])
         market_view = _safe_str(parsed.get("market_view"), max_len=260)
@@ -604,7 +755,7 @@ def _parse_ranking_response_detail(response: str, candidates: list[Pick]) -> Ran
     if not isinstance(items, list):
         errors.append("ranked_not_list")
         logger.warning("LLM ranking JSON has no ranked list")
-        return RankingParseResult(candidates, 0.0, errors)
+        return RankingParseResult(candidates, 0.0, errors, matched_codes=set(), matched_count=0)
 
     code_to_pick = {_normalize_code(p.code): p for p in candidates if _normalize_code(p.code)}
 
@@ -649,7 +800,8 @@ def _parse_ranking_response_detail(response: str, candidates: list[Pick]) -> Ran
         elif code:
             errors.append(f"unknown_code:{code}")
 
-    # Append any candidates not mentioned by LLM
+    # Append any candidates not mentioned by LLM, preserving which codes were actually matched.
+    matched_codes = {_normalize_code(p.code) for p in ranked if _normalize_code(p.code)}
     ranked.extend(code_to_pick.values())
     coverage = matched / max(len(candidates), 1)
     return RankingParseResult(
@@ -659,6 +811,8 @@ def _parse_ranking_response_detail(response: str, candidates: list[Pick]) -> Ran
         market_view=market_view,
         selection_logic=selection_logic,
         portfolio_risk=portfolio_risk,
+        matched_codes=matched_codes,
+        matched_count=matched,
     )
 
 
@@ -797,131 +951,6 @@ def _extract_partial_ranking_array(response: str, errors: list[str]):
         return None
     errors.append("json_repaired:partial_array")
     return {"ranked": items}
-
-
-def _call_litellm_router(
-    litellm,
-    *,
-    config_path: str,
-    model_chain: list[str],
-    messages: list[dict[str, str]],
-    temperature: float,
-    json_mode: bool,
-    timeout_sec: float,
-    max_tokens: int | None = 2048,
-) -> str | None:
-    try:
-        import yaml
-
-        with open(config_path, "r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
-        model_list = data.get("model_list")
-        if not isinstance(model_list, list) or not model_list:
-            return None
-        router = litellm.Router(model_list=model_list)
-        for model in model_chain:
-            kwargs = {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "timeout": timeout_sec,
-                "num_retries": 0,
-            }
-            if max_tokens is not None and int(max_tokens) > 0:
-                kwargs["max_tokens"] = int(max_tokens)
-            if json_mode:
-                kwargs["response_format"] = {"type": "json_object"}
-            try:
-                response = router.completion(**kwargs)
-                return response.choices[0].message.content or ""
-            except Exception as exc:
-                if "response_format" in kwargs and _is_json_mode_unsupported(exc):
-                    kwargs.pop("response_format", None)
-                    response = router.completion(**kwargs)
-                    return response.choices[0].message.content or ""
-                raise
-    except Exception as exc:
-        if _is_timeout_error(exc):
-            raise
-        logger.warning("LiteLLM router config failed, falling back to direct calls: %s", exc)
-    return None
-
-
-def _silence_litellm_logs(litellm) -> None:
-    os.environ.setdefault("LITELLM_LOG", "ERROR")
-    try:
-        litellm.set_verbose = False
-        litellm.suppress_debug_info = True
-    except Exception:
-        pass
-    for logger_name in ("LiteLLM", "litellm"):
-        logging.getLogger(logger_name).setLevel(logging.WARNING)
-
-
-def _build_litellm_attempts(
-    model: str,
-    *,
-    api_key: str,
-    base_url: str,
-    channels: list[dict[str, object]],
-) -> list[dict[str, object]]:
-    attempts = []
-    for channel in channels:
-        if not _channel_matches_model(channel, model):
-            continue
-        api_keys = channel.get("api_keys", [])
-        if not isinstance(api_keys, list) or not api_keys:
-            api_keys = [api_key] if api_key else [""]
-        for channel_key in api_keys:
-            attempts.append(_completion_kwargs(
-                model,
-                api_key=str(channel_key or ""),
-                base_url=str(channel.get("base_url", "") or base_url or ""),
-            ))
-
-    attempts.append(_completion_kwargs(model, api_key=api_key, base_url=base_url))
-    return _unique_attempts(attempts)
-
-
-def _completion_kwargs(model: str, *, api_key: str, base_url: str) -> dict[str, object]:
-    kwargs: dict[str, object] = {"model": model}
-    if api_key:
-        kwargs["api_key"] = api_key
-    if base_url:
-        kwargs["api_base"] = base_url
-    return kwargs
-
-
-def _channel_matches_model(channel: dict[str, object], model: str) -> bool:
-    models = channel.get("models", [])
-    if not isinstance(models, list) or not models:
-        return False
-    normalized = {_normalize_model_name(str(item), str(channel.get("protocol", "openai"))) for item in models}
-    return model in normalized or model.split("/", 1)[-1] in {item.split("/", 1)[-1] for item in normalized}
-
-
-def _normalize_model_name(model: str, protocol: str) -> str:
-    model = model.strip()
-    if "/" in model:
-        return model
-    if protocol == "ollama":
-        return f"ollama/{model}"
-    if protocol == "gemini":
-        return f"gemini/{model}"
-    if protocol == "deepseek":
-        return f"deepseek/{model}"
-    return f"openai/{model}"
-
-
-def _unique_attempts(items: list[dict[str, object]]) -> list[dict[str, object]]:
-    seen = set()
-    result = []
-    for item in items:
-        key = (item.get("model"), item.get("api_key"), item.get("api_base"))
-        if key not in seen:
-            seen.add(key)
-            result.append(item)
-    return result
 
 
 def _dedupe(items: list[str]) -> list[str]:

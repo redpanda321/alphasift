@@ -231,22 +231,24 @@ class Pick:
     deep_analysis_operation_advice: str = ""
     deep_analysis_trend_prediction: str = ""
     deep_analysis_risk_flags: list[str] = field(default_factory=list)
+    topic_alignment_status: str = ""
+    topic_alignment_role: str = ""
+    topic_alignment_reason: str = ""
+    matched_topics: list[str] = field(default_factory=list)
+    unmatched_topics: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ScreenResult:
     strategy: str
     market: str
-    scan_started_at: str = ""
-    snapshot_retrieved_at: str = ""
-    expected_daily_session: str = ""
-    freshness_policy: str = ""
     strategy_version: str = ""
     strategy_category: str = ""
     snapshot_count: int = 0
     after_filter_count: int = 0
     picks: list[Pick] = field(default_factory=list)
     run_id: str = ""
+    track: str = ""
     llm_ranked: bool = False
     llm_market_view: str = ""
     llm_selection_logic: str = ""
@@ -265,6 +267,19 @@ class ScreenResult:
     portfolio_concentration_notes: list[str] = field(default_factory=list)
     saved_path: str = ""
     created_at: str = field(default_factory=now_iso)
+    portfolio_topic_exposure: dict[str, dict[str, Any]] = field(default_factory=dict)
+    overconcentrated_topics: list[str] = field(default_factory=list)
+    replacement_candidates: list[dict[str, Any]] = field(default_factory=list)
+    daily_source_counts: dict[str, int] = field(default_factory=dict)
+    daily_quality_flag_counts: dict[str, int] = field(default_factory=dict)
+    scan_started_at: str = ""
+    snapshot_retrieved_at: str = ""
+    expected_daily_session: str = ""
+    freshness_policy: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.track:
+            self.track = "ai" if self.llm_ranked else "rules"
 
 
 @dataclass
@@ -297,6 +312,11 @@ class PickEvaluation:
     horizon_days: int | None = None
     benchmark_return_pct: float | None = None
     excess_return_pct: float | None = None
+    entry_mode: str = "close"
+    entry_open: float | None = None
+    entry_date: str | None = None
+    exit_date: str | None = None
+    tradability_flags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -322,3 +342,11 @@ class EvaluationResult:
     benchmark_return_pct: float | None = None
     average_excess_return_pct: float | None = None
     pending_count: int = 0
+    entry_mode: str = "close"
+    untradable_count: int = 0
+    untradable_share_pct: float | None = None
+    run_snapshot_source: str = ""
+    run_source_errors: list[str] = field(default_factory=list)
+    run_degradation: list[str] = field(default_factory=list)
+    daily_source_counts: dict[str, int] = field(default_factory=dict)
+    daily_quality_flag_counts: dict[str, int] = field(default_factory=dict)

@@ -3,6 +3,12 @@ name: Track record
 # Every trading day after the close: run each built-in strategy with --no-llm
 # --save-run, commit the saved runs to the track-record branch, evaluate T+N
 # against the market benchmark, and publish the dashboard to GitHub Pages.
+#
+# Fork protection (Plan A): public website rendering and GitHub Pages deploy
+# only run on the upstream repository unless a fork explicitly sets
+# ALPHASIFT_ENABLE_PAGES=true. A fork may independently opt into persisting
+# private track-record ledger commits via ALPHASIFT_ENABLE_LEDGER=true without
+# publishing a duplicate Pages site.
 
 on:
   schedule:
@@ -31,7 +37,26 @@ env:
   STATE: ${{ github.workspace }}/state
 
 jobs:
+  pack:
+    if: >-
+      (
+        (github.event_name == 'schedule' && github.event.schedule == '30 10 * * 1-5') ||
+        (github.event_name == 'workflow_dispatch' && (inputs.session || 'asia') == 'asia')
+      ) &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/data-pack.yml
+    secrets:
+      TICKPLUS_API_KEY: ${{ secrets.TICKPLUS_API_KEY }}
+    with:
+      mode: "update"
+      days: "250"
+      source: "auto"
+
   record:
+    needs: [pack]
+    if: ${{ !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
@@ -42,19 +67,40 @@ jobs:
       ALPHASIFT_SOURCE_HEALTH_PATH: ${{ github.workspace }}/state/source_health.json
       ALPHASIFT_DAILY_HISTORY_CACHE_DIR: ${{ github.workspace }}/state/daily_history
       ALPHASIFT_INDUSTRY_PROVIDER_CACHE_DIR: ${{ github.workspace }}/state/industry_provider_cache
+      ALPHASIFT_CANDIDATE_CONTEXT_CACHE_DIR: ${{ github.workspace }}/state/candidate_context
+      ALPHASIFT_PACK_DIR: ${{ github.workspace }}/pack
+      ALPHASIFT_NOTIFY_STATE_PATH: ${{ github.workspace }}/state/notify_state.json
+      OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+      LITELLM_MODEL: ${{ vars.LITELLM_MODEL }}
+      LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS }}
+      LLM_CHANNELS: ${{ vars.LLM_CHANNELS }}
+      LLM_PRIMARY_PROTOCOL: ${{ vars.LLM_PRIMARY_PROTOCOL || 'openai' }}
+      LLM_PRIMARY_BASE_URL: ${{ vars.LLM_PRIMARY_BASE_URL }}
+      LLM_PRIMARY_MODELS: ${{ vars.LLM_PRIMARY_MODELS }}
+      LLM_BACKUP_PROTOCOL: ${{ vars.LLM_BACKUP_PROTOCOL || 'openai' }}
+      LLM_BACKUP_BASE_URL: ${{ vars.LLM_BACKUP_BASE_URL }}
+      LLM_BACKUP_MODELS: ${{ vars.LLM_BACKUP_MODELS }}
+      LLM_CANDIDATE_CONTEXT_ENABLED: ${{ vars.LLM_CANDIDATE_CONTEXT_ENABLED || 'true' }}
+      LLM_CANDIDATE_CONTEXT_MAX_CANDIDATES: "12"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        continue-on-error: true
         with:
           ref: track-record
           path: track
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - name: Ensure track workspace
+        run: mkdir -p track/data/runs track/data/logs track/site
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
       - name: Install
         run: python -m pip install -e .
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: state
           key: track-state-${{ github.run_id }}
@@ -62,12 +108,21 @@ jobs:
 
       - name: Pick the session
         id: session
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE_EXPR: ${{ github.event.schedule }}
+          INPUT_SESSION: ${{ inputs.session || 'asia' }}
+          INPUT_MARKETS: ${{ inputs.markets }}
         run: |
-          session="${{ inputs.session || 'asia' }}"
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            if [ "${{ github.event.schedule }}" = "30 22 * * 1-5" ]; then session=us; else session=asia; fi
+          session="$INPUT_SESSION"
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            if [ "$SCHEDULE_EXPR" = "30 22 * * 1-5" ]; then session=us; else session=asia; fi
           fi
-          markets="${{ inputs.markets }}"
+          case "$session" in
+            asia|us|rebuild) ;;
+            *) echo "::error::Invalid session: $session"; exit 1 ;;
+          esac
+          markets="$INPUT_MARKETS"
           if [ -z "$markets" ]; then
             case "$session" in
               asia) markets=cn,hk,jp,kr,tw,in ;;
@@ -75,47 +130,417 @@ jobs:
               rebuild) markets=cn,hk,jp,kr,tw,in,us ;;
             esac
           fi
+          if ! [[ "$markets" =~ ^(cn|us|hk|jp|kr|tw|in)(,(cn|us|hk|jp|kr|tw|in))*$ ]]; then
+            echo "::error::Invalid markets subset: $markets"
+            exit 1
+          fi
           echo "session=$session" >> "$GITHUB_OUTPUT"
           echo "markets=$markets" >> "$GITHUB_OUTPUT"
           echo "session=$session markets=$markets"
 
+      - name: Restore CN data pack from private Actions cache
+        if: steps.session.outputs.session != 'us'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.ALPHASIFT_PACK_DIR }}
+          key: cn-daily-pack-${{ github.run_id }}
+          restore-keys: |
+            cn-daily-pack-
+
+      - name: Verify CN data pack cache
+        if: steps.session.outputs.session != 'us'
+        run: |
+          if [ -f "$ALPHASIFT_PACK_DIR/manifest.json" ]; then
+            alphasift pack info || echo "::warning::cached CN pack failed verification"
+          else
+            echo "::warning::CN daily pack cache unavailable; falling back to per-stock daily fetch"
+          fi
+
       - name: Screen
         if: steps.session.outputs.session != 'rebuild'
+        env:
+          SESSION: ${{ steps.session.outputs.session }}
+          MARKETS: ${{ steps.session.outputs.markets }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
+          LLM_PRIMARY_BASE_URL: ${{ secrets.LLM_PRIMARY_BASE_URL || vars.LLM_PRIMARY_BASE_URL }}
+          LLM_PRIMARY_API_KEY: ${{ secrets.LLM_PRIMARY_API_KEY }}
+          LLM_PRIMARY_API_KEYS: ${{ secrets.LLM_PRIMARY_API_KEYS }}
+          LLM_BACKUP_BASE_URL: ${{ secrets.LLM_BACKUP_BASE_URL || vars.LLM_BACKUP_BASE_URL }}
+          LLM_BACKUP_API_KEY: ${{ secrets.LLM_BACKUP_API_KEY }}
+          LLM_BACKUP_API_KEYS: ${{ secrets.LLM_BACKUP_API_KEYS }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_DEEPSEEK_ENABLED: ${{ secrets.LLM_DEEPSEEK_ENABLED || vars.LLM_DEEPSEEK_ENABLED }}
+          LLM_DEEPSEEK_PROTOCOL: ${{ secrets.LLM_DEEPSEEK_PROTOCOL || vars.LLM_DEEPSEEK_PROTOCOL }}
+          LLM_DEEPSEEK_BASE_URL: ${{ secrets.LLM_DEEPSEEK_BASE_URL || vars.LLM_DEEPSEEK_BASE_URL }}
+          LLM_DEEPSEEK_API_KEY: ${{ secrets.LLM_DEEPSEEK_API_KEY }}
+          LLM_DEEPSEEK_API_KEYS: ${{ secrets.LLM_DEEPSEEK_API_KEYS }}
+          LLM_DEEPSEEK_MODELS: ${{ secrets.LLM_DEEPSEEK_MODELS || vars.LLM_DEEPSEEK_MODELS }}
+          LLM_GEMINI_ENABLED: ${{ secrets.LLM_GEMINI_ENABLED || vars.LLM_GEMINI_ENABLED }}
+          LLM_GEMINI_PROTOCOL: ${{ secrets.LLM_GEMINI_PROTOCOL || vars.LLM_GEMINI_PROTOCOL }}
+          LLM_GEMINI_BASE_URL: ${{ secrets.LLM_GEMINI_BASE_URL || vars.LLM_GEMINI_BASE_URL }}
+          LLM_GEMINI_API_KEY: ${{ secrets.LLM_GEMINI_API_KEY }}
+          LLM_GEMINI_API_KEYS: ${{ secrets.LLM_GEMINI_API_KEYS }}
+          LLM_GEMINI_MODELS: ${{ secrets.LLM_GEMINI_MODELS || vars.LLM_GEMINI_MODELS }}
+          LLM_OPENAI_ENABLED: ${{ secrets.LLM_OPENAI_ENABLED || vars.LLM_OPENAI_ENABLED }}
+          LLM_OPENAI_PROTOCOL: ${{ secrets.LLM_OPENAI_PROTOCOL || vars.LLM_OPENAI_PROTOCOL }}
+          LLM_OPENAI_BASE_URL: ${{ secrets.LLM_OPENAI_BASE_URL || vars.LLM_OPENAI_BASE_URL }}
+          LLM_OPENAI_API_KEY: ${{ secrets.LLM_OPENAI_API_KEY }}
+          LLM_OPENAI_API_KEYS: ${{ secrets.LLM_OPENAI_API_KEYS }}
+          LLM_OPENAI_MODELS: ${{ secrets.LLM_OPENAI_MODELS || vars.LLM_OPENAI_MODELS }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
         run: |
+          if [ -z "${LITELLM_FALLBACK_MODELS:-}" ]; then unset LITELLM_FALLBACK_MODELS; fi
           python scripts/track_record.py screen --track track \
-            --session "${{ steps.session.outputs.session }}" --markets "${{ steps.session.outputs.markets }}" \
+            --session "$SESSION" --markets "$MARKETS" --pack-dir "$ALPHASIFT_PACK_DIR" \
             || echo "::warning::no strategy saved a run this session"
+
+      - name: Resolve CN target trade date
+        id: cn_date
+        if: steps.session.outputs.session == 'asia' || steps.session.outputs.session == 'rebuild'
+        env:
+          SESSION: ${{ steps.session.outputs.session }}
+        run: |
+          eval "$(python3 - <<'PY'
+          import datetime as _dt
+          import json
+          import os
+          import pathlib
+          import re
+          import zoneinfo
+
+          session = os.environ.get("SESSION", "asia").strip()
+          today_cn = _dt.datetime.now(zoneinfo.ZoneInfo("Asia/Shanghai")).date().isoformat()
+          log_path = pathlib.Path(f"track/data/logs/{today_cn}-asia.json")
+          market_state = "missing_log"
+          cn_date = today_cn
+          if log_path.is_file():
+              try:
+                  data = json.loads(log_path.read_text(encoding="utf-8"))
+                  raw = str((data.get("effective_dates") or {}).get("cn") or "").strip()
+                  cn_entries = [
+                      e for e in (data.get("entries") or [])
+                      if isinstance(e, dict) and e.get("market") == "cn"
+                  ]
+                  if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+                      market_state = "open"
+                      cn_date = raw
+                  elif cn_entries and all(e.get("status") == "skipped_holiday" for e in cn_entries):
+                      market_state = "holiday"
+                      cn_date = ""
+                  else:
+                      market_state = "screen_failed"
+                      cn_date = today_cn
+              except Exception:
+                  market_state = "screen_failed"
+                  cn_date = today_cn
+          elif session == "rebuild":
+              from scripts.track_record import load_runs
+              cn_runs = [r for r in load_runs(pathlib.Path("track")) if r.get("market") == "cn" and r.get("date")]
+              if cn_runs:
+                  market_state = "open"
+                  cn_date = str(cn_runs[-1]["date"])
+          print(f"cn_market_state={market_state}")
+          print(f"cn_trade_date={cn_date}")
+          PY
+          )"
+          {
+            echo "cn_market_state=$cn_market_state"
+            echo "cn_trade_date=$cn_trade_date"
+          } >> "$GITHUB_OUTPUT"
+          echo "cn_market_state=$cn_market_state cn_trade_date=$cn_trade_date"
+
+      - name: Record CN pattern board
+        if: (steps.session.outputs.session == 'asia' || steps.session.outputs.session == 'rebuild') && steps.cn_date.outputs.cn_market_state != 'holiday'
+        env:
+          CN_TRADE_DATE: ${{ steps.cn_date.outputs.cn_trade_date }}
+        run: |
+          if [ -f "$ALPHASIFT_PACK_DIR/manifest.json" ]; then
+            python scripts/track_record.py patterns --track track --pack-dir "$ALPHASIFT_PACK_DIR" \
+              --expected-trade-date "$CN_TRADE_DATE" --allow-stale-pack --with-replay \
+              || echo "::warning::CN pattern board skipped"
+          fi
+
       - name: Evaluate T+N
-        run: python scripts/track_record.py evaluate --track track --markets "${{ steps.session.outputs.markets }}"
+        env:
+          MARKETS: ${{ steps.session.outputs.markets }}
+          ALPHASIFT_NEXT_OPEN_SWITCH_DATE: ${{ vars.ALPHASIFT_NEXT_OPEN_SWITCH_DATE }}
+        run: |
+          if [ -z "${ALPHASIFT_NEXT_OPEN_SWITCH_DATE:-}" ]; then unset ALPHASIFT_NEXT_OPEN_SWITCH_DATE; fi
+          python scripts/track_record.py evaluate --track track --markets "$MARKETS" --pack-dir "$ALPHASIFT_PACK_DIR"
+
+      - name: Daily report and optional IM push
+        if: (steps.session.outputs.session == 'asia' || steps.session.outputs.session == 'rebuild') && steps.cn_date.outputs.cn_market_state != 'holiday'
+        env:
+          SESSION: ${{ steps.session.outputs.session }}
+          CN_TRADE_DATE: ${{ steps.cn_date.outputs.cn_trade_date }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ALPHASIFT_ENABLE_PAGES: ${{ vars.ALPHASIFT_ENABLE_PAGES }}
+          ALPHASIFT_DASHBOARD_URL: ${{ vars.ALPHASIFT_DASHBOARD_URL }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL || vars.OPENAI_BASE_URL }}
+          LLM_PRIMARY_BASE_URL: ${{ secrets.LLM_PRIMARY_BASE_URL || vars.LLM_PRIMARY_BASE_URL }}
+          LLM_PRIMARY_API_KEY: ${{ secrets.LLM_PRIMARY_API_KEY }}
+          LLM_PRIMARY_API_KEYS: ${{ secrets.LLM_PRIMARY_API_KEYS }}
+          LLM_BACKUP_BASE_URL: ${{ secrets.LLM_BACKUP_BASE_URL || vars.LLM_BACKUP_BASE_URL }}
+          LLM_BACKUP_API_KEY: ${{ secrets.LLM_BACKUP_API_KEY }}
+          LLM_BACKUP_API_KEYS: ${{ secrets.LLM_BACKUP_API_KEYS }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_DEEPSEEK_ENABLED: ${{ secrets.LLM_DEEPSEEK_ENABLED || vars.LLM_DEEPSEEK_ENABLED }}
+          LLM_DEEPSEEK_PROTOCOL: ${{ secrets.LLM_DEEPSEEK_PROTOCOL || vars.LLM_DEEPSEEK_PROTOCOL }}
+          LLM_DEEPSEEK_BASE_URL: ${{ secrets.LLM_DEEPSEEK_BASE_URL || vars.LLM_DEEPSEEK_BASE_URL }}
+          LLM_DEEPSEEK_API_KEY: ${{ secrets.LLM_DEEPSEEK_API_KEY }}
+          LLM_DEEPSEEK_API_KEYS: ${{ secrets.LLM_DEEPSEEK_API_KEYS }}
+          LLM_DEEPSEEK_MODELS: ${{ secrets.LLM_DEEPSEEK_MODELS || vars.LLM_DEEPSEEK_MODELS }}
+          LLM_GEMINI_ENABLED: ${{ secrets.LLM_GEMINI_ENABLED || vars.LLM_GEMINI_ENABLED }}
+          LLM_GEMINI_PROTOCOL: ${{ secrets.LLM_GEMINI_PROTOCOL || vars.LLM_GEMINI_PROTOCOL }}
+          LLM_GEMINI_BASE_URL: ${{ secrets.LLM_GEMINI_BASE_URL || vars.LLM_GEMINI_BASE_URL }}
+          LLM_GEMINI_API_KEY: ${{ secrets.LLM_GEMINI_API_KEY }}
+          LLM_GEMINI_API_KEYS: ${{ secrets.LLM_GEMINI_API_KEYS }}
+          LLM_GEMINI_MODELS: ${{ secrets.LLM_GEMINI_MODELS || vars.LLM_GEMINI_MODELS }}
+          LLM_OPENAI_ENABLED: ${{ secrets.LLM_OPENAI_ENABLED || vars.LLM_OPENAI_ENABLED }}
+          LLM_OPENAI_PROTOCOL: ${{ secrets.LLM_OPENAI_PROTOCOL || vars.LLM_OPENAI_PROTOCOL }}
+          LLM_OPENAI_BASE_URL: ${{ secrets.LLM_OPENAI_BASE_URL || vars.LLM_OPENAI_BASE_URL }}
+          LLM_OPENAI_API_KEY: ${{ secrets.LLM_OPENAI_API_KEY }}
+          LLM_OPENAI_API_KEYS: ${{ secrets.LLM_OPENAI_API_KEYS }}
+          LLM_OPENAI_MODELS: ${{ secrets.LLM_OPENAI_MODELS || vars.LLM_OPENAI_MODELS }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          NOTIFY_URLS: ${{ secrets.NOTIFY_URLS }}
+          WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+          DINGTALK_WEBHOOK_SECRET: ${{ secrets.DINGTALK_WEBHOOK_SECRET }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+          EMAIL_SMTP_HOST: ${{ secrets.EMAIL_SMTP_HOST || vars.EMAIL_SMTP_HOST }}
+          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT || vars.EMAIL_SMTP_PORT }}
+          CUSTOM_WEBHOOK_URL: ${{ secrets.CUSTOM_WEBHOOK_URL }}
+          CUSTOM_WEBHOOK_TOKEN: ${{ secrets.CUSTOM_WEBHOOK_TOKEN }}
+        run: |
+          if [ -z "${LITELLM_FALLBACK_MODELS:-}" ]; then unset LITELLM_FALLBACK_MODELS; fi
+          if [ -f "$ALPHASIFT_PACK_DIR/manifest.json" ]; then
+            push_flag=()
+            if [ "${SESSION:-asia}" = "asia" ]; then
+              push_flag+=(--push)
+            fi
+            alphasift daily-report \
+              --pack-dir "$ALPHASIFT_PACK_DIR" \
+              --runs-dir track/data/runs \
+              --expected-trade-date "$CN_TRADE_DATE" \
+              --allow-stale-pack \
+              --ai-brief auto \
+              --output-json track/site/report.json \
+              --output-card track/site/daily_card.md \
+              --output-html track/site/daily_report.html \
+              "${push_flag[@]}" \
+              --explain || echo "::warning::daily-report skipped"
+          fi
+
+      - name: US market digest push
+        if: steps.session.outputs.session == 'us'
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ALPHASIFT_ENABLE_PAGES: ${{ vars.ALPHASIFT_ENABLE_PAGES }}
+          ALPHASIFT_DASHBOARD_URL: ${{ vars.ALPHASIFT_DASHBOARD_URL }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          NOTIFY_URLS: ${{ secrets.NOTIFY_URLS }}
+          WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_SECRET: ${{ secrets.FEISHU_WEBHOOK_SECRET }}
+          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+          DINGTALK_WEBHOOK_SECRET: ${{ secrets.DINGTALK_WEBHOOK_SECRET }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+          EMAIL_SMTP_HOST: ${{ secrets.EMAIL_SMTP_HOST || vars.EMAIL_SMTP_HOST }}
+          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT || vars.EMAIL_SMTP_PORT }}
+          CUSTOM_WEBHOOK_URL: ${{ secrets.CUSTOM_WEBHOOK_URL }}
+          CUSTOM_WEBHOOK_TOKEN: ${{ secrets.CUSTOM_WEBHOOK_TOKEN }}
+        run: |
+          alphasift daily-report \
+            --markets us \
+            --runs-dir track/data/runs \
+            --output-json track/site/us_report.json \
+            --push \
+            --explain || echo "::warning::US market digest skipped"
+
       - name: Build site data
+        env:
+          REPO_NAME: ${{ github.repository }}
+          ENABLE_PAGES: ${{ vars.ALPHASIFT_ENABLE_PAGES }}
+          DASHBOARD_URL: ${{ vars.ALPHASIFT_DASHBOARD_URL }}
         run: |
           python scripts/track_record.py build --track track
-          cp scripts/track_record_page.html track/index.html
+          if [ "$REPO_NAME" = "ZhuLinsen/alphasift" ] || [ "$ENABLE_PAGES" = "true" ]; then
+            cp scripts/track_record_page.html track/index.html
+            if [ "$REPO_NAME" != "ZhuLinsen/alphasift" ]; then
+              python3 -c 'import os, pathlib; repo = os.environ.get("REPO_NAME", "").strip(); custom = os.environ.get("DASHBOARD_URL", "").strip(); target = (custom if custom.endswith("/") else f"{custom}/") if custom else (f"https://{repo.split(\"/\", 1)[0].lower()}.github.io/{repo.split(\"/\", 1)[1]}/" if "/" in repo else ""); p = pathlib.Path("track/index.html"); target and p.write_text(p.read_text(encoding="utf-8").replace("https://alphasift.zhulinsen.tech/", target), encoding="utf-8")'
+            fi
+          fi
 
       - name: Commit to track-record
+        if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.repository == 'ZhuLinsen/alphasift' || vars.ALPHASIFT_ENABLE_PAGES == 'true' || vars.ALPHASIFT_ENABLE_LEDGER == 'true') }}
         working-directory: track
+        env:
+          SESSION: ${{ steps.session.outputs.session }}
+          IS_PAGES_ENABLED: ${{ github.repository == 'ZhuLinsen/alphasift' || vars.ALPHASIFT_ENABLE_PAGES == 'true' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          if [ ! -d .git ]; then echo "track-record branch checkout absent; skip commit"; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          if [ "$IS_PAGES_ENABLED" = "true" ]; then
+            git add -A
+          else
+            git add data/
+          fi
           if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
           tz="Asia/Shanghai"
-          if [ "${{ steps.session.outputs.session }}" = "us" ]; then tz="America/New_York"; fi
-          git commit -q -m "track: ${{ steps.session.outputs.session }} $(TZ=$tz date +%F)"
-          git push origin HEAD:track-record
+          if [ "$SESSION" = "us" ]; then tz="America/New_York"; fi
+          git commit -q -m "track: $SESSION $(TZ=$tz date +%F)"
+          auth_b64=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_b64}" push origin HEAD:track-record
+
+      - name: Publish health & artifact gate
+        if: steps.session.outputs.session != ''
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SESSION: ${{ steps.session.outputs.session }}
+          REPO_NAME: ${{ github.repository }}
+          CN_TRADE_DATE: ${{ steps.cn_date.outputs.cn_trade_date }}
+          CN_MARKET_STATE: ${{ steps.cn_date.outputs.cn_market_state }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+
+          repo = os.environ.get("REPO_NAME", "")
+          session = os.environ.get("SESSION", "")
+          event_name = os.environ.get("EVENT_NAME", "")
+          cn_trade_date = os.environ.get("CN_TRADE_DATE", "").strip()
+          cn_market_state = os.environ.get("CN_MARKET_STATE", "").strip()
+          summary_path = pathlib.Path("track/site/summary.json")
+          state_dir = pathlib.Path(os.environ.get("STATE", "state"))
+          state_dir.mkdir(parents=True, exist_ok=True)
+          streak_file = state_dir / "missing_pack_streak.txt"
+
+          summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else {}
+          arts = summary.get("artifacts") or {}
+          pat = arts.get("patterns") or {}
+          rep = arts.get("report") or {}
+          tc = summary.get("track_comparison") or []
+          integ = summary.get("integrity") or {}
+
+          pat_date = str(pat.get("trade_date") or "").strip()
+          rep_date = str(rep.get("trade_date") or "").strip()
+          is_cn_holiday = session == "asia" and cn_market_state == "holiday"
+          pat_fresh = bool(
+              pat.get("exists")
+              and pat_date
+              and (not cn_trade_date or pat_date == cn_trade_date)
+              and not pat.get("pack_is_stale")
+          )
+          rep_fresh = bool(
+              rep.get("exists")
+              and rep_date
+              and (not cn_trade_date or rep_date == cn_trade_date)
+              and not rep.get("pack_is_stale")
+          )
+
+          def _art_status(info: dict, date_val: str, is_fresh: bool) -> str:
+              if is_cn_holiday:
+                  return f"holiday-skipped (latest {date_val or '-'})"
+              if not info.get("exists"):
+                  return f"MISSING ({info.get('reason') or '-'})"
+              if is_fresh:
+                  return f"fresh ({date_val})"
+              exp = cn_trade_date or info.get("expected_trade_date") or "-"
+              stale_flag = "stale" if info.get("pack_is_stale") else "date_mismatch"
+              return f"STALE:{stale_flag} ({date_val or '-'} vs expected {exp})"
+
+          lines = [
+              "### AlphaSift Track Record Health",
+              f"- Session: `{session}` (`{event_name}`) · Runs: `{summary.get('run_count', 0)}` · Days: `{len(summary.get('days') or [])}` · CN state: `{cn_market_state or '-'} ({cn_trade_date or '-'})`",
+              f"- AI paired strategies: `{len(tc)}`",
+              f"- Patterns artifact: `{_art_status(pat, pat_date, pat_fresh)}`",
+              f"- Daily report artifact: `{_art_status(rep, rep_date, rep_fresh)}`",
+          ]
+          if integ.get("runs_sha256"):
+              lines.append(f"- SHA-256 ledger digest: `{integ['runs_sha256'][:16]}...` ({integ.get('runs_count', 0)} runs)")
+          step_sum = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_sum:
+              with open(step_sum, "a", encoding="utf-8") as fh:
+                  fh.write("\n".join(lines) + "\n")
+          print("\n".join(lines))
+
+          if repo == "ZhuLinsen/alphasift" and session == "asia":
+              if is_cn_holiday:
+                  print("CN exchange holiday — artifact freshness gate skipped")
+              elif pat_fresh and rep_fresh:
+                  streak_file.write_text("0\n", encoding="utf-8")
+              else:
+                  prev = 0
+                  if streak_file.is_file():
+                      try:
+                          prev = int(streak_file.read_text(encoding="utf-8").strip() or "0")
+                      except ValueError:
+                          prev = 0
+                  cur = prev + 1
+                  streak_file.write_text(f"{cur}\n", encoding="utf-8")
+                  msg = f"CN pattern/report artifacts missing or stale for {cn_trade_date or 'session'} (consecutive asia sessions: {cur})"
+                  if event_name == "schedule" and cur >= 2:
+                      print(f"::error::{msg}")
+                      raise SystemExit(1)
+                  print(f"::warning::{msg}")
+          PY
 
       - name: Stage the dashboard
+        if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.repository == 'ZhuLinsen/alphasift' || vars.ALPHASIFT_ENABLE_PAGES == 'true') }}
         run: |
           mkdir -p _site
           cp track/index.html _site/
           cp -r track/site _site/site
-      - uses: actions/upload-pages-artifact@v3
+          if [ -f docs/assets/social-preview.png ]; then cp docs/assets/social-preview.png _site/social-preview.png; fi
+      - uses: actions/upload-pages-artifact@v5
+        if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.repository == 'ZhuLinsen/alphasift' || vars.ALPHASIFT_ENABLE_PAGES == 'true') }}
         with:
           path: _site
 
   deploy:
     needs: record
-    if: github.ref == 'refs/heads/main'
+    if: ${{ !cancelled() && needs.record.result == 'success' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.repository == 'ZhuLinsen/alphasift' || vars.ALPHASIFT_ENABLE_PAGES == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -125,4 +550,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

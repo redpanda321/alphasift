@@ -12,6 +12,7 @@ import pandas as pd
 
 from alphasift.config import Config
 from alphasift.daily import compute_daily_features, daily_source_health_snapshot, fetch_daily_history
+from alphasift.llm_client import configuration_error
 from alphasift.snapshot import (
     fetch_cn_snapshot,
     fetch_snapshot_with_fallback,
@@ -140,6 +141,8 @@ def doctor_data_sources(
         enabled=compare_snapshot_sources and market == "cn",
     )
     recommendations = _build_recommendations(snapshot, daily)
+    if error := configuration_error(config.llm_channels, str(config.llm_config_path or "")):
+        recommendations.append(error)
     statuses = [snapshot.status, daily.status if daily is not None else "skipped"]
     status = _overall_status(statuses)
     return DataSourcesDoctorResult(
@@ -1017,3 +1020,104 @@ def write_doctor_report(path: str | Path, result: DataSourcesDoctorResult) -> Pa
         json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return output
+
+
+def doctor_radar_readiness(
+    config: Config,
+    *,
+    pack_dir: Path | None = None,
+    trade_date: str | None = None,
+) -> dict[str, Any]:
+    """Check CN DailyPack freshness, pattern catalog, LLM track, and IM webhook readiness."""
+    from alphasift import pack
+    from alphasift.notify import notify_readiness
+    from alphasift.patterns import list_patterns
+
+    directory = Path(pack_dir).expanduser() if pack_dir is not None else pack.pack_dir(config)
+    expected = trade_date or pack.expected_trade_date()
+    pack_info: dict[str, Any] = {
+        "directory": str(directory),
+        "exists": directory.is_dir(),
+        "valid": False,
+        "expected_trade_date": expected,
+        "trade_date": None,
+        "fresh": False,
+        "dates": 0,
+        "codes": 0,
+        "size_mb": None,
+        "error": None,
+    }
+    if directory.is_dir():
+        try:
+            loaded = pack.load_pack(directory)
+            npz_path = directory / "daily.npz"
+            size_mb = round(npz_path.stat().st_size / (1024 * 1024), 2) if npz_path.is_file() else None
+            fresh = pack.is_fresh(loaded, expected)
+            pack_info.update({
+                "valid": True,
+                "trade_date": loaded.trade_date,
+                "fresh": fresh,
+                "dates": int(len(loaded.dates)),
+                "codes": int(len(loaded.codes)),
+                "size_mb": size_mb,
+            })
+        except Exception as exc:  # noqa: BLE001
+            pack_info["error"] = str(exc)[:240]
+
+    mirror_sync_ok = True
+    pattern_error = None
+    specs = []
+    try:
+        specs = list_patterns(include_experimental=True)
+    except Exception as exc:  # noqa: BLE001
+        mirror_sync_ok = False
+        pattern_error = str(exc)[:240]
+
+    active_patterns = [s.name for s in specs if s.status == "active"]
+    experimental_patterns = [s.name for s in specs if s.status == "experimental"]
+    push_info = notify_readiness(config)
+    llm_ready = config.has_usable_llm_config() if hasattr(config, "has_usable_llm_config") else config.has_llm_config()
+
+    recommendations: list[str] = []
+    if not pack_info["valid"]:
+        recommendations.append(
+            "CN DailyPack 未就绪：数据包仅限本地/私有使用，请运行 `alphasift pack build`（或 `python scripts/build_pack.py backfill`）构建本地日线包。"
+        )
+    elif not pack_info["fresh"]:
+        recommendations.append(
+            f"CN DailyPack 日期为 {pack_info['trade_date']}，早于预期交易日 {expected}，可运行增量更新或拉取最新包。"
+        )
+    if not mirror_sync_ok:
+        recommendations.append(f"形态目录同步检查失败：{pattern_error}")
+    if not push_info["any_configured"]:
+        recommendations.append(
+            "未配置企微/飞书/Telegram Webhook，每日推送将静默跳过；需要通知时配置 WECOM_WEBHOOK_URL / FEISHU_WEBHOOK_URL / TELEGRAM_BOT_TOKEN+CHAT_ID。"
+        )
+    if not llm_ready:
+        recommendations.append("未配置 LLM Key，战绩跟踪与筛选将自动仅运行纯规则赛道（rules track）。")
+
+    if not pack_info["valid"] or not pack_info["fresh"] or not mirror_sync_ok:
+        status = "degraded"
+    else:
+        status = "ok"
+
+    return {
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "pack": pack_info,
+        "patterns": {
+            "total": len(specs),
+            "active_count": len(active_patterns),
+            "experimental_count": len(experimental_patterns),
+            "active": active_patterns,
+            "experimental": experimental_patterns,
+            "mirror_sync_ok": mirror_sync_ok,
+            "error": pattern_error,
+        },
+        "notify": push_info,
+        "llm": {
+            "configured": llm_ready,
+            "ai_track_mode": "enabled" if llm_ready else "rules_only",
+        },
+        "recommendations": recommendations,
+    }

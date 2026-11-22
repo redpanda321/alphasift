@@ -2,15 +2,19 @@
 """Configuration."""
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from alphasift.llm_client import gateway_api_keys, gateway_base_url, normalize_model, split_model
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_POST_ANALYZERS = ["scorecard"]
-DEFAULT_LLM_MODEL = "gemini/gemini-2.5-flash"
-DEFAULT_SNAPSHOT_SOURCE_PRIORITY = ["sina", "efinance", "akshare_em", "em_datacenter"]
-TUSHARE_FIRST_SOURCE_PRIORITY = ["tushare", "sina", "efinance", "akshare_em", "em_datacenter"]
+DEFAULT_LLM_MODEL = "gemini/gemini-3.8-flash"
+DEFAULT_GEMINI_FALLBACK_MODELS = ["gemini/gemini-4-hydrogen"]
+DEFAULT_SNAPSHOT_SOURCE_PRIORITY = ["em_datacenter", "sina", "efinance", "akshare_em"]
+TUSHARE_FIRST_SOURCE_PRIORITY = ["tushare", "em_datacenter", "sina", "efinance", "akshare_em"]
 _ENV_FILE_CACHE: dict[Path, tuple[tuple[int, int], dict[str, str]]] = {}
 _APPLIED_ENV_FILE_VALUES: dict[str, str] = {}
 
@@ -174,6 +178,7 @@ class Config:
     llm_candidate_context_announcement_limit: int = 3
     llm_candidate_context_cache_enabled: bool = True
     llm_candidate_context_cache_ttl_hours: int = 24
+    llm_candidate_context_cache_dir: Path | None = None
     llm_temperature: float = 0.2
     llm_json_mode: bool = True
     llm_silent: bool = True
@@ -235,6 +240,8 @@ class Config:
     daily_fetch_max_workers: int = 1
     daily_history_cache_dir: Path | None = None
     daily_history_cache_ttl_hours: int = 24
+    daily_pack_enabled: bool = True
+    daily_pack_dir: Path | None = None
 
     # Independent risk layer.
     risk_enabled: bool = True
@@ -256,16 +263,68 @@ class Config:
     # Data directory
     data_dir: Path = _PROJECT_ROOT / "data"
 
+    # Optional notification webhooks / 1-line NOTIFY_URLS (idle unless explicitly configured).
+    notify_urls: list[str] = field(default_factory=list)
+    wecom_webhook_url: str = ""
+    feishu_webhook_url: str = ""
+    feishu_webhook_secret: str = ""
+    dingtalk_webhook_url: str = ""
+    dingtalk_webhook_secret: str = ""
+    pushplus_token: str = ""
+    pushplus_topic: str = ""
+    serverchan_sendkey: str = ""
+    bark_url: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    discord_webhook_url: str = ""
+    slack_webhook_url: str = ""
+    ntfy_url: str = ""
+    email_sender: str = ""
+    email_password: str = ""
+    email_receivers: str = ""
+    email_smtp_host: str = ""
+    email_smtp_port: int = 0
+    custom_webhook_url: str = ""
+    custom_webhook_token: str = ""
+    # Notification safety caps & UX URL
+    notify_state_path: Path = _PROJECT_ROOT / "data" / "notify_state.json"
+    notify_timeout_sec: float = 10.0
+    dashboard_url: str = ""
+    tavily_api_keys: list[str] = field(default_factory=list)
+    serpapi_api_keys: list[str] = field(default_factory=list)
+
     # Optional guardrail for last-good snapshot fallback freshness.
     snapshot_fallback_max_age_hours: float | None = None
 
     def has_llm_config(self) -> bool:
-        """Return whether any supported LiteLLM configuration is present."""
+        """Return whether LLM ranking is configured, including legacy YAML to diagnose."""
         return any([
             bool(self.llm_api_key),
             bool(self.llm_base_url and self.llm_model.startswith("ollama/")),
             bool(self.llm_config_path),
             bool(self.llm_channels),
+            self.llm_model.startswith("ollama/"),
+        ])
+
+    def has_usable_llm_config(self) -> bool:
+        """Return whether a supported non-legacy LLM route is usable."""
+        from alphasift.llm_client import configuration_error
+
+        if configuration_error(self.llm_channels, str(self.llm_config_path or "")):
+            return False
+        has_channels_with_models = any(
+            bool(ch.get("models"))
+            and (
+                str(ch.get("protocol", "")).lower() == "ollama"
+                or bool(ch.get("api_keys"))
+                or bool(self.llm_api_key)
+                or bool(gateway_api_keys(str(ch.get("protocol", "")).lower()))
+            )
+            for ch in self.llm_channels
+        )
+        return any([
+            bool(self.llm_api_key),
+            has_channels_with_models,
             self.llm_model.startswith("ollama/"),
         ])
 
@@ -291,7 +350,7 @@ class Config:
             llm_model=llm_model,
             llm_base_url=_resolve_llm_base_url(llm_model),
             llm_config_path=_parse_optional_path_env("LITELLM_CONFIG"),
-            llm_fallback_models=_parse_csv_env("LITELLM_FALLBACK_MODELS", []),
+            llm_fallback_models=_resolve_llm_fallback_models(llm_model),
             llm_channels=channels,
             llm_context=os.getenv("LLM_CONTEXT", ""),
             llm_candidate_context_enabled=_parse_bool_env("LLM_CANDIDATE_CONTEXT_ENABLED", False),
@@ -312,6 +371,10 @@ class Config:
             llm_candidate_context_cache_ttl_hours=max(
                 0,
                 int(os.getenv("LLM_CANDIDATE_CONTEXT_CACHE_TTL_HOURS", "24")),
+            ),
+            llm_candidate_context_cache_dir=(
+                _parse_optional_path_env("ALPHASIFT_CANDIDATE_CONTEXT_CACHE_DIR")
+                or _parse_optional_path_env("LLM_CANDIDATE_CONTEXT_CACHE_DIR")
             ),
             llm_temperature=_parse_float_env("LLM_TEMPERATURE", 0.2),
             llm_json_mode=_parse_bool_env("LLM_JSON_MODE", True),
@@ -377,6 +440,8 @@ class Config:
                     )
                 ),
             ),
+            daily_pack_enabled=_parse_bool_env("ALPHASIFT_DAILY_PACK_ENABLED", True),
+            daily_pack_dir=_parse_optional_path_env("ALPHASIFT_PACK_DIR"),
             risk_enabled=_parse_bool_env("RISK_ENABLED", True),
             risk_max_penalty=_parse_float_env("RISK_MAX_PENALTY", 12.0),
             risk_veto_high=_parse_bool_env("RISK_VETO_HIGH", False),
@@ -395,7 +460,101 @@ class Config:
                 int(os.getenv("EVALUATION_PRICE_PATH_LOOKBACK_DAYS", "90")),
             ),
             data_dir=data_dir,
+            notify_urls=_parse_notify_urls_env(),
+            wecom_webhook_url=(
+                os.getenv("ALPHASIFT_WECOM_WEBHOOK_URL") or os.getenv("WECOM_WEBHOOK_URL", "")
+            ).strip(),
+            feishu_webhook_url=(
+                os.getenv("ALPHASIFT_FEISHU_WEBHOOK_URL") or os.getenv("FEISHU_WEBHOOK_URL", "")
+            ).strip(),
+            feishu_webhook_secret=(
+                os.getenv("ALPHASIFT_FEISHU_WEBHOOK_SECRET") or os.getenv("FEISHU_WEBHOOK_SECRET", "")
+            ).strip(),
+            dingtalk_webhook_url=(
+                os.getenv("ALPHASIFT_DINGTALK_WEBHOOK_URL") or os.getenv("DINGTALK_WEBHOOK_URL", "")
+            ).strip(),
+            dingtalk_webhook_secret=(
+                os.getenv("ALPHASIFT_DINGTALK_WEBHOOK_SECRET") or os.getenv("DINGTALK_WEBHOOK_SECRET", "")
+            ).strip(),
+            pushplus_token=(
+                os.getenv("ALPHASIFT_PUSHPLUS_TOKEN") or os.getenv("PUSHPLUS_TOKEN", "")
+            ).strip(),
+            pushplus_topic=(
+                os.getenv("ALPHASIFT_PUSHPLUS_TOPIC") or os.getenv("PUSHPLUS_TOPIC", "")
+            ).strip(),
+            serverchan_sendkey=(
+                os.getenv("ALPHASIFT_SERVERCHAN_SENDKEY")
+                or os.getenv("SERVERCHAN_SENDKEY")
+                or os.getenv("SERVERCHAN3_SENDKEY", "")
+            ).strip(),
+            bark_url=(
+                os.getenv("ALPHASIFT_BARK_URL") or os.getenv("BARK_URL", "")
+            ).strip(),
+            telegram_bot_token=(
+                os.getenv("ALPHASIFT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+            ).strip(),
+            telegram_chat_id=(
+                os.getenv("ALPHASIFT_TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID", "")
+            ).strip(),
+            discord_webhook_url=(
+                os.getenv("ALPHASIFT_DISCORD_WEBHOOK_URL") or os.getenv("DISCORD_WEBHOOK_URL", "")
+            ).strip(),
+            slack_webhook_url=(
+                os.getenv("ALPHASIFT_SLACK_WEBHOOK_URL") or os.getenv("SLACK_WEBHOOK_URL", "")
+            ).strip(),
+            ntfy_url=(
+                os.getenv("ALPHASIFT_NTFY_URL") or os.getenv("NTFY_URL", "")
+            ).strip(),
+            email_sender=(
+                os.getenv("ALPHASIFT_EMAIL_SENDER") or os.getenv("EMAIL_SENDER", "")
+            ).strip(),
+            email_password=(
+                os.getenv("ALPHASIFT_EMAIL_PASSWORD") or os.getenv("EMAIL_PASSWORD", "")
+            ).strip(),
+            email_receivers=(
+                os.getenv("ALPHASIFT_EMAIL_RECEIVERS") or os.getenv("EMAIL_RECEIVERS", "")
+            ).strip(),
+            email_smtp_host=(
+                os.getenv("ALPHASIFT_EMAIL_SMTP_HOST") or os.getenv("EMAIL_SMTP_HOST", "")
+            ).strip(),
+            email_smtp_port=max(
+                0,
+                int(os.getenv("ALPHASIFT_EMAIL_SMTP_PORT") or os.getenv("EMAIL_SMTP_PORT", "0") or "0"),
+            ),
+            custom_webhook_url=(
+                os.getenv("ALPHASIFT_CUSTOM_WEBHOOK_URL") or os.getenv("CUSTOM_WEBHOOK_URL", "")
+            ).strip(),
+            custom_webhook_token=(
+                os.getenv("ALPHASIFT_CUSTOM_WEBHOOK_TOKEN") or os.getenv("CUSTOM_WEBHOOK_TOKEN", "")
+            ).strip(),
+            notify_state_path=(
+                _parse_optional_path_env("ALPHASIFT_NOTIFY_STATE_PATH")
+                or (data_dir / "notify_state.json")
+            ),
+            notify_timeout_sec=max(1.0, _parse_float_env("ALPHASIFT_NOTIFY_TIMEOUT_SEC", 10.0)),
+            dashboard_url=_resolve_dashboard_url(),
+            tavily_api_keys=_parse_csv_env("TAVILY_API_KEYS", []) or _parse_csv_env("TAVILY_API_KEY", []),
+            serpapi_api_keys=_parse_csv_env("SERPAPI_API_KEYS", []) or _parse_csv_env("SERPAPI_API_KEY", []),
         )
+
+
+def _resolve_dashboard_url() -> str:
+    """Resolve user/Fork-safe dashboard URL without leaking upstream URL to third-party pushes."""
+    explicit = os.getenv("ALPHASIFT_DASHBOARD_URL")
+    if explicit is not None:
+        cleaned = explicit.strip()
+        if cleaned.lower() in {"", "none", "off", "false"}:
+            return ""
+        return cleaned
+    gh_repo = os.getenv("GITHUB_REPOSITORY", "").strip()
+    if gh_repo:
+        if gh_repo == "ZhuLinsen/alphasift":
+            return "https://alphasift.zhulinsen.tech/"
+        if _parse_bool_env("ALPHASIFT_ENABLE_PAGES", False) and "/" in gh_repo:
+            owner, repo = gh_repo.split("/", 1)
+            return f"https://{owner.lower()}.github.io/{repo}/"
+        return ""
+    return ""
 
 
 def _parse_float_env(name: str, default: float) -> float:
@@ -403,6 +562,20 @@ def _parse_float_env(name: str, default: float) -> float:
     if value is None or value == "":
         return default
     return float(value)
+
+
+def _parse_notify_urls_env() -> list[str]:
+    raw = (os.getenv("ALPHASIFT_NOTIFY_URLS") or os.getenv("NOTIFY_URLS") or "").strip()
+    if not raw:
+        return []
+    urls: list[str] = []
+    # Split on newlines/semicolons, or commas before another scheme:// (preserves mailto://...?to=a,b).
+    for block in re.split(r"[\r\n;]+", raw):
+        for chunk in re.split(r"(?:\s*,\s*)+(?=[A-Za-z][A-Za-z0-9+.-]*://)", block):
+            cleaned = chunk.strip().strip(",").strip()
+            if cleaned and cleaned not in urls:
+                urls.append(cleaned)
+    return urls
 
 
 def _parse_optional_float_env(name: str) -> float | None:
@@ -429,7 +602,7 @@ def _parse_llm_channels_env() -> list[dict[str, object]]:
         )
         channels.append({
             "name": name.lower(),
-            "protocol": os.getenv(f"LLM_{key}_PROTOCOL", "openai").strip().lower(),
+            "protocol": (os.getenv(f"LLM_{key}_PROTOCOL") or "").strip().lower() or "openai",
             "base_url": os.getenv(f"LLM_{key}_BASE_URL", "").strip(),
             "api_keys": api_keys,
             "models": _parse_csv_env(f"LLM_{key}_MODELS", []),
@@ -446,12 +619,12 @@ def _resolve_llm_model(channels: list[dict[str, object]]) -> str:
         or ""
     ).strip()
     if explicit:
-        return _normalize_litellm_model(explicit)
+        return normalize_model(explicit)
 
     for channel in channels:
         models = channel.get("models", [])
         if isinstance(models, list) and models:
-            return _normalize_litellm_model(str(models[0]), str(channel.get("protocol", "openai")))
+            return normalize_model(str(models[0]), str(channel.get("protocol", "openai")))
 
     if os.getenv("OLLAMA_API_BASE"):
         ollama_model = os.getenv("OLLAMA_MODEL", "").strip()
@@ -459,53 +632,50 @@ def _resolve_llm_model(channels: list[dict[str, object]]) -> str:
     if os.getenv("DEEPSEEK_API_KEY"):
         return "deepseek/deepseek-chat"
     if os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEYS"):
-        return _normalize_litellm_model(os.getenv("GEMINI_MODEL", DEFAULT_LLM_MODEL), "gemini")
-    if os.getenv("OPENAI_API_KEY"):
-        return _normalize_litellm_model(os.getenv("OPENAI_MODEL", "gpt-4o-mini"), "openai")
-    if os.getenv("AIHUBMIX_KEY"):
-        return _normalize_litellm_model(os.getenv("OPENAI_MODEL", "gpt-4o-mini"), "openai")
+        gemini_model = (os.getenv("GEMINI_MODEL") or "").strip() or DEFAULT_LLM_MODEL
+        return normalize_model(gemini_model, "gemini")
+    if os.getenv("OPENAI_API_KEY") or os.getenv("AIHUBMIX_KEY"):
+        openai_model = (os.getenv("OPENAI_MODEL") or "").strip() or "gpt-4o-mini"
+        return normalize_model(openai_model)
     return DEFAULT_LLM_MODEL
 
 
-def _normalize_litellm_model(model: str, protocol: str = "openai") -> str:
-    model = model.strip()
-    if "/" in model:
-        return model
-    if protocol == "ollama":
-        return f"ollama/{model}"
-    if protocol == "gemini":
-        return f"gemini/{model}"
-    if protocol == "deepseek":
-        return f"deepseek/{model}"
-    return f"openai/{model}"
+def _resolve_llm_fallback_models(llm_model: str) -> list[str]:
+    raw_fb = os.getenv("LITELLM_FALLBACK_MODELS")
+    if raw_fb is not None:
+        cleaned = raw_fb.strip()
+        if not cleaned or cleaned.lower() in {"none", "off", "false", "0"}:
+            return []
+        return _parse_csv_env("LITELLM_FALLBACK_MODELS", [])
+    if llm_model == DEFAULT_LLM_MODEL:
+        return list(DEFAULT_GEMINI_FALLBACK_MODELS)
+    return []
 
 
 def _resolve_llm_api_key(model: str) -> str:
     explicit = os.getenv("LLM_API_KEY", "").strip()
     if explicit:
         return explicit
-    if model.startswith("gemini/"):
-        keys = _parse_csv_env("GEMINI_API_KEYS", [])
-        return keys[0] if keys else os.getenv("GEMINI_API_KEY", "")
-    if model.startswith("deepseek/"):
-        return os.getenv("DEEPSEEK_API_KEY", "")
-    if model.startswith("anthropic/"):
-        return os.getenv("ANTHROPIC_API_KEY", "")
-    if os.getenv("AIHUBMIX_KEY"):
+    provider, _ = split_model(model)
+    if provider == "openai" and os.getenv("AIHUBMIX_KEY"):
         return os.getenv("AIHUBMIX_KEY", "")
-    if model.startswith("openai/"):
-        return os.getenv("OPENAI_API_KEY", "")
-    return os.getenv("OPENAI_API_KEY", "")
+    keys = gateway_api_keys(provider)
+    return keys[0] if keys else ""
 
 
 def _resolve_llm_base_url(model: str) -> str:
     explicit = os.getenv("LLM_BASE_URL", "").strip()
     if explicit:
         return explicit
-    if model.startswith("ollama/"):
+    provider, _ = split_model(model)
+    if provider == "ollama":
         return os.getenv("OLLAMA_API_BASE", "")
-    if os.getenv("AIHUBMIX_KEY"):
-        return os.getenv("AIHUBMIX_BASE_URL", "https://api.aihubmix.com/v1")
-    if model.startswith("openai/"):
+    if provider == "openai":
+        if os.getenv("AIHUBMIX_KEY"):
+            return gateway_base_url("aihubmix")
         return os.getenv("OPENAI_BASE_URL", "")
-    return os.getenv("OPENAI_BASE_URL", "")
+    # Never route non-OpenAI provider keys (e.g. GEMINI_API_KEY / DEEPSEEK_API_KEY)
+    # to OPENAI_BASE_URL unless LLM_API_KEY explicitly overrides credentials too.
+    if provider in {"gemini", "deepseek", "anthropic"} and os.getenv("LLM_API_KEY", "").strip():
+        return os.getenv("OPENAI_BASE_URL", "")
+    return ""
