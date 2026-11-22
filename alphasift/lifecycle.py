@@ -168,6 +168,9 @@ def enrich_lifecycle_features(
         with ThreadPoolExecutor(max_workers=workers) as pool:
             analyzed = list(pool.map(analyze_one, requests))
 
+    if "price" not in frame.columns:
+        frame["price"] = float("nan")
+
     successful = []
     for idx, features, error in analyzed:
         if error:
