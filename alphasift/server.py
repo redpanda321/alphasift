@@ -6,21 +6,28 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
-import json
+import math
 from dataclasses import asdict
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import pandas as pd
+
 from alphasift.config import Config
 from alphasift.daily_report import build_daily_report, load_daily_report_runs
 from alphasift.daily_report_html import _safe_detail_url, render_daily_report_html
 from alphasift.doctor import doctor_data_sources, doctor_radar_readiness
+from alphasift.market_digest import build_markets_digest, load_multi_market_runs
 from alphasift.market_regime import compute_market_regime, compute_market_regime_series
+from alphasift.jsonutil import dumps_strict_json, finite_float
+from alphasift.markets import MARKETS, get_market
 from alphasift.overview import build_overview
 from alphasift.pack import PackError, load_pack, pack_dir
+from alphasift.pattern_replay import load_cn_benchmark, replay_patterns
 from alphasift.patterns import extract_mini_kline_bars, list_patterns, scan_patterns
 from alphasift.performance_history import build_strategy_performance_summary
 from alphasift.report import build_run_report_payload
@@ -50,6 +57,22 @@ def build_api_response(
         return 200, screen_result_schema()
     if path == "/daily-report-schema":
         return 200, daily_report_schema()
+    if path == "/markets":
+        market_arg = (_single(params, "id") or _single(params, "market")).lower()
+        if market_arg:
+            try:
+                spec = get_market(market_arg)
+            except ValueError as exc:
+                return 404, {
+                    "error": "market_not_found",
+                    "message": str(exc),
+                    "market": market_arg,
+                }
+            return 200, {"schema_version": 1, "market": asdict(spec)}
+        return 200, {
+            "schema_version": 1,
+            "markets": [asdict(item) for item in MARKETS.values()],
+        }
     if path == "/overview":
         strategy_arg = _single(params, "strategy") or None
         if strategy_arg and _find_strategy(config, strategy_arg) is None:
@@ -256,7 +279,43 @@ def build_api_response(
             "schema_version": 1,
             "patterns": [asdict(item) for item in list_patterns(include_experimental=include_exp)],
         }
-    if path in {"/market-stats", "/patterns/scan", "/daily-report"}:
+    if path == "/markets-digest":
+        raw_markets = _multi(params, "markets") or _multi(params, "market")
+        if raw_markets:
+            markets = list(dict.fromkeys(m.lower() for m in raw_markets))
+            if len(markets) > 7:
+                return 400, {"error": "invalid_request", "message": "Too many markets requested (max 7)."}
+        else:
+            markets = ["us", "hk", "jp", "kr", "tw", "in"]
+        try:
+            for m in markets:
+                get_market(m)
+            trade_date = _single(params, "trade_date") or None
+            if trade_date is not None:
+                if len(trade_date) != 10:
+                    raise ValueError(f"Invalid trade_date (expected YYYY-MM-DD): {trade_date!r}")
+                try:
+                    date.fromisoformat(trade_date)
+                except ValueError as exc:
+                    raise ValueError(f"Invalid trade_date (expected YYYY-MM-DD): {trade_date!r}") from exc
+            raw_detail = _single(params, "detail_url")
+            detail_url = (
+                _safe_detail_url(raw_detail, fallback="")
+                if raw_detail
+                else _safe_detail_url(config.dashboard_url, fallback="")
+            )
+            runs_by_mkt = load_multi_market_runs(config, markets=markets, trade_date=trade_date)
+            return 200, build_markets_digest(
+                runs_by_mkt,
+                markets=markets,
+                trade_date=trade_date,
+                detail_url=detail_url,
+                include_news=False,
+                config=config,
+            )
+        except ValueError as exc:
+            return 400, {"error": "invalid_request", "message": str(exc)}
+    if path in {"/market-stats", "/patterns/scan", "/patterns/replay", "/daily-report"}:
         safe_run_paths: list[str] = []
         if path == "/daily-report":
             requested_ai_brief = (_single(params, "ai_brief") or "off").lower()
@@ -293,27 +352,10 @@ def build_api_response(
                 series = compute_market_regime_series(daily_pack, end_index=end_idx)[-days:]
                 return 200, {"schema_version": 1, "days": [item.to_dict() for item in series]}
             if path == "/patterns/scan":
-                raw_patterns = _multi(params, "pattern")
                 include_exp = _bool_param(params, "include_experimental", False)
-                selected_patterns: list[str] | None = None
-                if raw_patterns:
-                    known = {spec.name for spec in list_patterns(include_experimental=True)}
-                    deduped: list[str] = []
-                    for item in raw_patterns:
-                        if "/" in item or "\\" in item or ".." in item or item not in known:
-                            return 400, {
-                                "error": "invalid_pattern",
-                                "message": f"Unknown or unsafe pattern name: {item!r}",
-                                "pattern": item,
-                            }
-                        if item not in deduped:
-                            deduped.append(item)
-                    if len(deduped) > 32:
-                        return 400, {
-                            "error": "too_many_patterns",
-                            "message": "Too many patterns requested (max 32).",
-                        }
-                    selected_patterns = deduped
+                selected_patterns, pat_err = _validate_pattern_selection(_multi(params, "pattern"))
+                if pat_err is not None:
+                    return pat_err
                 payload = scan_patterns(
                     daily_pack,
                     patterns=selected_patterns,
@@ -338,6 +380,65 @@ def build_api_response(
                             for item in items:
                                 item["kline"] = klines.get(str(item.get("code") or ""), [])
                 return 200, payload
+            if path == "/patterns/replay":
+                selected_patterns, pat_err = _validate_pattern_selection(_multi(params, "pattern"))
+                if pat_err is not None:
+                    return pat_err
+                warmup_days = _int_param(params, "warmup_days", 60, min_val=10, max_val=200)
+                cost_bps = _float_param(params, "cost_bps", default=25.0, min_val=0.0, max_val=200.0)
+                assert cost_bps is not None
+                allowed_regimes = _multi(params, "allowed_regime") or None
+                excluded_regimes = _multi(params, "exclude_regime") or None
+                max_overhead_pct = _float_param(
+                    params,
+                    "max_overhead_pct",
+                    default=None,
+                    min_val=0.0,
+                    max_val=100.0,
+                    exclusive_min=True,
+                )
+                benchmark_df = (
+                    load_cn_benchmark(lookback_days=max(len(daily_pack.dates) + 40, 320))
+                    if _bool_param(params, "live_benchmark", False)
+                    else pd.DataFrame()
+                )
+                report = replay_patterns(
+                    daily_pack,
+                    patterns=selected_patterns,
+                    benchmark_df=benchmark_df,
+                    warmup_days=warmup_days,
+                    cost_bps=cost_bps,
+                    allowed_regimes=allowed_regimes,
+                    excluded_regimes=excluded_regimes,
+                    max_overhead_pct=max_overhead_pct,
+                )
+                return 200, {
+                    "schema_version": 1,
+                    "generated_at": report.get("generated_at"),
+                    "entry_mode": report.get("entry_mode"),
+                    "cost_bps": report.get("cost_bps"),
+                    "walk_forward_boundary_policy": report.get("walk_forward_boundary_policy"),
+                    "regime_filter": report.get("regime_filter"),
+                    "overhead_filter": report.get("overhead_filter"),
+                    "graduation_rule": report.get("graduation_rule"),
+                    "pack_summary": report.get("pack_summary"),
+                    "universe_baseline": report.get("universe_baseline"),
+                    "patterns": [
+                        {
+                            "pattern": item.get("pattern"),
+                            "display_name": item.get("display_name"),
+                            "family": item.get("family"),
+                            "mode": item.get("mode"),
+                            "total_signals": item.get("total_signals"),
+                            "untradable_share_pct": item.get("untradable_share_pct"),
+                            "horizons": item.get("horizons"),
+                            "graduation": item.get("graduation"),
+                            "stability": item.get("stability"),
+                            "walk_forward_regime_audit": item.get("walk_forward_regime_audit"),
+                        }
+                        for item in (report.get("patterns") or [])
+                    ],
+                }
             # /daily-report
             include_ann = _bool_param(params, "announcements", False)
             include_runs = _bool_param(params, "include_runs", True)
@@ -411,10 +512,8 @@ def _parse_accept_q(params: list[str]) -> float:
         if "=" in p:
             k, v = p.split("=", 1)
             if k.strip().lower() == "q":
-                try:
-                    return max(0.0, min(1.0, float(v.strip())))
-                except ValueError:
-                    return 0.0
+                q = finite_float(v.strip())
+                return 0.0 if q is None else max(0.0, min(1.0, q))
     return 1.0
 
 
@@ -476,22 +575,37 @@ def _handler_for_config(config: Config):
         server_version = "AlphaSiftAPI/1"
 
         def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler.
+            self._serve_request(send_body=True)
+
+        def do_HEAD(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler.
+            self._serve_request(send_body=False)
+
+        def _serve_request(self, *, send_body: bool) -> None:
             parsed = urlparse(self.path)
             vary_accept = parsed.path == "/"
-            if parsed.path in {"/ui", "/daily-report.html"} or (
-                parsed.path == "/" and _prefers_html(self.headers.get("Accept", ""), parsed.query)
-            ):
-                status, html_body = build_html_response(config, parsed.path, query=parsed.query)
-                is_workbench = parsed.path in {"/ui", "/"} and status == 200
-                self._send_html(
-                    status,
-                    html_body,
+            try:
+                if parsed.path in {"/ui", "/daily-report.html"} or (
+                    parsed.path == "/" and _prefers_html(self.headers.get("Accept", ""), parsed.query)
+                ):
+                    status, html_body = build_html_response(config, parsed.path, query=parsed.query)
+                    is_workbench = parsed.path in {"/ui", "/"} and status == 200
+                    self._send_html(
+                        status,
+                        html_body,
+                        vary_accept=vary_accept,
+                        script_csp=_WORKBENCH_SCRIPT_CSP if is_workbench else "'none'",
+                        send_body=send_body,
+                    )
+                    return
+                status, payload = build_api_response(config, parsed.path, query=parsed.query)
+                self._send_json(status, payload, vary_accept=vary_accept, send_body=send_body)
+            except Exception:  # noqa: BLE001 - avoid leaking tracebacks in HTTP responses.
+                self._send_json(
+                    500,
+                    {"error": "internal_error", "message": "Internal server error"},
                     vary_accept=vary_accept,
-                    script_csp=_WORKBENCH_SCRIPT_CSP if is_workbench else "'none'",
+                    send_body=send_body,
                 )
-                return
-            status, payload = build_api_response(config, parsed.path, query=parsed.query)
-            self._send_json(status, payload, vary_accept=vary_accept)
 
         def log_message(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature.
             return
@@ -503,6 +617,7 @@ def _handler_for_config(config: Config):
             *,
             vary_accept: bool = False,
             script_csp: str = "'none'",
+            send_body: bool = True,
         ) -> None:
             body = content.encode("utf-8")
             self.send_response(status)
@@ -521,10 +636,18 @@ def _handler_for_config(config: Config):
             )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if send_body:
+                self.wfile.write(body)
 
-        def _send_json(self, status: int, payload: dict[str, Any], *, vary_accept: bool = False) -> None:
-            body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        def _send_json(
+            self,
+            status: int,
+            payload: dict[str, Any],
+            *,
+            vary_accept: bool = False,
+            send_body: bool = True,
+        ) -> None:
+            body = dumps_strict_json(payload, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -533,7 +656,8 @@ def _handler_for_config(config: Config):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if send_body:
+                self.wfile.write(body)
 
     return AlphaSiftApiHandler
 
@@ -548,6 +672,7 @@ def _index_payload() -> dict[str, Any]:
             "/result-schema",
             "/daily-report-schema",
             "/overview",
+            "/markets",
             "/strategies",
             "/strategy",
             "/strategy-compare",
@@ -566,8 +691,10 @@ def _index_payload() -> dict[str, Any]:
             "/market-stats",
             "/patterns",
             "/patterns/scan",
+            "/patterns/replay",
             "/daily-report",
             "/daily-report.html",
+            "/markets-digest",
         ],
     }
 
@@ -678,3 +805,57 @@ def _optional_bool_param(params: dict[str, list[str]], key: str) -> bool | None:
 def _bool_param(params: dict[str, list[str]], key: str, default: bool) -> bool:
     value = _optional_bool_param(params, key)
     return default if value is None else value
+
+
+def _validate_pattern_selection(
+    raw_patterns: list[str],
+) -> tuple[list[str] | None, tuple[int, dict[str, Any]] | None]:
+    if not raw_patterns:
+        return None, None
+    known = {spec.name for spec in list_patterns(include_experimental=True)}
+    deduped: list[str] = []
+    for item in raw_patterns:
+        if "/" in item or "\\" in item or ".." in item or item not in known:
+            return None, (
+                400,
+                {
+                    "error": "invalid_pattern",
+                    "message": f"Unknown or unsafe pattern name: {item!r}",
+                    "pattern": item,
+                },
+            )
+        if item not in deduped:
+            deduped.append(item)
+    if len(deduped) > 32:
+        return None, (
+            400,
+            {
+                "error": "too_many_patterns",
+                "message": "Too many patterns requested (max 32).",
+            },
+        )
+    return deduped, None
+
+
+def _float_param(
+    params: dict[str, list[str]],
+    key: str,
+    *,
+    default: float | None,
+    min_val: float,
+    max_val: float,
+    exclusive_min: bool = False,
+) -> float | None:
+    raw = _single(params, key)
+    if not raw:
+        return default
+    try:
+        val = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"Parameter `{key}` must be a finite number, got {raw!r}") from exc
+    if not math.isfinite(val):
+        raise ValueError(f"Parameter `{key}` must be finite")
+    if (val <= min_val if exclusive_min else val < min_val) or val > max_val:
+        op = ">" if exclusive_min else ">="
+        raise ValueError(f"Parameter `{key}` must satisfy {op} {min_val} and <= {max_val}")
+    return val

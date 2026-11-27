@@ -216,11 +216,15 @@ def test_notify_silent_skip_idempotency_signatures_and_redaction(tmp_path: Path,
             return _DummyResponse(200, {"code": 0, "msg": "success"})
         return _DummyResponse(200, {"ok": True})
 
+    wecom_hook_id = "unit-test-wecom-hook"
+    feishu_hook_id = "unit-test-feishu-hook"
+    feishu_sign_fixture = "unit-test-" + "hmac-fixture"
+    tg_fixture_token = "000000:" + "unit-test-tg-fixture"
     cfg = Config(
-        wecom_webhook_url="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=SECRET_WECOM",
-        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/SECRET_FEISHU",
-        feishu_webhook_secret="FEISHU_SIGN_SECRET",
-        telegram_bot_token="123456:SECRET_TG_TOKEN",
+        wecom_webhook_url=f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={wecom_hook_id}",
+        feishu_webhook_url=f"https://open.feishu.cn/open-apis/bot/v2/hook/{feishu_hook_id}",
+        feishu_webhook_secret=feishu_sign_fixture,
+        telegram_bot_token=tg_fixture_token,
         telegram_chat_id="-10012345",
         notify_state_path=state_path,
     )
@@ -233,7 +237,7 @@ def test_notify_silent_skip_idempotency_signatures_and_redaction(tmp_path: Path,
     # Verify Feishu v2 HMAC signature calculation.
     feishu_body = calls[1][1]
     expected_sign = base64.b64encode(
-        hmac.new(b"1763632800\nFEISHU_SIGN_SECRET", msg=b"", digestmod=hashlib.sha256).digest()
+        hmac.new(f"1763632800\n{feishu_sign_fixture}".encode("utf-8"), msg=b"", digestmod=hashlib.sha256).digest()
     ).decode("utf-8")
     assert feishu_body["timestamp"] == "1763632800"
     assert feishu_body["sign"] == expected_sign
@@ -247,16 +251,16 @@ def test_notify_silent_skip_idempotency_signatures_and_redaction(tmp_path: Path,
 
     # force=True dispatches again, while HTTP failures redact secret URLs/tokens.
     def broken_post(url: str, *, json: dict, timeout: float):
-        raise RuntimeError(f"failed connecting to {url} with FEISHU_SIGN_SECRET")
+        raise RuntimeError(f"failed connecting to {url} with {feishu_sign_fixture}")
 
     res_err = push_daily_report(report, config=cfg, force=True, post_fn=broken_post)
     assert res_err["status"] == "error"
     for err_entry in res_err["errors"]:
         msg = err_entry["error"]
-        assert "SECRET_WECOM" not in msg
-        assert "SECRET_FEISHU" not in msg
-        assert "FEISHU_SIGN_SECRET" not in msg
-        assert "SECRET_TG_TOKEN" not in msg
+        assert wecom_hook_id not in msg
+        assert feishu_hook_id not in msg
+        assert feishu_sign_fixture not in msg
+        assert tg_fixture_token not in msg
 
 
 def test_doctor_radar_and_cli_smoke(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1251,3 +1255,601 @@ def test_consensus_announcement_prioritization_pattern_tiering_and_multi_market_
     assert res_us["status"] == "ok" and sorted(res_us["sent"]) == ["discord", "slack", "wecom"]
     ledger = json.loads(cfg.notify_state_path.read_text(encoding="utf-8"))
     assert f"{digest['trade_date']}:us+hk:wecom" in ledger
+
+
+def test_daily_report_scrubs_nonfinite_and_bool_metrics():
+    from alphasift.daily_report import _extract_pattern_replay_map, _extract_strategy_track_stats, _format_strategy_entry, render_daily_im_card
+    from alphasift.jsonutil import dumps_strict_json
+
+    bad_run = ScreenResult(
+        strategy="dual_low",
+        market="cn",
+        run_id="2026-11-26_cn",
+        track="rules",
+        created_at="2026-11-26T08:00:00Z",
+        picks=[
+            Pick(
+                rank=1,
+                code="600519",
+                name="贵州茅台",
+                industry="白酒",
+                price=float("inf"),
+                pe_ratio=float("nan"),
+                pb_ratio=True,
+                total_mv=float("inf"),
+                change_pct=float("-inf"),
+                final_score=float("nan"),
+                screen_score=float("inf"),
+                factor_scores={"value": float("nan"), "quality": True, "growth": 0.9},
+            )
+        ],
+    )
+    entry = _format_strategy_entry(bad_run)
+    p0 = entry["picks"][0]
+    assert p0["price"] is None
+    assert p0["pe_ratio"] is None
+    assert p0["pb_ratio"] is None
+    assert p0["market_cap_yi"] is None
+    assert p0["change_pct"] is None
+    assert p0["final_score"] == 0.0
+    assert p0["screen_score"] == 0.0
+    assert "成长因子靠前" in p0["ranking_reason"]
+
+    track_stats = _extract_strategy_track_stats({
+        "scorecard": [{
+            "market": "cn",
+            "strategy": "dual_low",
+            "track": "rules",
+            "windows": {"5": {"matched": True, "average_excess_return_pct": float("inf"), "beat_rate": float("nan")}},
+        }]
+    })
+    assert track_stats == {}
+
+    replay_map = _extract_pattern_replay_map({
+        "cost_bps": float("inf"),
+        "patterns": [{
+            "pattern": "double_bottom_breakout",
+            "horizons": {"t5": {"net_excess_mean_pct": float("nan"), "win_rate_pct": float("inf"), "scored": True}},
+            "walk_forward_regime_audit": {
+                "low_overhead_threshold_pct": float("inf"),
+                "h1_purged_signals": True,
+                "h2_non_adverse_low_overhead": {"days": float("nan"), "daily_mean_pct": float("inf")},
+                "delta_non_adverse_low_overhead_vs_h2_baseline_pct": float("-inf"),
+            },
+        }],
+    })
+    rm = replay_map["double_bottom_breakout"]
+    assert rm["replay_t5_net_excess_pct"] is None
+    assert rm["replay_t5_win_rate_pct"] is None
+    assert rm["replay_samples"] is None
+    assert rm["wf_low_overhead_threshold_pct"] == 15
+    assert rm["wf_non_adverse_low_overhead_days"] == 0
+    assert rm["wf_non_adverse_low_overhead_pct"] is None
+    assert rm["wf_joint_delta_pct"] is None
+    assert rm["wf_h1_purged_signals"] == 0
+
+    card = render_daily_im_card({
+        "trade_date": "2026-11-26",
+        "market_regime": {
+            "regime_stage_label": "震荡",
+            "advance_ratio_pct": float("nan"),
+            "seal_rate_pct": float("inf"),
+            "prev_limit_up_avg_return_pct": float("-inf"),
+            "total_amount_yi": float("nan"),
+            "median_return_pct": True,
+        },
+        "strategies": [entry],
+    })
+    assert "nan" not in card.lower() and "inf" not in card.lower()
+    assert dumps_strict_json({"entry": entry, "replay": replay_map})
+
+
+def test_notify_retry_fmt_title_and_markdown_digest_scrub_nonfinite_and_bool():
+    import types
+    from alphasift.notify import (
+        _build_report_title,
+        _fmt_report_pct,
+        _post_with_retry,
+        _render_markdown_digest,
+        _retry_delay,
+        _split_hit_patterns,
+    )
+
+    assert _fmt_report_pct(None) == "–"
+    assert _fmt_report_pct(float("nan")) == "–"
+    assert _fmt_report_pct(float("inf")) == "–"
+    assert _fmt_report_pct(float("-inf")) == "–"
+    assert _fmt_report_pct(True) == "–"
+    assert _fmt_report_pct(2.5) == "+2.50%"
+
+    assert _retry_delay(types.SimpleNamespace(status_code=429, headers={"Retry-After": "nan"}), default=0.7) == 0.7
+    assert _retry_delay(types.SimpleNamespace(status_code=429, headers={"Retry-After": "inf"}), default=0.7) == 0.7
+    assert _retry_delay(types.SimpleNamespace(status_code=429, headers={"Retry-After": "-2"}), default=0.7) == 0.0
+    assert _retry_delay(types.SimpleNamespace(status_code=429, headers={"Retry-After": "12"}), default=0.7) == 5.0
+
+    calls = []
+    sleeps = []
+
+    def fake_post(url, **kw):
+        calls.append(url)
+        return types.SimpleNamespace(status_code=503 if len(calls) == 1 else 200, headers={}, raise_for_status=lambda: None)
+
+    resp = _post_with_retry(fake_post, "https://example.com", max_retries=True, sleep_fn=sleeps.append)  # type: ignore[arg-type]
+    assert resp.status_code == 200
+    assert len(calls) == 2
+
+    dirty_cn_report = {
+        "schema_version": 1,
+        "trade_date": "2026-11-26",
+        "market_regime": {
+            "regime_stage": "divergence",
+            "regime_stage_label": "震荡分歧",
+            "advance_ratio_pct": float("nan"),
+            "median_return_pct": float("inf"),
+            "seal_rate_pct": True,
+            "total_amount_yi": float("-inf"),
+            "prev_limit_up_avg_return_pct": True,
+            "non_st_limit_up_count": float("nan"),
+            "non_st_limit_down_count": True,
+            "max_consecutive_limit_up": "bad",
+        },
+        "announcement_risks": {"checked_count": float("nan"), "flagged_count": True, "flagged_items": []},
+        "cross_strategy_synthesis": {
+            "consensus_picks": [{
+                "code": "000001",
+                "name": "平安银行",
+                "price": float("nan"),
+                "pe_ratio": True,
+                "change_pct": float("inf"),
+                "strategy_count": float("nan"),
+                "strategies": ["dual_low"],
+            }],
+        },
+        "patterns": {
+            "active": [{
+                "pattern": "double_bottom_breakout",
+                "display_name": "双底突破",
+                "status": "active",
+                "hit_count": True,
+                "replay_t5_net_excess_pct": float("nan"),
+            }, {
+                "pattern": "valid_pat",
+                "display_name": "放量突破",
+                "status": "active",
+                "hit_count": 2,
+                "replay_t5_net_excess_pct": float("inf"),
+                "signals": [{"name": "测试股", "code": "600000", "change_pct": float("nan")}],
+            }],
+            "experimental": [],
+        },
+    }
+    title = _build_report_title(dirty_cn_report, fallback_title="fallback")
+    assert "涨0%" in title and "预警0" in title and "nan" not in title.lower()
+
+    primary, neg = _split_hit_patterns(dirty_cn_report)
+    assert [p["pattern"] for p in primary] == ["valid_pat"]
+    assert neg == []
+
+    md = _render_markdown_digest(dirty_cn_report, "fallback", title=title)
+    assert "nan" not in md.lower() and "inf" not in md.lower()
+    assert "封板 -" in md and "成交 -" in md and "0策略" in md
+
+    dirty_global = {
+        "object": "MarketDigest",
+        "trade_date": "2026-11-26",
+        "markets": ["us"],
+        "market_sections": [{
+            "market": "us",
+            "market_name": "美股",
+            "trade_date": "2026-11-26",
+            "strategy_count": True,
+            "top_picks": [{
+                "code": "AAPL",
+                "name": "Apple",
+                "price": float("inf"),
+                "change_pct": True,
+                "avg_final_score": float("nan"),
+                "strategies": ["global_value"],
+            }],
+        }],
+    }
+    global_md = _render_markdown_digest(dirty_global, "fallback", title="Global")
+    assert "0 组策略" in global_md and "0.0分" in global_md
+    assert "nan" not in global_md.lower() and "inf" not in global_md.lower()
+
+
+def test_notify_feishu_card_and_telegram_html_scrub_nonfinite_and_bool():
+    import json
+    from alphasift.notify import _build_feishu_card, _render_telegram_html
+
+    dirty_cn = {
+        "schema_version": 1,
+        "trade_date": "2026-11-26",
+        "market_regime": {
+            "regime_stage": "divergence",
+            "regime_stage_label": "震荡",
+            "advance_ratio_pct": float("nan"),
+            "median_return_pct": float("inf"),
+            "seal_rate_pct": True,
+            "total_amount_yi": float("-inf"),
+            "prev_limit_up_avg_return_pct": True,
+            "non_st_limit_up_count": True,
+            "non_st_limit_down_count": float("nan"),
+            "max_consecutive_limit_up": "bad",
+        },
+        "announcement_risks": {"checked_count": True, "flagged_count": 0, "flagged_items": []},
+        "cross_strategy_synthesis": {
+            "consensus_picks": [{
+                "code": "000001",
+                "name": "平安银行",
+                "industry": "银行",
+                "price": float("nan"),
+                "pe_ratio": True,
+                "change_pct": float("inf"),
+                "avg_final_score": float("-inf"),
+                "strategy_count": True,
+                "strategies": ["dual_low"],
+            }],
+        },
+        "patterns": {
+            "active": [{
+                "pattern": "valid_pat",
+                "display_name": "放量突破",
+                "status": "active",
+                "hit_count": 2,
+                "replay_t5_net_excess_pct": float("nan"),
+                "signals": [{"name": "测试股", "code": "600000", "change_pct": float("inf")}],
+            }],
+            "experimental": [],
+        },
+    }
+
+    card = _build_feishu_card(dirty_cn, "fallback", title="Feishu")
+    card_json = json.dumps(card, allow_nan=False, ensure_ascii=False)
+    assert "0 涨停 / 0 跌停 · -" in card_json
+    assert "最高 0 板 · 昨涨停 -" in card_json
+    assert "**0 策略**" in card_json
+    assert "True 涨停" not in card_json and "nan" not in card_json.lower() and "inf" not in card_json.lower()
+
+    tg = _render_telegram_html(dirty_cn, "fallback", title="TG")
+    assert "上涨 <b>0.0%</b>" in tg
+    assert "涨跌停 <b>0/0</b>（封板 -）" in tg
+    assert "<b>0策略</b>" in tg
+    assert "nan" not in tg.lower() and "inf" not in tg.lower()
+
+    dirty_global = {
+        "object": "MarketDigest",
+        "trade_date": "2026-11-26",
+        "markets": ["us"],
+        "market_sections": [{
+            "market": "us",
+            "market_name": "美股",
+            "trade_date": "2026-11-26",
+            "strategy_count": True,
+            "top_picks": [{
+                "code": "AAPL",
+                "name": "Apple",
+                "price": float("nan"),
+                "change_pct": float("inf"),
+                "avg_final_score": True,
+                "strategies": ["global_value"],
+            }],
+        }],
+    }
+    g_card = json.dumps(_build_feishu_card(dirty_global, "fallback", title="Global"), allow_nan=False, ensure_ascii=False)
+    assert "0 组策略" in g_card and "0.0分" in g_card
+    assert "nan" not in g_card.lower() and "inf" not in g_card.lower()
+
+    g_tg = _render_telegram_html(dirty_global, "fallback", title="Global")
+    assert "0组策略" in g_tg and "0.0分" in g_tg
+    assert "nan" not in g_tg.lower() and "inf" not in g_tg.lower()
+
+
+def test_notify_email_html_discord_and_webhook_scrub_nonfinite_and_bool():
+    import types
+    from alphasift.notify import _build_discord_embed, _render_email_html, _send_custom_webhook
+
+    dirty_cn = {
+        "schema_version": 1,
+        "trade_date": "2026-11-26",
+        "market_regime": {
+            "regime_stage": "divergence",
+            "regime_stage_label": "震荡",
+            "advance_ratio_pct": float("nan"),
+            "median_return_pct": float("inf"),
+            "seal_rate_pct": True,
+            "total_amount_yi": float("-inf"),
+            "prev_limit_up_avg_return_pct": True,
+            "non_st_limit_up_count": True,
+            "non_st_limit_down_count": float("nan"),
+            "max_consecutive_limit_up": "bad",
+            "return_distribution": {"pos0_3": True, "flat": float("nan"), "le_neg7": "bad"},
+            "consecutive_board_ladder": {"2": True, "bad": 3, "3": 1},
+        },
+        "announcement_risks": {"checked_count": True, "flagged_count": True, "flagged_items": []},
+        "strategy_track_stats": {"dual_low": {"t5_avg_excess_pct": float("nan")}},
+        "strategies": [{"strategy": "dual_low", "picks": [{"code": "000001", "name": "平安", "change_pct": float("inf")}]}],
+        "cross_strategy_synthesis": {
+            "consensus_picks": [{
+                "code": "000001",
+                "name": "平安银行",
+                "industry": "银行",
+                "price": float("nan"),
+                "pe_ratio": True,
+                "pb_ratio": float("inf"),
+                "market_cap_yi": float("-inf"),
+                "change_pct": True,
+                "avg_final_score": float("nan"),
+                "strategy_count": True,
+                "strategies": ["dual_low"],
+            }],
+        },
+        "patterns": {
+            "active": [{
+                "pattern": "valid_pat",
+                "display_name": "放量突破",
+                "status": "active",
+                "hit_count": 2,
+                "replay_t5_net_excess_pct": float("nan"),
+                "signals": [{
+                    "name": "测试股",
+                    "code": "600000",
+                    "change_pct": float("inf"),
+                    "overhead_supply_10pct": True,
+                }],
+            }],
+            "experimental": [{
+                "pattern": "neg_pat",
+                "display_name": "负观察",
+                "status": "experimental",
+                "expectancy_tier": "negative_watch",
+                "hit_count": 1,
+                "replay_t5_net_excess_pct": float("-inf"),
+            }],
+        },
+    }
+
+    email_cn = _render_email_html(dirty_cn, "fallback", title="Email")
+    assert "0.0%" in email_cn and "封板率 –" in email_cn and "0 策略" in email_cn
+    assert "3板</strong> 1只" in email_cn and "2板" not in email_cn
+    assert "nan" not in email_cn.lower() and "inf" not in email_cn.lower()
+
+    discord_embed = _build_discord_embed(dirty_cn, "fallback", title="Discord")
+    assert "上涨 0.0%" in discord_embed["fields"][0]["value"]
+    assert "涨跌停 0/0 · 最高 0板" in discord_embed["fields"][0]["value"]
+
+    sent = []
+    _send_custom_webhook(
+        "https://example.com/hook",
+        report=dirty_cn,
+        content="body",
+        title="Hook",
+        timeout_sec=5.0,
+        post_fn=lambda url, **kw: (sent.append(kw["json"]), types.SimpleNamespace(status_code=200, headers={}, raise_for_status=lambda: None))[1],
+    )
+    assert sent[0]["summary"]["flagged_announcements"] == 0
+
+    dirty_global = {
+        "object": "MarketDigest",
+        "trade_date": "2026-11-26",
+        "markets": ["us"],
+        "market_sections": [{
+            "market": "us",
+            "market_name": "美股",
+            "trade_date": "2026-11-26",
+            "strategy_count": True,
+            "top_picks": [{
+                "code": "AAPL",
+                "name": "Apple",
+                "price": float("nan"),
+                "change_pct": True,
+                "avg_final_score": float("inf"),
+                "strategies": ["global_value"],
+            }],
+        }],
+    }
+    email_global = _render_email_html(dirty_global, "fallback", title="Global")
+    assert "0 组策略" in email_global
+    assert "nan" not in email_global.lower() and "inf" not in email_global.lower()
+
+
+def test_daily_report_and_market_digest_scrub_nonfinite_and_bool() -> None:
+    from alphasift.daily_report import _build_ai_highlights, screen_announcement_risks
+    from alphasift.market_digest import render_market_digest_im_card
+
+    ann_out = screen_announcement_risks(
+        [{"code": "600519", "name": "茅台"}],
+        priority_counts={"600519": True},  # type: ignore[dict-item]
+        collector=lambda df, max_rows, cache_dir=None: (
+            [{"code": "600519", "name": "茅台", "negative_event_flags": ["立案"], "announcement": "2026-11-26 重大风险"}],
+            [],
+        ),
+        trade_date="2026-11-26",
+    )
+    assert ann_out["flagged_items"][0]["consensus_count"] == 0
+
+    ai_bad_run = ScreenResult(
+        strategy="dual_low",
+        market="cn",
+        run_id="dual_low_ai_nan",
+        track="ai",
+        llm_ranked=True,
+        picks=[
+            Pick(rank=1, code="000001", name="平安", industry="银行", final_score=float("nan"), screen_score=80.0, change_pct=1.2),
+        ],
+    )
+    highlights = _build_ai_highlights([ai_bad_run])
+    assert highlights[0]["added_by_ai"][0]["final_score"] == 0.0
+    json.dumps(highlights, allow_nan=False)
+
+    dirty_report = {
+        "trade_date": "2026-11-26",
+        "detail_url": "https://example.test/",
+        "market_regime": {
+            "regime_stage": "startup",
+            "regime_stage_label": "启动",
+            "advance_ratio_pct": float("nan"),
+            "non_st_limit_up_count": True,
+            "non_st_limit_down_count": float("nan"),
+            "max_consecutive_limit_up": "bad",
+            "seal_rate_pct": float("inf"),
+            "prev_limit_up_avg_return_pct": float("-inf"),
+            "total_amount_yi": float("nan"),
+            "median_return_pct": float("nan"),
+        },
+        "announcement_risks": {
+            "checked_count": True,
+            "flagged_items": [],
+        },
+        "strategies": [
+            {"strategy": "dual_low", "track": "rules", "pick_count": float("nan"), "picks": [{"code": "000001"}, {"code": "000002"}]},
+            {"strategy": "dual_low", "track": "ai", "llm_ranked": True, "pick_count": True, "picks": [{"code": "000001"}]},
+        ],
+        "cross_strategy_synthesis": {
+            "consensus_picks": [{"code": "000001", "name": "平安", "strategy_count": float("nan")}],
+        },
+        "patterns": {
+            "active": [
+                {"pattern": "bool_pat", "display_name": "布尔形态", "status": "active", "hit_count": True, "signals": []},
+                {"pattern": "valid_pat", "display_name": "放量突破", "status": "active", "hit_count": 2, "signals": [{"code": "600000", "name": "突破股"}], "wf_non_adverse_low_overhead_pct": 0.85, "wf_non_adverse_low_overhead_days": 20},
+            ],
+            "experimental": [
+                {"pattern": "nan_pat", "display_name": "无效形态", "status": "experimental", "hit_count": float("nan"), "signals": []},
+            ],
+        },
+    }
+    im_card = render_daily_im_card(dirty_report)
+    assert "涨跌停 0/0" in im_card
+    assert "最高 0板" in im_card
+    assert "0策略" in im_card
+    assert "放量突破(2只" in im_card
+    assert "规则 1 组(2只) / [AI] 1 组(1只)" in im_card
+    assert "True" not in im_card
+    assert "nan" not in im_card.lower() and "inf" not in im_card.lower()
+
+    dirty_digest = {
+        "trade_date": "2026-11-26",
+        "detail_url": "https://example.test/",
+        "market_sections": [
+            {
+                "market": "us",
+                "market_name": "美股",
+                "trade_date": "2026-11-26",
+                "strategy_count": True,
+                "top_picks": [{"code": "AAPL", "name": "Apple", "avg_final_score": float("nan")}],
+            },
+            {
+                "market": "hk",
+                "market_name": "港股",
+                "trade_date": "2026-11-26",
+                "strategy_count": float("nan"),
+                "top_picks": [{"code": "0700", "name": "腾讯", "avg_final_score": float("inf")}],
+            },
+        ],
+    }
+    digest_card = render_market_digest_im_card(dirty_digest)
+    assert "0 组策略" in digest_card
+    assert "0.0分" in digest_card
+    assert "True" not in digest_card
+    assert "nan" not in digest_card.lower() and "inf" not in digest_card.lower()
+
+    assert len(ensure_im_card_length("a" * 100, max_chars=True)) == 100  # type: ignore[arg-type]
+
+
+def test_notify_response_codes_discord_digest_smtp_and_report_robustness(tmp_path: Path) -> None:
+    import types
+
+    from alphasift.notify import (
+        _build_discord_embed,
+        _dispatch_target,
+        _send_bark,
+        _send_dingtalk,
+        _send_feishu,
+        _send_pushplus,
+        _send_serverchan,
+        _send_wecom,
+    )
+    from alphasift.report import build_run_report_payload
+
+    def _fake_post(payload_obj):
+        def _post(url, **kw):
+            return types.SimpleNamespace(
+                status_code=200,
+                headers={},
+                json=lambda: payload_obj,
+                text="",
+                raise_for_status=lambda: None,
+            )
+        return _post
+
+    for bad_payload in ({"errcode": None, "errmsg": "null"}, {"errcode": "bad"}, {"errcode": True}):
+        with pytest.raises(RuntimeError, match="wecom errcode="):
+            _send_wecom("https://qyapi.weixin.qq.com/hook", "body", timeout_sec=5.0, post_fn=_fake_post(bad_payload))
+        with pytest.raises(RuntimeError, match="dingtalk errcode="):
+            _send_dingtalk("https://oapi.dingtalk.com/hook", "body", title="DT", timeout_sec=5.0, post_fn=_fake_post(bad_payload))
+
+    _send_feishu("https://open.feishu.cn/hook", "body", title="FS", timeout_sec=5.0, post_fn=_fake_post({"code": None, "StatusCode": 0}))
+    for bad_code in ({"code": None, "msg": "bad"}, {"code": "ok"}, {"code": True}):
+        with pytest.raises(RuntimeError, match="feishu code="):
+            _send_feishu("https://open.feishu.cn/hook", "body", title="FS", timeout_sec=5.0, post_fn=_fake_post(bad_code))
+        with pytest.raises(RuntimeError, match="pushplus code="):
+            _send_pushplus("tok", "body", title="PP", timeout_sec=5.0, post_fn=_fake_post(bad_code))
+        with pytest.raises(RuntimeError, match="serverchan code="):
+            _send_serverchan("https://sctapi.ftqq.com/tok.send", "body", title="SC", timeout_sec=5.0, post_fn=_fake_post(bad_code))
+        with pytest.raises(RuntimeError, match="bark code="):
+            _send_bark("https://api.day.app/tok", "body", title="BK", timeout_sec=5.0, post_fn=_fake_post(bad_code))
+    _send_bark("https://api.day.app/tok", "body", title="BK", timeout_sec=5.0, post_fn=_fake_post({}))
+
+    dirty_digest = {
+        "object": "MarketDigest",
+        "trade_date": "2026-11-26",
+        "markets": ["us"],
+        "market_sections": [{
+            "market": "us",
+            "market_name": "美股",
+            "top_picks": [
+                {"code": "AAPL", "avg_final_score": None},
+                {"code": "MSFT", "avg_final_score": float("nan")},
+                {"code": "NVDA", "avg_final_score": True},
+            ],
+        }],
+    }
+    embed = _build_discord_embed(dirty_digest, "fallback", title="Digest")
+    val = embed["fields"][0]["value"]
+    assert "AAPL(0)" in val and "MSFT(0)" in val and "NVDA(0)" in val
+    assert "nan" not in val.lower() and "true" not in val.lower()
+
+    ports_seen: list[tuple[str, int]] = []
+
+    def _smtp_factory(host: str, port: int, *, mode: str, timeout: float):
+        ports_seen.append((host, port))
+        return types.SimpleNamespace(login=lambda u, p: None, send_message=lambda m: None, quit=lambda: None)
+
+    cfg = Config(data_dir=tmp_path)
+    for bad_port in ("bad", True):
+        _dispatch_target(
+            {
+                "channel": "email",
+                "target": "u@example.com",
+                "secret": "pw",
+                "extra": {"smtp_host": "smtp.example.com", "smtp_port": bad_port},
+            },
+            cfg,
+            report={},
+            content="body",
+            title="Test",
+            smtp_factory=_smtp_factory,
+        )
+    assert ports_seen == [("smtp.example.com", 465), ("smtp.example.com", 465)]
+
+    res = ScreenResult(
+        strategy="dual_low",
+        market="cn",
+        run_id="r1",
+        picks=[
+            Pick(rank=1, code="000001", name="平安", industry="银行", final_score=90.0, screen_score=85.0),
+            Pick(rank=2, code="600519", name="茅台", industry="白酒", final_score=88.0, screen_score=84.0),
+        ],
+    )
+    assert len(build_run_report_payload(res, max_picks=True)["top_picks"]) == 2  # type: ignore[arg-type]
+    assert len(build_run_report_payload(res, max_picks=float("nan"))["top_picks"]) == 2  # type: ignore[arg-type]

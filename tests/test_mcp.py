@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -37,11 +38,15 @@ def test_mcp_initialize_tools_and_resources(tmp_path):
         "alphasift_doctor_data_sources",
         "alphasift_notify_status",
         "alphasift_list_runs",
+        "alphasift_replay_patterns",
+        "alphasift_markets_digest",
+        "alphasift_daily_report",
+        "alphasift_markets",
     }
 
     res_list = server.handle_request({"jsonrpc": "2.0", "id": 4, "method": "resources/list"})
     uris = {item["uri"] for item in res_list["result"]["resources"]}
-    assert uris == {"alphasift://skill", "alphasift://strategies"}
+    assert uris == {"alphasift://skill", "alphasift://strategies", "alphasift://patterns", "alphasift://markets"}
 
     skill_res = server.handle_request(
         {"jsonrpc": "2.0", "id": 5, "method": "resources/read", "params": {"uri": "alphasift://skill"}}
@@ -53,6 +58,48 @@ def test_mcp_initialize_tools_and_resources(tmp_path):
     )
     strat_catalog = json.loads(strat_res["result"]["contents"][0]["text"])
     assert len(strat_catalog["strategies"]) >= 8
+
+    pat_res = server.handle_request(
+        {"jsonrpc": "2.0", "id": 61, "method": "resources/read", "params": {"uri": "alphasift://patterns"}}
+    )
+    pat_catalog = json.loads(pat_res["result"]["contents"][0]["text"])
+    assert len(pat_catalog["patterns"]) >= 9
+
+    mkt_res = server.handle_request(
+        {"jsonrpc": "2.0", "id": 62, "method": "resources/read", "params": {"uri": "alphasift://markets"}}
+    )
+    mkt_catalog = json.loads(mkt_res["result"]["contents"][0]["text"])
+    assert len(mkt_catalog["markets"]) == 7
+    assert {item["id"] for item in mkt_catalog["markets"]} == {"cn", "us", "hk", "jp", "kr", "tw", "in"}
+    assert all(isinstance(item.get("session_open"), str) and item.get("currency") for item in mkt_catalog["markets"])
+
+    mkt_tool = server.handle_request(
+        {"jsonrpc": "2.0", "id": 63, "method": "tools/call", "params": {"name": "alphasift_markets"}}
+    )
+    assert mkt_tool["result"]["isError"] is False
+    mkt_tool_data = json.loads(mkt_tool["result"]["content"][0]["text"])
+    assert len(mkt_tool_data["markets"]) == 7
+
+    us_tool = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 64,
+            "method": "tools/call",
+            "params": {"name": "alphasift_markets", "arguments": {"market": "US"}},
+        }
+    )
+    assert us_tool["result"]["isError"] is False
+    assert json.loads(us_tool["result"]["content"][0]["text"])["market"]["currency"] == "USD"
+
+    bad_mkt_tool = server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 65,
+            "method": "tools/call",
+            "params": {"name": "alphasift_markets", "arguments": {"market": "unknown"}},
+        }
+    )
+    assert bad_mkt_tool["result"]["isError"] is True
 
 
 def test_mcp_tool_calls_and_safety_guards(tmp_path, monkeypatch):
@@ -196,7 +243,7 @@ def test_mcp_stdio_subprocess_supports_line_and_content_length_framing(tmp_path)
         decoded_msgs.append(json.loads(raw[body_start : body_start + length].decode("utf-8")))
         pos = body_start + length
     assert [m["id"] for m in decoded_msgs] == [10, 11]
-    assert len(decoded_msgs[1]["result"]["tools"]) == 10
+    assert len(decoded_msgs[1]["result"]["tools"]) == 14
 
 
 def test_mcp_round9_security_and_strict_schema_validation(tmp_path):
@@ -291,3 +338,369 @@ def test_mcp_round9_security_and_strict_schema_validation(tmp_path):
     assert raw_err.startswith(b"Content-Length: ")
     _, err_body = raw_err.split(b"\r\n\r\n", 1)
     assert json.loads(err_body.decode("utf-8"))["error"]["code"] == -32700
+
+
+def test_mcp_reads_skill_markdown_from_user_base_fallback(monkeypatch, tmp_path):
+    import site
+    import alphasift.mcp as mcp_mod
+
+    missing_root = tmp_path / "no_repo"
+    missing_prefix = tmp_path / "no_prefix"
+    user_base = tmp_path / "user_base"
+    user_base.mkdir(parents=True)
+    (user_base / "SKILL.md").write_text("# User Base Skill\n", encoding="utf-8")
+
+    monkeypatch.setattr(mcp_mod, "_PROJECT_ROOT", missing_root)
+    monkeypatch.setattr(mcp_mod.sys, "prefix", str(missing_prefix))
+    monkeypatch.setattr(site, "USER_BASE", str(user_base))
+
+    server = MCPServer(Config(data_dir=tmp_path))
+    assert server._read_skill_markdown() == "# User Base Skill\n"
+
+
+
+def test_mcp_replay_patterns_tool_and_validation_guards(tmp_path, monkeypatch):
+    class _DummyPack:
+        dates = ["2026-02-01", "2026-06-01", "2026-11-01"]
+
+    captured: dict[str, object] = {}
+
+    def _fake_load_pack(_path):
+        return _DummyPack()
+
+    def _fake_load_cn_benchmark(*, lookback_days):
+        captured["lookback_days"] = lookback_days
+        return "BENCH"
+
+    def _fake_replay_patterns(daily_pack, **kwargs):
+        captured["kwargs"] = kwargs
+        return {
+            "generated_at": "2026-11-24T15:00:00Z",
+            "entry_mode": "next_open",
+            "benchmark": "sh000300",
+            "cost_bps": kwargs["cost_bps"],
+            "regime_filter": {"active": True, "effective_regimes": ["startup", "main_up"]},
+            "overhead_filter": {"active": True, "max_overhead_pct": kwargs["max_overhead_pct"]},
+            "graduation_rule": {"min_samples": 200},
+            "pack_summary": {"eval_sessions": 180},
+            "universe_baseline": {"t5": {"equal_weight_excess_mean_pct": -0.3}},
+            "patterns": [
+                {
+                    "pattern": "bottom_volume_yang",
+                    "display_name": "底部倍量阳",
+                    "family": "bottom_reversal",
+                    "mode": "direct",
+                    "total_signals": 82,
+                    "untradable_share_pct": 1.2,
+                    "horizons": {"t5": {"net_excess_mean_pct": 2.8}},
+                    "graduation": {"recommended_status": "experimental"},
+                    "stability": {"t_stat": 1.07},
+                    "walk_forward_regime_audit": {
+                        "h2_non_adverse_low_overhead": {"days": 16, "signals": 82, "daily_mean_pct": 2.848},
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr("alphasift.mcp.load_pack", _fake_load_pack)
+    monkeypatch.setattr("alphasift.mcp.load_cn_benchmark", _fake_load_cn_benchmark)
+    monkeypatch.setattr("alphasift.mcp.replay_patterns", _fake_replay_patterns)
+
+    server = MCPServer(Config(data_dir=tmp_path))
+    ok = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": 100,
+        "method": "tools/call",
+        "params": {
+            "name": "alphasift_replay_patterns",
+            "arguments": {
+                "patterns": ["bottom_volume_yang"],
+                "excluded_regimes": ["freezing"],
+                "max_overhead_pct": 15.0,
+                "cost_bps": 25.0,
+            },
+        },
+    })
+    assert ok["result"]["isError"] is False
+    assert captured["lookback_days"] == 320
+    assert captured["kwargs"] == {
+        "patterns": ["bottom_volume_yang"],
+        "benchmark_df": "BENCH",
+        "warmup_days": 60,
+        "cost_bps": 25.0,
+        "allowed_regimes": None,
+        "excluded_regimes": ["freezing"],
+        "max_overhead_pct": 15.0,
+    }
+    body = json.loads(ok["result"]["content"][0]["text"])
+    assert body["overhead_filter"] == {"active": True, "max_overhead_pct": 15.0}
+    assert body["patterns"][0]["walk_forward_regime_audit"]["h2_non_adverse_low_overhead"]["daily_mean_pct"] == 2.848
+
+    for idx, bad_args in enumerate(
+        [
+            {"max_overhead_pct": 0},
+            {"max_overhead_pct": True},
+            {"cost_bps": -1},
+            {"patterns": ["../evil"]},
+            {"excluded_regimes": "freezing"},
+        ],
+        start=101,
+    ):
+        err = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": idx,
+            "method": "tools/call",
+            "params": {"name": "alphasift_replay_patterns", "arguments": bad_args},
+        })
+        assert err["result"]["isError"] is True, bad_args
+
+
+def test_mcp_markets_digest_tool_and_validation_guards(tmp_path):
+    from alphasift.models import Pick, ScreenResult
+    from alphasift.store import save_screen_result
+
+    cfg = Config(data_dir=tmp_path)
+    save_screen_result(
+        ScreenResult(
+            strategy="us_momentum_quality",
+            market="us",
+            run_id="us_mom_1",
+            track="rules",
+            created_at="2026-11-20T22:00:00Z",
+            snapshot_count=400,
+            after_filter_count=12,
+            picks=[
+                Pick(rank=1, code="MSFT", name="Microsoft", final_score=94.0, screen_score=94.0),
+                Pick(rank=2, code="AAPL", name="Apple", final_score=86.0, screen_score=86.0),
+            ],
+        ),
+        data_dir=cfg.data_dir,
+    )
+    save_screen_result(
+        ScreenResult(
+            strategy="global_value",
+            market="us",
+            run_id="us_val_1",
+            track="rules",
+            created_at="2026-11-20T22:05:00Z",
+            snapshot_count=400,
+            after_filter_count=8,
+            picks=[
+                Pick(rank=1, code="AAPL", name="Apple", final_score=84.0, screen_score=84.0),
+            ],
+        ),
+        data_dir=cfg.data_dir,
+    )
+    save_screen_result(
+        ScreenResult(
+            strategy="global_value",
+            market="hk",
+            run_id="hk_val_1",
+            track="rules",
+            created_at="2026-11-20T09:00:00Z",
+            snapshot_count=300,
+            after_filter_count=5,
+            picks=[
+                Pick(rank=1, code="00700", name="Tencent", final_score=88.5, screen_score=88.5),
+            ],
+        ),
+        data_dir=cfg.data_dir,
+    )
+
+    server = MCPServer(cfg)
+    ok = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": 200,
+        "method": "tools/call",
+        "params": {
+            "name": "alphasift_markets_digest",
+            "arguments": {
+                "markets": ["us", "US", "hk"],
+                "include_news": False,
+                "detail_url": "https://alphasift.zhulinsen.tech/",
+            },
+        },
+    })
+    assert ok is not None
+    assert ok["result"]["isError"] is False
+    body = json.loads(ok["result"]["content"][0]["text"])
+    assert body["object"] == "MarketDigest"
+    assert body["markets"] == ["us", "hk"]
+    assert len(body["market_sections"]) == 2
+    assert body["market_sections"][0]["market"] == "us"
+    assert body["market_sections"][0]["top_picks"][0]["code"] == "AAPL"
+    assert body["market_sections"][0]["top_picks"][0]["strategy_count"] == 2
+    assert body["im_card_chars"] < 1200
+    assert "https://alphasift.zhulinsen.tech/" in body["im_card_markdown"]
+
+    for idx, bad_args in enumerate(
+        [
+            {"markets": []},
+            {"markets": ["mars"]},
+            {"trade_date": "2026/11/24"},
+            {"trade_date": "2026-13-40"},
+            {"include_news": "yes"},
+            {"detail_url": "javascript:alert(1)"},
+        ],
+        start=201,
+    ):
+        err = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": idx,
+            "method": "tools/call",
+            "params": {"name": "alphasift_markets_digest", "arguments": bad_args},
+        })
+        assert err is not None
+        assert err["result"]["isError"] is True, bad_args
+
+    proto_err = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": 299,
+        "method": "tools/call",
+        "params": {"name": "alphasift_markets_digest", "arguments": {"bogus": 1}},
+    })
+    assert proto_err is not None
+    assert proto_err["error"]["code"] == -32602
+
+
+def test_mcp_daily_report_tool_and_validation_guards(tmp_path):
+    import numpy as np
+    import pandas as pd
+
+    from alphasift.models import Pick, ScreenResult
+    from alphasift.pack import DailyPack, FIELDS, pack_dir, save_pack
+    from alphasift.store import save_screen_result
+
+    cfg = Config(data_dir=tmp_path)
+    server = MCPServer(cfg)
+
+    missing_pack = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": 300,
+        "method": "tools/call",
+        "params": {"name": "alphasift_daily_report", "arguments": {}},
+    })
+    assert missing_pack is not None
+    assert missing_pack["result"]["isError"] is True
+    assert "CN DailyPack unavailable" in missing_pack["result"]["content"][0]["text"]
+
+    n_d = 25
+    mat = {f: np.full((n_d, 1), 10.0, dtype=np.float32) for f in FIELDS}
+    mat["open"][:, 0] = 10.0
+    mat["high"][:, 0] = 10.2
+    mat["low"][:, 0] = 9.9
+    mat["close"][:, 0] = 10.1
+    mat["volume"][:, 0] = 5_000_000.0
+    mat["amount"][:, 0] = 50_000_000.0
+    dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-10-01", periods=n_d)]
+    last_date = dates[-1]
+    save_pack(
+        pack_dir(cfg),
+        DailyPack(
+            dates=np.asarray(dates, dtype=str),
+            codes=np.asarray(["000001"], dtype=str),
+            matrices=mat,
+            meta=pd.DataFrame([{"code": "000001", "name": "平安", "industry": "银行", "pe_ratio": 5.0, "pb_ratio": 0.6, "total_mv": 1e11, "circ_mv": 9e10, "list_date": "1991-04-03", "is_st": False}]),
+            sources=("test",),
+        ),
+    )
+    save_screen_result(
+        ScreenResult(
+            strategy="dual_low",
+            market="cn",
+            run_id="cn_dr_1",
+            track="rules",
+            created_at=f"{last_date}T08:00:00Z",
+            snapshot_count=100,
+            after_filter_count=5,
+            picks=[Pick(rank=1, code="000001", name="平安", final_score=85.0, screen_score=85.0)],
+        ),
+        data_dir=cfg.data_dir,
+    )
+    replay_dir = tmp_path / "patterns"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    (replay_dir / "replay.json").write_text(
+        json.dumps({
+            "cost_bps": 25.0,
+            "patterns": [
+                {
+                    "pattern": "double_bottom_breakout",
+                    "horizons": {"t5": {"net_excess_mean_pct": 0.24, "excess_win_rate_pct": 54.0, "excess_scored": 40}},
+                    "graduation": {"recommended_status": "experimental", "t5_net_excess_mean_pct": 0.24},
+                    "walk_forward_regime_audit": {
+                        "h2_non_adverse_low_overhead": {"days": 16, "signals": 28, "daily_mean_pct": 0.31},
+                    },
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    ok = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": 301,
+        "method": "tools/call",
+        "params": {
+            "name": "alphasift_daily_report",
+            "arguments": {"include_runs": True, "detail_url": "https://alphasift.zhulinsen.tech/"},
+        },
+    })
+    assert ok is not None
+    assert ok["result"]["isError"] is False
+    body = json.loads(ok["result"]["content"][0]["text"])
+    assert body["object"] == "DailyReport"
+    assert body["ai_brief"]["mode"] == "rule_fallback"
+    assert body["im_card_chars"] < 1200
+    assert len(body["strategies"]) == 1
+    assert "https://alphasift.zhulinsen.tech/" in body["im_card_markdown"]
+
+    for idx, bad_args in enumerate(
+        [
+            {"trade_date": "2026/11/24"},
+            {"trade_date": "2026-99-99"},
+            {"include_runs": "yes"},
+            {"include_experimental_patterns": "no"},
+            {"detail_url": "javascript:alert(1)"},
+        ],
+        start=302,
+    ):
+        err = server.handle_request({
+            "jsonrpc": "2.0",
+            "id": idx,
+            "method": "tools/call",
+            "params": {"name": "alphasift_daily_report", "arguments": bad_args},
+        })
+        assert err is not None
+        assert err["result"]["isError"] is True, bad_args
+
+    proto_dr_err = server.handle_request({
+        "jsonrpc": "2.0",
+        "id": 399,
+        "method": "tools/call",
+        "params": {"name": "alphasift_daily_report", "arguments": {"bogus": 1}},
+    })
+    assert proto_dr_err is not None
+    assert proto_dr_err["error"]["code"] == -32602
+
+
+def test_serve_mcp_rejects_non_finite_json_and_exits_cleanly_on_broken_pipe(tmp_path):
+    from alphasift.mcp import serve_mcp
+
+    cfg = Config(data_dir=tmp_path)
+    bad_in = io.BytesIO(b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"x":NaN}}\n')
+    bad_out = io.BytesIO()
+    serve_mcp(cfg, in_stream=bad_in, out_stream=bad_out)
+    parsed_err = json.loads(bad_out.getvalue().decode("utf-8"))
+    assert parsed_err["error"]["code"] == -32700
+
+    class _BrokenOut:
+        def write(self, _data: bytes) -> int:
+            raise BrokenPipeError("client closed pipe")
+
+        def flush(self) -> None:
+            return None
+
+    ping_in = io.BytesIO(b'{"jsonrpc":"2.0","id":2,"method":"ping"}\n')
+    serve_mcp(cfg, in_stream=ping_in, out_stream=_BrokenOut())
+
+

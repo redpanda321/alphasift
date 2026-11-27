@@ -20,6 +20,26 @@
 <meta name="twitter:description" content="A股/美股/港股等7市场每日自动选股、K线形态雷达、公告排雷、AI复盘日报与公开 T+5/T+10/T+20 策略跟踪曲线。">
 <meta name="twitter:image" content="https://alphasift.zhulinsen.tech/social-preview.png">
 <link rel="alternate" type="application/atom+xml" title="AlphaSift Daily Feed" href="site/feed.xml">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "AlphaSift",
+  "applicationCategory": "FinanceApplication",
+  "operatingSystem": "Cross-platform",
+  "url": "https://alphasift.zhulinsen.tech/",
+  "codeRepository": "https://github.com/ZhuLinsen/alphasift",
+  "license": "https://www.apache.org/licenses/LICENSE-2.0",
+  "image": "https://alphasift.zhulinsen.tech/social-preview.png",
+  "inLanguage": ["zh-CN", "en", "ja"],
+  "isAccessibleForFree": true,
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
+</script>
 <style>
 :root {
   --bg: #09090b;
@@ -132,7 +152,7 @@ code {
   max-width: 1280px; margin: 0 auto; padding: 10px 20px;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
 }
-.brand-group { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-group { display: flex; align-items: center; gap: 10px; min-width: 0; flex-shrink: 0; }
 .brand-link {
   display: inline-flex; align-items: center; gap: 9px; color: var(--ink);
   font-weight: 700; font-size: 15px; letter-spacing: -0.02em; text-decoration: none;
@@ -164,6 +184,19 @@ code {
   color: var(--muted); transition: color 0.15s, background 0.15s; white-space: nowrap;
 }
 .nav-center a:hover { color: var(--ink); background: var(--chip); text-decoration: none; }
+
+.mobile-nav {
+  display: none; flex-wrap: wrap; gap: 6px; margin-top: 14px;
+}
+.mobile-nav a {
+  display: inline-flex; align-items: center; padding: 5px 11px; border-radius: 999px;
+  font-size: 12px; font-weight: 500; color: var(--muted);
+  background: var(--surface); border: 1px solid var(--border); white-space: nowrap;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.mobile-nav a:hover {
+  color: var(--ink); border-color: var(--border-strong); background: var(--surface-2); text-decoration: none;
+}
 
 .top-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .action-btn, .github-btn {
@@ -278,7 +311,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px 20px 72px; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .kpi-foot {
-  font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11.5px; color: var(--muted); line-height: 1.35;
 }
 
 /* Section Headers */
@@ -439,6 +472,35 @@ tbody tr { transition: background 0.12s; }
 tbody tr:hover { background: var(--surface-hover); }
 tr:last-child td { border-bottom: 0; }
 tr.low-sample td, td.muted-cell { color: var(--muted); opacity: 0.78; }
+tr.pat-focus-row td { background: var(--accent-soft) !important; opacity: 1 !important; color: var(--ink) !important; }
+tr.pat-focus-row td:first-child { box-shadow: inset 3px 0 0 var(--accent-hi); font-weight: 700; }
+.pat-report-link {
+  display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding: 0 6px;
+  border-radius: 5px; font-size: 10.5px; font-weight: 600; font-family: var(--font-sans);
+  color: var(--accent-hi); background: var(--accent-soft); border: 1px solid rgba(59, 130, 246, 0.22);
+  text-decoration: none; white-space: nowrap; vertical-align: middle;
+}
+.pat-report-link:hover { background: rgba(59, 130, 246, 0.22); text-decoration: none; }
+.strat-drill-btn {
+  background: transparent; border: 0; padding: 0; margin: 0; font: inherit; color: var(--ink);
+  cursor: pointer; display: inline-flex; align-items: center; gap: 4px; text-align: left;
+}
+.strat-drill-btn:hover { color: var(--accent-hi); }
+.strat-drill-btn .drill-arrow { opacity: 0.45; font-size: 11px; transition: opacity 0.12s, transform 0.12s; }
+.strat-drill-btn:hover .drill-arrow { opacity: 1; transform: translate(1px, -1px); color: var(--accent-hi); }
+.clear-search-btn {
+  display: none; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted);
+  border-radius: 7px; padding: 4px 8px; font: inherit; font-size: 11.5px; cursor: pointer; white-space: nowrap;
+}
+.clear-search-btn:hover { color: var(--ink); border-color: var(--border-strong); }
+.wf-cli-btn {
+  display: inline-flex; align-items: center; gap: 3px; margin-left: 5px; padding: 1px 6px;
+  border-radius: 4px; border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--accent-hi); font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  cursor: pointer; vertical-align: middle; transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+.wf-cli-btn:hover { border-color: var(--accent-hi); background: var(--accent-soft); }
+.wf-cli-btn.copied { border-color: var(--status-ok); color: var(--status-ok); background: var(--status-ok-soft); }
 .ico { width: 14px; height: 14px; display: inline-block; vertical-align: -2px; flex-shrink: 0; }
 
 .rank-num {
@@ -547,6 +609,7 @@ details.sec-details > summary.sec-summary {
   cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 12px;
   font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
 }
+.sec-summary-left { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 details.sec-details > summary.sec-summary::-webkit-details-marker { display: none; }
 details.sec-details > summary.sec-summary::after {
   content: "展开 ▾"; font-size: 12px; font-weight: 500; color: var(--muted);
@@ -574,10 +637,16 @@ footer {
 }
 .footer-links { display: flex; flex-wrap: wrap; gap: 14px; }
 
+@media (max-width: 1360px) {
+  .nav-center a { padding: 4px 8px; }
+}
+@media (max-width: 1240px) {
+  .nav-center { display: none; }
+  .mobile-nav { display: flex; }
+}
 @media (max-width: 1100px) {
   .bento-command { grid-template-columns: 1fr; }
   .kpi-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .nav-center { display: none; }
 }
 @media (max-width: 640px) {
   .topbar-inner { padding: 8px 10px; gap: 6px; }
@@ -631,11 +700,11 @@ footer {
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
         <span class="btn-lbl" data-i18n="nav_ledger">原始账本</span>
       </a>
-      <a class="github-btn" href="https://github.com/ZhuLinsen/alphasift" target="_blank" rel="noopener">
+      <a class="github-btn" href="https://github.com/ZhuLinsen/alphasift?utm_source=dashboard" target="_blank" rel="noopener" data-i18n-title="nav_github_title" title="前往 GitHub 点 Star 或 Fork 免费部署">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.11.78-.25.78-.55 0-.27-.01-1.18-.02-2.14-3.2.7-3.87-1.36-3.87-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.72.08-.71.08-.71 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.71 1.26 3.37.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.06 11.06 0 0 1 5.78 0c2.21-1.49 3.18-1.18 3.18-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.69 5.39-5.26 5.68.41.36.78 1.06.78 2.15 0 1.55-.01 2.8-.01 3.18 0 .31.21.67.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/>
         </svg>
-        <span>GitHub</span>
+        <span data-i18n="nav_github">Star 开源项目</span>
       </a>
       <div class="lang-switch" id="lang-switch" role="group" aria-label="Language">
         <button type="button" data-lang="zh" aria-pressed="true">中</button>
@@ -656,6 +725,10 @@ footer {
       <div class="meta" id="meta"></div>
     </div>
     <div class="masthead-right">
+      <button type="button" class="action-btn" id="btn-share">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+        <span data-i18n="btn_share">分享视图</span>
+      </button>
       <a class="action-btn" href="https://github.com/ZhuLinsen/alphasift#readme" target="_blank" rel="noopener">
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
         <span data-i18n="btn_docs">使用文档</span>
@@ -664,8 +737,21 @@ footer {
         <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
         <span data-i18n="btn_strategies">内置策略</span>
       </a>
+      <a class="action-btn" href="https://github.com/ZhuLinsen/alphasift/blob/main/docs/deployment.md?utm_source=dashboard" target="_blank" rel="noopener">
+        <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+        <span data-i18n="btn_deploy">免费云端部署</span>
+      </a>
     </div>
   </header>
+
+  <nav class="mobile-nav" data-i18n-aria="nav_aria" aria-label="主导航">
+    <a href="#overview" data-i18n="nav_overview">焦点总览</a>
+    <a href="#leaderboard" data-i18n="nav_leaderboard">策略排行</a>
+    <a href="#trend-section" data-i18n="nav_trend">超额走势</a>
+    <a href="#explorer" data-i18n="nav_explorer">选股浏览</a>
+    <a href="#track-comparison-section" data-i18n="nav_ai">AI 归因</a>
+    <a href="#radar-section" data-i18n="nav_patterns">形态雷达</a>
+  </nav>
 
   <div class="stale-banner" id="stale-banner"></div>
   <div class="health-strip" id="health-strip"></div>
@@ -760,6 +846,7 @@ footer {
         <select id="market-latest" data-i18n-aria="mkt_filter_aria" aria-label="市场筛选"></select>
         <select id="day" data-i18n-aria="day_filter_aria" aria-label="历史交易日" style="display:none;"></select>
         <input type="search" class="search-input" id="pick-search" data-i18n-placeholder="search_ph" data-i18n-aria="search_aria" placeholder="搜索代码 / 名称 / 行业 / 策略…" aria-label="过滤选股">
+        <button type="button" class="clear-search-btn" id="explorer-clear-btn" data-i18n="clear_filter">× 清除筛选</button>
       </div>
     </div>
     <div class="tab-panel active" id="tab-latest">
@@ -787,7 +874,7 @@ footer {
 
   <section id="radar-section">
     <details class="sec-details" id="details-patterns">
-      <summary class="sec-summary"><span data-i18n="details_pat_title">A 股无状态形态雷达命中（20 日迷你 K 线）</span></summary>
+      <summary class="sec-summary"><span class="sec-summary-left"><span data-i18n="details_pat_title">A 股无状态形态雷达命中（20 日迷你 K 线）</span><span class="badge" id="pat-summary-badge" style="display:none;"></span></span></summary>
       <div class="sec-body">
         <p class="sec-hint" style="margin:0 0 12px;" data-i18n-html="details_pat_hint">未通过 250 日 <code>next_open</code> 严苛门槛（N ≥ 200、扣 25bp 净超额 &gt; 0%、同日跑赢全A等权、H1/H2 各 ≥15d 且 ≥30 样本同号正超额、Newey-West t ≥ 1.96 且 BH-FDR q ≤ 0.05）的形态一律置灰标 <code>experimental</code>，仅作研究观察。</p>
         <div id="pattern-hits-wrap"><div class="empty" data-i18n="loading_pat">加载形态命中…</div></div>
@@ -795,12 +882,13 @@ footer {
     </details>
 
     <details class="sec-details" id="details-replay">
-      <summary class="sec-summary"><span data-i18n="details_replay_title">250 日 next_open 形态回放、聚日稳定性与切片验证</span></summary>
+      <summary class="sec-summary"><span class="sec-summary-left"><span data-i18n="details_replay_title">250 日 next_open 形态回放、聚日稳定性与切片验证</span><span class="badge" id="replay-summary-badge" style="display:none;"></span></span></summary>
       <div class="sec-body">
         <div id="universe-baseline-wrap"></div>
         <div id="replay-summary-wrap"><div class="empty" data-i18n="no_replay_yet">暂无 250 日形态回放结果</div></div>
         <div id="regime-slice-wrap"></div>
         <div id="overhead-slice-wrap"></div>
+        <div id="walk-forward-wrap"></div>
       </div>
     </details>
   </section>
@@ -839,6 +927,8 @@ const I18N = {
     nav_rss_title: "订阅 Atom 1.0 RSS 每日更新",
     nav_ledger: "原始账本",
     nav_ledger_title: "查看 track-record 分支 Git 可审计原始运行日志",
+    nav_github: "Star 开源项目",
+    nav_github_title: "前往 GitHub 点 Star 或 Fork 免费部署",
     theme_aria: "切换明暗主题",
     theme_light: "亮色",
     theme_dark: "暗色",
@@ -846,6 +936,9 @@ const I18N = {
     hero_sub: "每交易日收盘自动运行全市场 YAML 策略、公告排雷与可选 AI 重排，按 <code>T+5 / T+10 / T+20</code> 真实行情与一字涨停不可成交口径公开验证超额收益。",
     btn_docs: "使用文档",
     btn_strategies: "内置策略",
+    btn_deploy: "免费云端部署",
+    btn_share: "分享视图",
+    btn_copied: "已复制链接",
     loading: "加载中",
     loading_sub: "读取公开战绩与盘面统计…",
     loading_consensus: "正在分析今日跨策略共识候选…",
@@ -874,6 +967,7 @@ const I18N = {
     mkt_filter_aria: "市场筛选",
     day_filter_aria: "历史交易日",
     search_ph: "搜索代码 / 名称 / 行业 / 策略…",
+    clear_filter: "× 清除筛选",
     search_aria: "过滤选股",
     sec5_title: "规则榜 vs AI 榜同日配对归因",
     sec5_hint: "仅针对同一策略在同一交易日的双轨运行严格配对对比（同日配对 < 10 日时隐藏差值，单列 AI 缺失率与重合度）。",
@@ -939,6 +1033,8 @@ const I18N = {
     pane_consensus_title: "多策略共振标的",
     pane_consensus_badge: "{n} 只共振",
     full_report_btn: "完整研报 →",
+    ai_report_link: "今日调仓研报 →",
+    pat_report_link: "研报卡片 →",
     live_agg_chip: "{d} · 实时聚合",
     ai_brief_badge: "AI 综述",
     rule_brief_badge: "规则摘要",
@@ -984,6 +1080,7 @@ const I18N = {
     sc_empty: "当前筛选暂无运行记录",
     sc_cols: ["#", "市场", "策略", "入场口径", "运行", "已评估", "待定", "不可成交", "平均收益", "胜率", "同期基准", "超额收益 (T+{w})", "跑赢基准"],
     sc_low_sample_title: "少于 {n} 只，样本偏小",
+    sc_drill_title: "点击联动聚焦走势图并在选股浏览器过滤该策略",
     sc_unassessed: "未评估",
     sc_unassessed_title: "切换前收盘口径，未评估开盘一字涨停",
     tc_empty_all: "AI 对照赛道尚未积累成对交易日（当前 0/10 配对日），满足 10 个同日配对后将自动披露 AI vs 规则归因差值 · 自部署接入说明见 <a href=\"https://github.com/ZhuLinsen/alphasift/blob/main/docs/deployment.md\" target=\"_blank\" rel=\"noopener\">部署文档</a>。",
@@ -994,6 +1091,10 @@ const I18N = {
     tc_insuff_title: "需至少 {m} 个同日配对",
     n_picks_sm: "{n}只",
     ai_attr_badge: "AI 当日归因",
+    ai_attr_reranked: "AI 调仓 (+{a}/-{d})",
+    ai_attr_aligned: "与规则一致 (100%)",
+    ai_filter_all: "全部 ({n})",
+    ai_filter_changed: "仅含调仓 ({n})",
     ai_attr_sub: "重合度 {ov} · 规则 {r} 只 / AI {a} 只",
     ai_mkt_view: "市场观点：",
     ai_added: "AI 新增：",
@@ -1024,6 +1125,22 @@ const I18N = {
     sl_subhead: "形态 × 市场阶段切片（带 * 且置灰表示样本 &lt; {n}）",
     ov_head_lbl: "形态 × 上方套牢盘切片（T+5 匹配样本 / 超额 / 胜率）",
     ov_subhead: "形态 × 上方 10% 套牢筹码切片（带 * 且置灰表示样本 &lt; {n}）",
+    wf_subhead: "Walk-Forward 情绪门控样本外检验（仅 H1 选阶段 → 冻结检验 H2）",
+    wf_cols: ["形态", "H1 正超额阶段", "H1 剔除逆风", "H2 基线 (日数)", "H2 仅正阶段 (OOS)", "Δ 正阶段", "H2 剔逆风 (OOS)", "Δ 剔逆风", "联合≤15% / CLI"],
+    wf_none: "无",
+    wf_note: "注：H1 严格按实际退出日 < 切分日截断并剔除跨界样本；H2 日数 <{m}d 标有小样本标签并置灰；悬停 H2 / Δ 单元格可查看等权超额 (EW)、Newey-West t 值与信号数，点击行末 CLI 按钮可一键复制复现命令。",
+    wf_unverified_note: "注意：当前回放数据尚未标记 purged_by_exit_date 退出日边界，H1 阶段筛选与联合样本外结果暂属旧口径待复核。",
+    wf_purged_summary: "切分日 {mid} · 已按退出日剔除 {n} 条跨界信号",
+    wf_tip_purged: "H1 退出日 < {mid}，已剔除 {sig} 条跨界信号（{d} 个交易日）",
+    wf_tip_h2: "H2 样本外：{d}日 / {sig} 条信号 · 等权 {ew} · NW t={t}",
+    wf_tip_delta: "等权 Δ {ew} · H2 {d}日 / {sig} 条信号 · NW t={t}",
+    wf_tip_low: "样本偏小（<{m}日），结果需谨慎解读",
+    wf_tip_joint: "联合门控(非逆风×套牢<{ov}%)：H2 {mean} ({d}d/{sig}条, Δ {delta}, EW Δ {ew})",
+    wf_tip_cli: "复现命令：{cmd}",
+    wf_cli_btn: "CLI",
+    wf_cli_copied: "已复制",
+    pat_sum_badge: "{m} 套形态 · 今日命中 {h} 只",
+    replay_sum_badge: "{s}日 · {p} 套 · Walk-Forward",
     chart_empty: "该市场 T+{w} 所选赛道还没有到期的选股",
     chart_tip_excess: "超额",
     chart_tip_picks: "{n} 只",
@@ -1085,6 +1202,8 @@ const I18N = {
     nav_rss_title: "Subscribe to Atom 1.0 daily feed",
     nav_ledger: "Raw Ledger",
     nav_ledger_title: "View Git-auditable raw run logs on track-record branch",
+    nav_github: "Star on GitHub",
+    nav_github_title: "Star or Fork on GitHub for free daily Actions runs",
     theme_aria: "Toggle light/dark theme",
     theme_light: "Light",
     theme_dark: "Dark",
@@ -1092,6 +1211,9 @@ const I18N = {
     hero_sub: "Automated post-close screening across 7 markets with auditable YAML strategies, announcement risk screening, optional LLM re-ranking, and public <code>T+5 / T+10 / T+20</code> verification including untradable limit-up accounting.",
     btn_docs: "Docs",
     btn_strategies: "Strategies",
+    btn_deploy: "Free Cloud Deploy",
+    btn_share: "Share View",
+    btn_copied: "Link Copied",
     loading: "Loading",
     loading_sub: "Fetching audited track record & market breadth…",
     loading_consensus: "Aggregating cross-strategy consensus picks…",
@@ -1120,6 +1242,7 @@ const I18N = {
     mkt_filter_aria: "Filter market",
     day_filter_aria: "Trading session",
     search_ph: "Filter symbol / name / sector / strategy…",
+    clear_filter: "× Clear",
     search_aria: "Filter picks",
     sec5_title: "Rules vs AI Same-Day Paired Attribution",
     sec5_hint: "Strict same-date, same-strategy paired comparison between rules and AI tracks (delta hidden when paired sessions < 10).",
@@ -1185,10 +1308,12 @@ const I18N = {
     pane_consensus_title: "Cross-Strategy Consensus",
     pane_consensus_badge: "{n} resonant",
     full_report_btn: "Full Report →",
+    ai_report_link: "Today's AI Brief →",
+    pat_report_link: "Brief Card →",
     live_agg_chip: "{d} · Live Aggregated",
     ai_brief_badge: "AI Brief",
     rule_brief_badge: "Rule Summary",
-    brief_headline_lbl: "Post-Close Brief:",
+    brief_headline_lbl: "Post-Close Brief: ",
     ann_alert_head: "⚠️ Announcement Risk Alerts ({checked} checked · {flagged} flagged):",
     ann_ok_msg: "✓ Screened {n} shortlisted candidates — no adverse filing keywords detected",
     col_stock: "Security",
@@ -1230,6 +1355,7 @@ const I18N = {
     sc_empty: "No matching track-record rows",
     sc_cols: ["#", "Market", "Strategy", "Entry", "Runs", "Matured", "Pending", "Untradable", "Raw Ret", "Win Rate", "Benchmark", "Excess (T+{w})", "Beat Rate"],
     sc_low_sample_title: "Below {n} samples (noisy)",
+    sc_drill_title: "Click to isolate trend curve & filter picks in Explorer",
     sc_unassessed: "Unassessed",
     sc_unassessed_title: "Legacy close entry before next_open switchover",
     tc_empty_all: "AI benchmark track has not accumulated paired sessions yet (0/10 paired days). Attribution delta unlocks automatically at ≥10 same-day pairs · see <a href=\"https://github.com/ZhuLinsen/alphasift/blob/main/docs/deployment.md\" target=\"_blank\" rel=\"noopener\">Deployment Docs</a> for self-hosting.",
@@ -1240,6 +1366,10 @@ const I18N = {
     tc_insuff_title: "Needs ≥{m} paired days",
     n_picks_sm: "{n}",
     ai_attr_badge: "AI Today Delta",
+    ai_attr_reranked: "Re-ranked (+{a}/-{d})",
+    ai_attr_aligned: "Aligned (100%)",
+    ai_filter_all: "All ({n})",
+    ai_filter_changed: "Re-ranked Only ({n})",
     ai_attr_sub: "Overlap {ov} · Rules {r} / AI {a}",
     ai_mkt_view: "Market View: ",
     ai_added: "AI Added: ",
@@ -1270,6 +1400,22 @@ const I18N = {
     sl_subhead: "Regime Slices (* & muted = matched N < {n})",
     ov_head_lbl: "Pattern × Top-10% Overhead Supply (T+5 Matched / Excess / Win Rate)",
     ov_subhead: "Overhead Supply Slices (* & muted = matched N < {n})",
+    wf_subhead: "Walk-Forward Regime Gate (Zero-Snooping: H1 Selection → H2 OOS)",
+    wf_cols: ["Pattern", "H1 Positive Regimes", "H1 Adverse Excluded", "H2 Baseline", "H2 Positive Only (OOS)", "Delta Pos", "H2 Non-Adverse (OOS)", "Delta Non-Adv", "Joint ≤15% / CLI"],
+    wf_none: "None",
+    wf_note: "Note: H1 is cut strictly by actual exit_date < split_date with cross-boundary trades purged. H2 cells tagged <{m}d are muted small-sample estimates. Hover H2 or Delta for Equal-Weight excess, Newey-West t, and signals; click CLI to copy the replay command.",
+    wf_unverified_note: "Notice: Replay payload predates purged_by_exit_date enforcement; H1 stage selection and joint OOS values remain pending re-audit.",
+    wf_purged_summary: "Split {mid} · {n} cross-boundary signals purged",
+    wf_tip_purged: "H1 exit_date < {mid}; purged {sig} cross-boundary signals ({d}d)",
+    wf_tip_h2: "H2 OOS: {d}d / {sig} signals · EW {ew} · NW t={t}",
+    wf_tip_delta: "EW Delta {ew} · H2 {d}d / {sig} signals · NW t={t}",
+    wf_tip_low: "Small sample (<{m}d) — interpret cautiously",
+    wf_tip_joint: "Joint Gate (Non-Adv x Overhead<{ov}%): H2 {mean} ({d}d/{sig} sigs, Delta {delta}, EW Delta {ew})",
+    wf_tip_cli: "CLI: {cmd}",
+    wf_cli_btn: "CLI",
+    wf_cli_copied: "Copied",
+    pat_sum_badge: "{m} patterns · {h} hits today",
+    replay_sum_badge: "{s}d · {p} patterns · Walk-Forward",
     chart_empty: "No matured T+{w} picks for the selected market/track",
     chart_tip_excess: "Excess",
     chart_tip_picks: "{n} picks",
@@ -1331,6 +1477,8 @@ const I18N = {
     nav_rss_title: "Atom 1.0 RSS フィードを購読",
     nav_ledger: "生ログ",
     nav_ledger_title: "track-record ブランチの Git 監査可能な生ログを表示",
+    nav_github: "GitHub で Star",
+    nav_github_title: "GitHub で Star / Fork して無料自動実行",
     theme_aria: "ライト／ダーク切替",
     theme_light: "ライト",
     theme_dark: "ダーク",
@@ -1338,6 +1486,9 @@ const I18N = {
     hero_sub: "毎営業日の引け後に全市場 YAML 戦略・開示リスクチェック・任意の AI 再ランクを自動実行し、<code>T+5 / T+10 / T+20</code> の実測値とストップ高成行不可判定で超過リターンを公開検証します。",
     btn_docs: "ドキュメント",
     btn_strategies: "内蔵戦略",
+    btn_deploy: "無料クラウド運用",
+    btn_share: "URLコピー",
+    btn_copied: "コピー済",
     loading: "読込中",
     loading_sub: "公開トラックレコードと市場データを読込中…",
     loading_consensus: "戦略間のコンセンサス候補を集計中…",
@@ -1366,6 +1517,7 @@ const I18N = {
     mkt_filter_aria: "市場フィルタ",
     day_filter_aria: "営業日選択",
     search_ph: "コード / 銘柄名 / 業種 / 戦略を検索…",
+    clear_filter: "× 解除",
     search_aria: "銘柄フィルタ",
     sec5_title: "ルール vs AI 同日ペア帰属分析",
     sec5_hint: "同一戦略・同一営業日の両トラック実行のみを厳密にペア比較します（ペア日数 < 10 日の場合、差分は非表示）。",
@@ -1431,6 +1583,8 @@ const I18N = {
     pane_consensus_title: "複数戦略コンセンサス銘柄",
     pane_consensus_badge: "{n} 銘柄重複",
     full_report_btn: "詳細レポート →",
+    ai_report_link: "本日のAIレポート →",
+    pat_report_link: "レポート詳細 →",
     live_agg_chip: "{d} · リアルタイム集計",
     ai_brief_badge: "AI 要約",
     rule_brief_badge: "統計サマリー",
@@ -1476,6 +1630,7 @@ const I18N = {
     sc_empty: "該当するトラックレコードはありません",
     sc_cols: ["#", "市場", "戦略", "基準", "実行", "評価済", "保留", "不可", "平均騰落", "勝率", "ベンチマーク", "超過 (T+{w})", "対指数勝率"],
     sc_low_sample_title: "{n} 件未満のため参考値",
+    sc_drill_title: "クリックして推移チャートと銘柄一覧をこの戦略で絞り込む",
     sc_unassessed: "未評価",
     sc_unassessed_title: "next_open 切替前の終値基準",
     tc_empty_all: "AI ベンチマークは現在ペア営業日を蓄積中です（0/10 ペア日）。同日ペアが 10 日以上に達すると差分を自動表示します · 自前設定は <a href=\"https://github.com/ZhuLinsen/alphasift/blob/main/docs/deployment.md\" target=\"_blank\" rel=\"noopener\">デプロイガイド</a> をご参照ください。",
@@ -1486,6 +1641,10 @@ const I18N = {
     tc_insuff_title: "{m}日以上のペア比較が必要",
     n_picks_sm: "{n}件",
     ai_attr_badge: "AI 当日帰属",
+    ai_attr_reranked: "AI 入替 (+{a}/-{d})",
+    ai_attr_aligned: "ルール一致 (100%)",
+    ai_filter_all: "すべて ({n})",
+    ai_filter_changed: "入替ありのみ ({n})",
     ai_attr_sub: "重複 {ov} · ルール {r} / AI {a}",
     ai_mkt_view: "市場見通し：",
     ai_added: "AI 追加：",
@@ -1516,6 +1675,22 @@ const I18N = {
     sl_subhead: "市場局面スライス（* と薄字は標本 &lt; {n}）",
     ov_head_lbl: "パターン × 上値10%しこり玉（T+5 一致 / 超過 / 勝率）",
     ov_subhead: "上値しこり玉スライス（* と薄字は標本 &lt; {n}）",
+    wf_subhead: "Walk-Forward 相場局面ゲート（H1のみで選択 → H2でOOS検証）",
+    wf_cols: ["パターン", "H1 正超過局面", "H1 逆風除外", "H2 基準", "H2 正局面のみ (OOS)", "Δ 正局面", "H2 非逆風 (OOS)", "Δ 除外後", "複合≤15% / CLI"],
+    wf_none: "なし",
+    wf_note: "注：H1 は実際の決済日 < 分割日で厳密に切断し境界跨ぎ標本を除外しています。H2 日数 <{m}d は小標本タグ付きで薄字表示。H2・Δ セルで等重超過 (EW)・NW t値・件数を確認でき、CLI で再現コマンドをコピーできます。",
+    wf_unverified_note: "注意：この再生データには purged_by_exit_date 境界検証が未付与のため、H1 局面判定と複合 OOS は再検証待ちです。",
+    wf_purged_summary: "分割日 {mid} · 境界跨ぎ {n} 件除外",
+    wf_tip_purged: "H1 決済日 < {mid}、境界跨ぎ {sig} 件（{d} 日）除外",
+    wf_tip_h2: "H2 OOS：{d}日 / {sig} 件 · 等重 {ew} · NW t={t}",
+    wf_tip_delta: "等重 Δ {ew} · H2 {d}日 / {sig} 件 · NW t={t}",
+    wf_tip_low: "小標本（<{m}日）のため慎重に解釈してください",
+    wf_tip_joint: "複合ゲート(非逆風×しこり<{ov}%)：H2 {mean} ({d}d/{sig}件, Δ {delta}, EW Δ {ew})",
+    wf_tip_cli: "再現 CLI：{cmd}",
+    wf_cli_btn: "CLI",
+    wf_cli_copied: "コピー済",
+    pat_sum_badge: "{m} 種 · 本日 {h} 件検出",
+    replay_sum_badge: "{s}日 · {p} 種 · Walk-Forward",
     chart_empty: "選択した市場・トラックで満期到来の T+{w} 銘柄がありません",
     chart_tip_excess: "超過",
     chart_tip_picks: "{n} 銘柄",
@@ -1716,6 +1891,7 @@ const state = {
   scoreMarket: "all",
   scoreSort: "excess",
   compareWin: "5",
+  aiAttrFilter: "all",
   trendWin: "5",
   trendTrack: "both",
   trendDensity: "top3",
@@ -1724,6 +1900,7 @@ const state = {
   latestMarket: null,
   explorerMode: "latest",
   patFilter: "all",
+  patFocus: "",
   searchQuery: "",
   dayCache: {},
   currentDay: null,
@@ -1790,15 +1967,35 @@ function pname(slug, serverDisplay) {
   return serverDisplay || slug;
 }
 
-function pct(v, digits = 2) {
-  if (v === null || v === undefined || Number.isNaN(Number(v))) return '<span class="dim">–</span>';
+function finiteNum(v) {
+  if (v === null || v === undefined || v === "" || typeof v === "boolean") return null;
   const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function nonNegInt(v, fallback = 0) {
+  const n = finiteNum(v);
+  return n === null ? fallback : Math.max(0, Math.trunc(n));
+}
+
+function pct(v, digits = 2) {
+  const n = finiteNum(v);
+  if (n === null) return '<span class="dim">–</span>';
   const cls = n > 0 ? "up" : n < 0 ? "down" : "";
   return `<span class="${cls}">${n > 0 ? "+" : ""}${n.toFixed(digits)}%</span>`;
 }
-const rate = (v) => (v === null || v === undefined || Number.isNaN(Number(v))) ? '<span class="dim">–</span>' : `${Math.round(Number(v) * 100)}%`;
-const sharePct = (v) => (v === null || v === undefined || Number.isNaN(Number(v))) ? '<span class="dim">–</span>' : `${Number(v).toFixed(1)}%`;
-const num = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v))) ? '<span class="dim">–</span>' : Number(v).toFixed(d);
+const rate = (v) => {
+  const n = finiteNum(v);
+  return n === null ? '<span class="dim">–</span>' : `${Math.round(n * 100)}%`;
+};
+const sharePct = (v) => {
+  const n = finiteNum(v);
+  return n === null ? '<span class="dim">–</span>' : `${n.toFixed(1)}%`;
+};
+const num = (v, d = 2) => {
+  const n = finiteNum(v);
+  return n === null ? '<span class="dim">–</span>' : n.toFixed(d);
+};
 const localTime = (iso) => {
   if (!iso) return "–";
   const loc = state.lang === "en" ? "en-US" : state.lang === "ja" ? "ja-JP" : "zh-CN";
@@ -1817,12 +2014,14 @@ function syncThemeBtn(theme) {
   btn.innerHTML = theme === "light" ? `${ICO_MOON}<span>${esc(t("theme_dark"))}</span>` : `${ICO_SUN}<span>${esc(t("theme_light"))}</span>`;
 }
 
-function reportHref() {
+function reportHref(hashFrag = "") {
   const params = new URLSearchParams();
   if (state.lang && state.lang !== "zh") params.set("lang", state.lang);
   if (state.theme && state.theme !== "dark") params.set("theme", state.theme);
   const qs = params.toString();
-  return qs ? `site/daily_report.html?${qs}` : "site/daily_report.html";
+  const cleanHash = String(hashFrag || "").replace(/^#/, "").trim();
+  const base = qs ? `site/daily_report.html?${qs}` : "site/daily_report.html";
+  return cleanHash ? `${base}#${cleanHash}` : base;
 }
 
 function syncReportLinks() {
@@ -1830,6 +2029,10 @@ function syncReportLinks() {
   ["report-top-link", "footer-report-link"].forEach((id) => {
     const el = $(id);
     if (el) el.setAttribute("href", href);
+  });
+  document.querySelectorAll("a[data-report-hash]").forEach((el) => {
+    const h = el.getAttribute("data-report-hash") || "";
+    el.setAttribute("href", reportHref(h));
   });
 }
 
@@ -1876,6 +2079,7 @@ function syncQueryState() {
     setOrDel("q", (state.searchQuery || "").trim(), "");
     setOrDel("mode", state.explorerMode, "latest");
     setOrDel("pf", state.patFilter, "all");
+    setOrDel("pat", state.patFocus, "");
     window.history.replaceState(null, "", url.pathname + url.search + url.hash);
   } catch (_) {}
 }
@@ -1895,6 +2099,8 @@ function restoreQueryState() {
     if (mode === "latest" || mode === "history") state.explorerMode = mode;
     const pf = qs.get("pf");
     if (pf === "all" || pf === "active" || pf === "experimental") state.patFilter = pf;
+    const pat = (qs.get("pat") || "").trim();
+    if (pat && /^[a-z0-9_]+$/i.test(pat)) state.patFocus = pat;
   } catch (_) {}
 }
 
@@ -2070,7 +2276,8 @@ function computeClientConsensus() {
       const entry = byCode.get(code);
       if (strat) entry.strategies.add(strat);
       entry.tracks.add(run.track || "rules");
-      if (pk.final_score !== null && pk.final_score !== undefined) entry.scores.push(Number(pk.final_score));
+      const pkScore = finiteNum(pk.final_score);
+      if (pkScore !== null) entry.scores.push(pkScore);
     }
   }
 
@@ -2107,22 +2314,25 @@ function computeClientConsensus() {
 
 function renderMiniKline(bars, observeLag) {
   if (!Array.isArray(bars) || !bars.length) return '<span class="dim">–</span>';
+  const cleanBars = [];
   let lo = Infinity, hi = -Infinity;
   for (const b of bars) {
     if (!Array.isArray(b) || b.length < 4) continue;
-    if (b[2] < lo) lo = b[2];
-    if (b[1] > hi) hi = b[1];
+    const o = finiteNum(b[0]), h = finiteNum(b[1]), l = finiteNum(b[2]), c = finiteNum(b[3]);
+    if (o === null || h === null || l === null || c === null) continue;
+    cleanBars.push([o, h, l, c]);
+    if (l < lo) lo = l;
+    if (h > hi) hi = h;
   }
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return '<span class="dim">–</span>';
-  const span = Math.max(hi - lo, hi * 0.005, 1e-6);
+  if (!cleanBars.length || !Number.isFinite(lo) || !Number.isFinite(hi)) return '<span class="dim">–</span>';
+  const span = Math.max(hi - lo, Math.abs(hi) * 0.005, 1e-6);
   const W = 96, H = 28, pad = 3.5;
-  const n = bars.length;
+  const n = cleanBars.length;
   const step = (W - pad * 2) / n;
   const bw = Math.max(1.8, step * 0.65);
   const y = (p) => pad + (1 - (p - lo) / span) * (H - pad * 2);
   const shapes = [];
-  bars.forEach((b, i) => {
-    const [o, h, l, c] = b;
+  cleanBars.forEach(([o, h, l, c], i) => {
     const cx = (pad + (i + 0.5) * step).toFixed(1);
     const col = c >= o ? "var(--up)" : "var(--down)";
     const yTop = y(Math.max(o, c)), yBot = y(Math.min(o, c));
@@ -2130,8 +2340,8 @@ function renderMiniKline(bars, observeLag) {
     shapes.push(`<line x1="${cx}" x2="${cx}" y1="${y(h).toFixed(1)}" y2="${y(l).toFixed(1)}" stroke="${col}" stroke-width="1"/>`);
     shapes.push(`<rect x="${(Number(cx) - bw / 2).toFixed(1)}" y="${yTop.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh}" rx="0.5" fill="${col}"/>`);
   });
-  const lag = Number(observeLag || 0);
-  if (Number.isInteger(lag) && lag > 0 && n - 1 - lag >= 0) {
+  const lag = finiteNum(observeLag);
+  if (lag !== null && Number.isInteger(lag) && lag > 0 && n - 1 - lag >= 0) {
     const obsX = (pad + (n - 1 - lag + 0.5) * step).toFixed(1);
     const confX = (pad + (n - 0.5) * step).toFixed(1);
     shapes.push(`<circle cx="${obsX}" cy="2.2" r="1.8" fill="var(--accent-hi)"/>`);
@@ -2141,7 +2351,7 @@ function renderMiniKline(bars, observeLag) {
 }
 
 function renderHitSparkline(history, slug) {
-  const vals = (history || []).slice(-15).map((h) => Number(((h && h.counts_by_pattern) || {})[slug] || 0));
+  const vals = (history || []).slice(-15).map((h) => nonNegInt(((h && h.counts_by_pattern) || {})[slug], 0));
   if (!vals.length) return '<span class="dim">–</span>';
   const maxV = Math.max(1, ...vals);
   const W = 64, H = 18;
@@ -2159,7 +2369,7 @@ function renderHitSparkline(history, slug) {
 
 function renderReturnDistSvg(dist) {
   if (!dist || typeof dist !== "object") return `<div class="empty">${esc(t("no_dist"))}</div>`;
-  const counts = DIST_BUCKETS.map((b) => Number(dist[b.key] || 0));
+  const counts = DIST_BUCKETS.map((b) => nonNegInt(dist[b.key], 0));
   const maxVal = Math.max(1, ...counts);
   const W = 360, H = 116, top = 18, bot = 22, barH = H - top - bot;
   const step = W / DIST_BUCKETS.length;
@@ -2193,8 +2403,8 @@ function renderMetaAndKpis() {
     const failures = info.failures || [];
     const bad = failures.length > 0;
     const skipped = info.skipped || 0;
-    totalOk += Number(info.ok || 0);
-    totalRuns += Number(info.total || 0);
+    totalOk += nonNegInt(info.ok, 0);
+    totalRuns += nonNegInt(info.total, 0);
     totalFailures += failures.length;
     const title = failures.map((f) => `${f.market} ${f.strategy}: ${f.status} ${f.error || ""}`).join("\n");
     const statusText = skipped && info.total === 0
@@ -2226,19 +2436,20 @@ function renderMetaAndKpis() {
   }
 
   const sc = s.scorecard || [];
-  const t5Rows = sc.filter((r) => ((r.windows || {})["5"] || {}).average_excess_return_pct !== null && ((r.windows || {})["5"] || {}).average_excess_return_pct !== undefined);
-  const qualifiedT5 = t5Rows.filter((r) => Number(((r.windows || {})["5"] || {}).evaluated || 0) >= MIN_SAMPLE);
-  const sortedT5 = [...qualifiedT5].sort((a, b) => b.windows["5"].average_excess_return_pct - a.windows["5"].average_excess_return_pct);
+  const t5Rows = sc.filter((r) => finiteNum(((r.windows || {})["5"] || {}).average_excess_return_pct) !== null);
+  const qualifiedT5 = t5Rows.filter((r) => nonNegInt(((r.windows || {})["5"] || {}).evaluated, 0) >= MIN_SAMPLE);
+  const sortedT5 = [...qualifiedT5].sort((a, b) => (finiteNum(b.windows["5"].average_excess_return_pct) ?? 0) - (finiteNum(a.windows["5"].average_excess_return_pct) ?? 0));
   const bestT5 = sortedT5[0] || null;
-  const maxEval = t5Rows.reduce((mx, r) => Math.max(mx, Number(((r.windows || {})["5"] || {}).evaluated || 0)), 0);
+  const maxEval = t5Rows.reduce((mx, r) => Math.max(mx, nonNegInt(((r.windows || {})["5"] || {}).evaluated, 0)), 0);
 
   let evalTot = 0, exSum = 0;
   for (const r of t5Rows) {
     const w5 = r.windows["5"];
-    const n = Number(w5.evaluated || 0);
-    if (n > 0) {
+    const n = nonNegInt(w5.evaluated, 0);
+    const exV = finiteNum(w5.average_excess_return_pct);
+    if (n > 0 && exV !== null) {
       evalTot += n;
-      exSum += Number(w5.average_excess_return_pct) * n;
+      exSum += exV * n;
     }
   }
   const avgEx = evalTot > 0 ? exSum / evalTot : null;
@@ -2306,23 +2517,27 @@ function renderMetaAndKpis() {
   const clientSyn = computeClientConsensus();
   const topConsensus = ((rep.cross_strategy_synthesis || {}).consensus_picks || clientSyn.consensus)[0] || null;
 
+  const kpiAdv = reg ? finiteNum(reg.advance_ratio_pct) : null;
+  const consScore = topConsensus ? finiteNum(topConsensus.avg_final_score) : null;
+  const consPrice = topConsensus ? finiteNum(topConsensus.price) : null;
+
   const kpi3 = reg
     ? `<div class="kpi-cell">
          <div class="kpi-label"><span>${esc(t("kpi3_temp_lbl"))} (${esc((reg.trade_date || "").slice(5))})</span><span class="badge accent">${esc(rname(reg.regime_stage, reg.regime_stage_label))}</span></div>
-         <div class="kpi-val">${esc(Number(reg.advance_ratio_pct || 0).toFixed(1))}% <span class="small dim" style="font-weight:500;">${esc(t("kpi3_up_suffix"))}</span></div>
-         <div class="kpi-foot">${t("kpi3_temp_foot", { med: pct(reg.median_return_pct), lu: esc(String(reg.non_st_limit_up_count ?? 0)), ld: esc(String(reg.non_st_limit_down_count ?? 0)) })}</div>
+         <div class="kpi-val">${esc((kpiAdv ?? 0).toFixed(1))}% <span class="small dim" style="font-weight:500;">${esc(t("kpi3_up_suffix"))}</span></div>
+         <div class="kpi-foot">${t("kpi3_temp_foot", { med: pct(reg.median_return_pct), lu: esc(String(nonNegInt(reg.non_st_limit_up_count, 0))), ld: esc(String(nonNegInt(reg.non_st_limit_down_count, 0))) })}</div>
        </div>`
     : topConsensus
       ? `<div class="kpi-cell">
-           <div class="kpi-label"><span>${esc(t("kpi3_cons_lbl"))}</span><span class="badge accent">${esc(t("kpi3_cons_badge", { n: topConsensus.strategy_count }))}</span></div>
+           <div class="kpi-label"><span>${esc(t("kpi3_cons_lbl"))}</span><span class="badge accent">${esc(t("kpi3_cons_badge", { n: nonNegInt(topConsensus.strategy_count, 0) }))}</span></div>
            <div class="kpi-val">${esc(topConsensus.name)} <span class="small dim">${esc(topConsensus.code)}</span></div>
-           <div class="kpi-foot">${esc(t("kpi3_cons_foot", { ind: indname(topConsensus.industry), score: (topConsensus.avg_final_score != null ? Number(topConsensus.avg_final_score).toFixed(1) : "–"), price: (topConsensus.price != null ? Number(topConsensus.price).toFixed(2) : "–") }))}</div>
+           <div class="kpi-foot">${esc(t("kpi3_cons_foot", { ind: indname(topConsensus.industry), score: (consScore !== null ? consScore.toFixed(1) : "–"), price: (consPrice !== null ? consPrice.toFixed(2) : "–") }))}</div>
          </div>`
       : `<div class="kpi-cell"><div class="kpi-label">${esc(t("kpi3_empty_lbl"))}</div><div class="kpi-val dim">–</div><div class="kpi-foot">${esc(t("kpi3_empty_foot"))}</div></div>`;
 
   const ann = rep.announcement_risks || {};
   const flaggedCount = (ann.flagged_items || []).length;
-  const checkedCount = Number(ann.checked_count || 0);
+  const checkedCount = nonNegInt(ann.checked_count, 0);
   const kpi4 = checkedCount > 0
     ? `<div class="kpi-cell">
          <div class="kpi-label"><span>${esc(t("kpi4_ann_lbl"))}</span><span class="badge ${flaggedCount ? "bad" : "ok-neutral"}">${esc(flaggedCount ? t("kpi4_ann_bad", { n: flaggedCount }) : t("kpi4_ann_ok"))}</span></div>
@@ -2350,7 +2565,7 @@ function renderConsensusPane() {
   const sectors = (syn.sector_concentration && syn.sector_concentration.length) ? syn.sector_concentration : clientSyn.sectors;
   const tradeDate = rep.trade_date || clientSyn.latestDate || t("latest_fallback");
   const flagged = ann.flagged_items || [];
-  const checked = Number(ann.checked_count || 0);
+  const checked = nonNegInt(ann.checked_count, 0);
   const mNews = (rep.market_news && Array.isArray(rep.market_news.items)) ? rep.market_news.items : [];
   const candNews = (rep.market_news && rep.market_news.candidate_news) || {};
 
@@ -2362,18 +2577,20 @@ function renderConsensusPane() {
     if (state.lang !== "zh" && brief.mode !== "llm") {
       const reg = rep.market_regime || ((state.patterns || {}).latest || {}).market_regime || ((state.summary.pattern_board || {}).latest || {}).market_regime || null;
       if (reg) {
-        const adv = Number(reg.advance_ratio_pct || 0).toFixed(1);
-        const med = reg.median_return_pct !== null && reg.median_return_pct !== undefined
-          ? `${Number(reg.median_return_pct) > 0 ? "+" : ""}${Number(reg.median_return_pct).toFixed(2)}%`
+        const adv = (finiteNum(reg.advance_ratio_pct) ?? 0).toFixed(1);
+        const medVal = finiteNum(reg.median_return_pct);
+        const med = medVal !== null
+          ? `${medVal > 0 ? "+" : ""}${medVal.toFixed(2)}%`
           : "–";
-        const seal = reg.seal_rate_pct !== null && reg.seal_rate_pct !== undefined ? `${Number(reg.seal_rate_pct).toFixed(1)}%` : "–";
+        const sealVal = finiteNum(reg.seal_rate_pct);
+        const seal = sealVal !== null ? `${sealVal.toFixed(1)}%` : "–";
         hlText = t("rule_hl_fmt", {
           stale: rep.pack_is_stale ? t("rule_hl_stale") : "",
           stage: rname(reg.regime_stage, reg.regime_stage_label),
           adv,
           med,
-          lu: reg.non_st_limit_up_count ?? 0,
-          ld: reg.non_st_limit_down_count ?? 0,
+          lu: nonNegInt(reg.non_st_limit_up_count, 0),
+          ld: nonNegInt(reg.non_st_limit_down_count, 0),
           seal,
         });
         if (flagged.length) hlText += t("rule_hl_flag", { n: flagged.length });
@@ -2388,7 +2605,7 @@ function renderConsensusPane() {
         subParts.push(t("rule_sub_nocons"));
       }
       if (sectors.length) {
-        subParts.push(t("rule_sub_sec", { items: sectors.slice(0, 3).map((s) => `${indname(s.industry)} (${Number(s.share_pct || 0).toFixed(1)}%)`).join(", ") }));
+        subParts.push(t("rule_sub_sec", { items: sectors.slice(0, 3).map((s) => `${indname(s.industry)} (${Math.max(0, finiteNum(s.share_pct) ?? 0).toFixed(1)}%)`).join(", ") }));
       }
       const aiHl = rep.ai_highlights || [];
       if (aiHl.length) {
@@ -2450,12 +2667,15 @@ function renderConsensusPane() {
   const sectorHtml = sectors.length
     ? `<div class="sector-pills">
         <div class="small dim" style="display:flex;justify-content:space-between;"><span>${esc(t("sector_dist_title", { n: Math.min(5, sectors.length) }))}</span><span class="mono">${esc(t("sector_dist_col"))}</span></div>
-        ${sectors.slice(0, 5).map((s) => `
+        ${sectors.slice(0, 5).map((s) => {
+          const sp = Math.max(0, finiteNum(s.share_pct) ?? 0);
+          return `
           <div class="sector-row">
             <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(indname(s.industry))}</span>
-            <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, Number(s.share_pct || 0)).toFixed(1)}%"></div></div>
-            <span class="mono small" style="text-align:right;">${Number(s.share_pct || 0).toFixed(1)}% (${s.pick_count})</span>
-          </div>`).join("")}
+            <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, sp).toFixed(1)}%"></div></div>
+            <span class="mono small" style="text-align:right;">${sp.toFixed(1)}% (${nonNegInt(s.pick_count, 0)})</span>
+          </div>`;
+        }).join("")}
       </div>`
     : "";
 
@@ -2475,7 +2695,7 @@ function renderConsensusPane() {
     : "";
 
   const reportBtn = rep.trade_date
-    ? `<a class="action-btn" href="${esc(reportHref())}" style="padding:3px 9px;font-size:11.5px;">${esc(t("full_report_btn"))}</a>`
+    ? `<a class="action-btn" data-report-hash="synthesis" href="${esc(reportHref("synthesis"))}" style="padding:3px 9px;font-size:11.5px;">${esc(t("full_report_btn"))}</a>`
     : `<span class="chip">${esc(t("live_agg_chip", { d: tradeDate }))}</span>`;
 
   wrap.innerHTML = `
@@ -2502,20 +2722,20 @@ function renderCnHero() {
     const markets = state.summary.markets || [];
     const sc = state.summary.scorecard || [];
     const rowsHtml = markets.map((m) => {
-      const mRows = sc.filter((r) => r.market === m.id && ((r.windows || {})["5"] || {}).average_excess_return_pct !== null && ((r.windows || {})["5"] || {}).average_excess_return_pct !== undefined);
-      mRows.sort((a, b) => b.windows["5"].average_excess_return_pct - a.windows["5"].average_excess_return_pct);
+      const mRows = sc.filter((r) => finiteNum(((r.windows || {})["5"] || {}).average_excess_return_pct) !== null && r.market === m.id);
+      mRows.sort((a, b) => (finiteNum(b.windows["5"].average_excess_return_pct) ?? 0) - (finiteNum(a.windows["5"].average_excess_return_pct) ?? 0));
       const top = mRows[0] || null;
       if (!top) {
         return `<div class="mkt-snap-row"><span class="badge">${esc(mname(m.id))}</span><div class="mkt-snap-mid"><div class="mkt-snap-meta">${esc(m.benchmark)}</div></div><div class="mkt-snap-val dim">${esc(t("snap_pending"))}</div></div>`;
       }
       const w5 = top.windows["5"];
-      const ex = Number(w5.average_excess_return_pct);
+      const ex = finiteNum(w5.average_excess_return_pct) ?? 0;
       const barW = Math.min(100, Math.max(8, Math.abs(ex) * 14));
       return `<div class="mkt-snap-row">
         <div><strong style="font-size:12.5px;">${esc(mname(m.id))}</strong><div class="small dim">${esc(m.id.toUpperCase())}</div></div>
         <div class="mkt-snap-mid">
           <div class="mkt-snap-strat">${sname(top.strategy)}</div>
-          <div class="mkt-snap-meta">${t("snap_beat_eval", { bench: esc(m.benchmark), beat: rate(w5.beat_rate), n: w5.evaluated })}</div>
+          <div class="mkt-snap-meta">${t("snap_beat_eval", { bench: esc(m.benchmark), beat: rate(w5.beat_rate), n: nonNegInt(w5.evaluated, 0) })}</div>
           <div class="bar-track" style="margin-top:4px;height:4px;"><div class="bar-fill ${ex >= 0 ? "up-bg" : ""}" style="width:${barW.toFixed(1)}%;${ex < 0 ? "background:var(--down);" : ""}"></div></div>
         </div>
         <div class="mkt-snap-val">${pct(ex, 2)}</div>
@@ -2535,25 +2755,28 @@ function renderCnHero() {
     return;
   }
 
-  const totalTraded = Math.max(1, Number(reg.traded_count || 0));
-  const adv = Number(reg.advancing_count || 0);
-  const dec = Number(reg.declining_count || 0);
-  const flat = Number(reg.flat_count || 0);
+  const totalTraded = Math.max(1, nonNegInt(reg.traded_count, 0));
+  const adv = nonNegInt(reg.advancing_count, 0);
+  const dec = nonNegInt(reg.declining_count, 0);
+  const flat = nonNegInt(reg.flat_count, 0);
   const advW = (adv / totalTraded) * 100;
   const flatW = (flat / totalTraded) * 100;
   const decW = Math.max(0, 100 - advW - flatW);
-  const amtVal = reg.total_amount_yi !== null && reg.total_amount_yi !== undefined
-    ? (state.lang === "en" ? `${(Number(reg.total_amount_yi) * 0.1).toFixed(0)}B RMB` : `${Math.round(Number(reg.total_amount_yi))} ${t("amt_unit")}`)
+  const amtN = finiteNum(reg.total_amount_yi);
+  const amtVal = amtN !== null
+    ? (state.lang === "en" ? `${(amtN * 0.1).toFixed(0)}B RMB` : `${Math.round(amtN)} ${t("amt_unit")}`)
     : "–";
-  const seal = reg.seal_rate_pct !== null && reg.seal_rate_pct !== undefined ? `${Number(reg.seal_rate_pct).toFixed(1)}%` : "–";
+  const sealN = finiteNum(reg.seal_rate_pct);
+  const seal = sealN !== null ? `${sealN.toFixed(1)}%` : "–";
 
   const ladder = reg.consecutive_board_ladder || {};
-  const ladderEntries = Object.entries(ladder).sort((a, b) => Number(b[0]) - Number(a[0]));
-  const maxCnt = Math.max(1, ...ladderEntries.map(([, v]) => Number(v || 0)));
+  const ladderEntries = Object.entries(ladder).sort((a, b) => (finiteNum(b[0]) ?? 0) - (finiteNum(a[0]) ?? 0));
+  const maxCnt = Math.max(1, ...ladderEntries.map(([, v]) => nonNegInt(v, 0)));
   const ladderHtml = ladderEntries.length
     ? `<div class="ladder-list">${ladderEntries.map(([b, cnt]) => {
-        const w = Math.max(8, (Number(cnt) / maxCnt) * 100);
-        return `<div class="ladder-row"><span>${esc(t("ladder_board", { b }))}</span><div class="bar-track"><div class="bar-fill up-bg" style="width:${w.toFixed(1)}%"></div></div><span style="text-align:right;font-weight:600">${esc(t("ladder_cnt", { n: cnt }))}</span></div>`;
+        const cntN = nonNegInt(cnt, 0);
+        const w = Math.max(8, (cntN / maxCnt) * 100);
+        return `<div class="ladder-row"><span>${esc(t("ladder_board", { b }))}</span><div class="bar-track"><div class="bar-fill up-bg" style="width:${w.toFixed(1)}%"></div></div><span style="text-align:right;font-weight:600">${esc(t("ladder_cnt", { n: cntN }))}</span></div>`;
       }).join("")}</div>`
     : `<div class="small dim">${esc(t("ladder_empty"))}</div>`;
 
@@ -2620,6 +2843,18 @@ function initScoreMarketPills() {
   });
   const sortEl = $("sort-score");
   if (sortEl) sortEl.addEventListener("change", () => { state.scoreSort = sortEl.value; renderScorecard(); });
+  const scoreTbl = $("scorecard");
+  if (scoreTbl) {
+    scoreTbl.addEventListener("click", (e) => {
+      const btn = e.target.closest("button.strat-drill-btn");
+      if (!btn) return;
+      drillDownStrategy(
+        btn.getAttribute("data-drill-market") || "",
+        btn.getAttribute("data-drill-strategy") || "",
+        btn.getAttribute("data-drill-track") || "rules",
+      );
+    });
+  }
 }
 
 function renderScorecard() {
@@ -2665,7 +2900,7 @@ function renderScorecard() {
     return `<tr class="${lowSample ? "low-sample" : ""}">
       <td><span class="rank-num ${idx < 3 && !lowSample ? "top" : ""}">${idx + 1}</span></td>
       <td>${esc(mname(r.market))}</td>
-      <td class="l"><strong>${sname(r.strategy)}</strong>${trBadge}</td>
+      <td class="l"><button type="button" class="strat-drill-btn" data-drill-market="${esc(r.market)}" data-drill-strategy="${esc(r.strategy)}" data-drill-track="${esc(r.track || "rules")}" title="${esc(t("sc_drill_title"))}"><strong>${sname(r.strategy)}</strong>${trBadge}<span class="drill-arrow" aria-hidden="true">↗</span></button></td>
       <td class="l"><span class="badge mode">${esc(modes)}</span></td>
       <td class="mono">${r.runs}</td>
       <td class="mono">${x.evaluated ?? 0}${few}</td>
@@ -2706,8 +2941,10 @@ function renderTrackComparison() {
       const deltaCell = sufficient
         ? `<b>${pct(x.ai_minus_rules_pct)}</b><div class="small dim">${esc(t("tc_win_days", { w: x.ai_win_days ?? 0, n: paired }))}</div>`
         : `<span class="badge exp" title="${esc(tHiddenReason(x.delta_hidden_reason, paired, minPaired))}">${esc(t("tc_insuff", { p: paired, m: minPaired }))}</span>`;
-      const missRate = r.ai_missing_rate_pct !== null && r.ai_missing_rate_pct !== undefined ? `${Number(r.ai_missing_rate_pct).toFixed(1)}%` : "–";
-      const overlap = r.avg_pick_overlap_pct !== null && r.avg_pick_overlap_pct !== undefined ? `${Number(r.avg_pick_overlap_pct).toFixed(1)}%` : "–";
+      const missVal = finiteNum(r.ai_missing_rate_pct);
+      const missRate = missVal !== null ? `${missVal.toFixed(1)}%` : "–";
+      const ovVal = finiteNum(r.avg_pick_overlap_pct);
+      const overlap = ovVal !== null ? `${ovVal.toFixed(1)}%` : "–";
       const uniqTxt = x.ai_unique_count ? `${pct(x.ai_unique_excess_pct)} <span class="dim small">(${x.ai_unique_count})</span>` : '<span class="dim">–</span>';
       const dropTxt = x.rules_dropped_count ? `${pct(x.rules_dropped_excess_pct)} <span class="dim small">(${x.rules_dropped_count})</span>` : '<span class="dim">–</span>';
       return `<tr class="${sufficient ? "" : "low-sample"}">
@@ -2728,13 +2965,30 @@ function renderTrackComparison() {
 
   const hlWrap = $("ai-attribution-cards");
   const sep = state.lang === "en" ? "; " : "；";
-  const hlCards = hl.map((item) => {
+  const diffCount = (item) => (item.added_by_ai || []).length + (item.dropped_by_ai || []).length;
+  const sortedHl = [...hl].sort((a, b) => {
+    const dc = diffCount(b) - diffCount(a);
+    if (dc !== 0) return dc;
+    const oa = a.overlap_pct ?? 100;
+    const ob = b.overlap_pct ?? 100;
+    if (oa !== ob) return oa - ob;
+    return String(a.strategy || "").localeCompare(String(b.strategy || ""));
+  });
+  const changedCount = sortedHl.filter((item) => diffCount(item) > 0).length;
+  const activeFilter = state.aiAttrFilter === "changed" && changedCount > 0 ? "changed" : "all";
+  const visibleHl = activeFilter === "changed" ? sortedHl.filter((item) => diffCount(item) > 0) : sortedHl;
+  const hlCards = visibleHl.map((item) => {
+    const addN = (item.added_by_ai || []).length;
+    const dropN = (item.dropped_by_ai || []).length;
+    const badgeHtml = (addN + dropN) > 0
+      ? `<span class="badge ai">${esc(t("ai_attr_reranked", { a: addN, d: dropN }))}</span>`
+      : `<span class="badge exp">${esc(t("ai_attr_aligned"))}</span>`;
     const added = (item.added_by_ai || []).map((a) => `${esc(a.name)}(${esc(a.code)})${a.ranking_reason ? `: ${esc(a.ranking_reason.slice(0, 42))}` : ""}`).join(sep) || t("none_txt");
     const dropped = (item.dropped_by_ai || []).map((d) => `${esc(d.name)}(${esc(d.code)})`).join(sep) || t("none_txt");
     const ovStr = item.overlap_pct === null || item.overlap_pct === undefined ? "–" : `${item.overlap_pct}%`;
     return `<div class="card">
       <div class="card-top">
-        <h3><span>${sname(item.strategy)}</span><span class="badge ai">${esc(t("ai_attr_badge"))}</span></h3>
+        <h3><span>${sname(item.strategy)}</span>${badgeHtml}</h3>
         <div class="sub">${esc(t("ai_attr_sub", { ov: ovStr, r: item.rules_pick_count ?? 0, a: item.ai_pick_count ?? 0 }))}</div>
       </div>
       <div style="padding:10px 14px;font-size:12.5px;display:flex;flex-direction:column;gap:5px;">
@@ -2765,8 +3019,26 @@ function renderTrackComparison() {
     </div>`;
   }).filter(Boolean);
 
+  const aiReportBtn = state.reportReady
+    ? `<a class="action-btn" data-report-hash="ai-rebalance" href="${esc(reportHref("ai-rebalance"))}" style="padding:3px 9px;font-size:11.5px;margin-left:auto;">${esc(t("ai_report_link"))}</a>`
+    : "";
+  const filterBar = sortedHl.length ? `<div class="controls" id="ai-attr-filter" style="margin-bottom:8px;">
+    <span class="small dim" style="font-weight:600;">${esc(t("ai_attr_badge"))}</span>
+    <div class="seg" role="group" aria-label="${esc(t("ai_attr_badge"))}">
+      <button type="button" data-ai-filter="all" aria-pressed="${activeFilter === "all"}">${esc(t("ai_filter_all", { n: sortedHl.length }))}</button>
+      <button type="button" data-ai-filter="changed" aria-pressed="${activeFilter === "changed"}" ${changedCount === 0 ? "disabled" : ""}>${esc(t("ai_filter_changed", { n: changedCount }))}</button>
+    </div>
+    ${aiReportBtn}
+  </div>` : "";
   const allCards = [...hlCards, ...caseCards];
-  hlWrap.innerHTML = allCards.length ? `<div class="cards">${allCards.join("")}</div>` : "";
+  hlWrap.innerHTML = (filterBar || allCards.length) ? `${filterBar}${allCards.length ? `<div class="cards">${allCards.join("")}</div>` : ""}` : "";
+  hlWrap.querySelectorAll("#ai-attr-filter button[data-ai-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.disabled) return;
+      state.aiAttrFilter = btn.dataset.aiFilter || "all";
+      renderTrackComparison();
+    });
+  });
 }
 
 function renderPatternRadar() {
@@ -2777,6 +3049,9 @@ function renderPatternRadar() {
     $("replay-summary-wrap").innerHTML = `<div class="empty">${esc(t("pat_no_replay"))}</div>`;
     $("regime-slice-wrap").innerHTML = "";
     $("overhead-slice-wrap").innerHTML = "";
+    if ($("walk-forward-wrap")) $("walk-forward-wrap").innerHTML = "";
+    if ($("pat-summary-badge")) $("pat-summary-badge").style.display = "none";
+    if ($("replay-summary-badge")) $("replay-summary-badge").style.display = "none";
     return;
   }
   const dpEl = $("details-patterns");
@@ -2799,6 +3074,7 @@ function renderPatternRadar() {
 
   if (!patNames.length) {
     $("pattern-hits-wrap").innerHTML = `<div class="empty">${esc(t("pat_no_entries"))}</div>`;
+    if ($("pat-summary-badge")) $("pat-summary-badge").style.display = "none";
   } else {
     const pcols = t("pat_cols");
     const patMeta = patNames.map((name) => {
@@ -2814,7 +3090,10 @@ function renderPatternRadar() {
       <button type="button" data-pf="active" aria-pressed="${state.patFilter === "active"}">${esc(t("pat_f_active", { n: actCnt }))}</button>
       <button type="button" data-pf="experimental" aria-pressed="${state.patFilter === "experimental"}">${esc(t("pat_f_exp", { n: expCnt }))}</button>
     </div></div>`;
-    const fmtS = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? "–" : `${Number(v) > 0 ? "+" : ""}${Number(v).toFixed(2)}%`);
+    const fmtS = (v) => {
+      const n = finiteNum(v);
+      return n === null ? "–" : `${n > 0 ? "+" : ""}${n.toFixed(2)}%`;
+    };
     const visible = patMeta.filter((x) => state.patFilter === "all" || x.st === state.patFilter);
     const cards = visible.map(({ name, items, total, st }) => {
       const badge = st === "active"
@@ -2827,23 +3106,28 @@ function renderPatternRadar() {
       const rStab = rInfo ? (rInfo.stability || {}) : {};
       const gVal = rh5.gross_excess_mean_pct ?? rh5.excess_mean_pct;
       const nVal = rGrad.t5_net_excess_mean_pct ?? rh5.net_excess_mean_pct;
-      const tStr = rStab.t_stat !== null && rStab.t_stat !== undefined ? Number(rStab.t_stat).toFixed(2) : "–";
+      const tVal = finiteNum(rStab.t_stat);
+      const tStr = tVal !== null ? tVal.toFixed(2) : "–";
       const metaBar = rInfo
         ? `<div class="pat-meta-row"><span>${esc(t("pat_card_meta", { g: fmtS(gVal), n: fmtS(nVal), t: tStr, cnt: rh5.excess_scored ?? rh5.scored ?? 0 }))}</span><span title="${esc(t("pat_card_spark"))}">${renderHitSparkline(pb.history, name)}</span></div>`
         : (pb.history && pb.history.length ? `<div class="pat-meta-row"><span>${esc(t("pat_card_spark"))}</span><span>${renderHitSparkline(pb.history, name)}</span></div>` : "");
+      const patReportLink = state.reportReady
+        ? `<a class="pat-report-link" data-report-hash="pat-${esc(name)}" href="${esc(reportHref("pat-" + name))}">${esc(t("pat_report_link"))}</a>`
+        : "";
       if (!items.length) {
-        return `<div class="card"><div class="card-top"><h3><span>${esc(dname)}</span>${badge}</h3><div class="sub">${esc(t("pat_hit_zero", { d: latest.trade_date }))}</div></div>${metaBar}<div class="empty">${esc(t("pat_no_sig"))}</div></div>`;
+        return `<div class="card"><div class="card-top"><h3><span>${esc(dname)}</span>${badge}</h3><div class="sub">${esc(t("pat_hit_zero", { d: latest.trade_date }))}${patReportLink}</div></div>${metaBar}<div class="empty">${esc(t("pat_no_sig"))}</div></div>`;
       }
       const rows = items.slice(0, 6).map((s) => {
         const obs = s.observe_lag_days ? ` <span class="dim small">-${s.observe_lag_days}d</span>` : "";
-        const ov = s.overhead_supply_10pct !== null && s.overhead_supply_10pct !== undefined ? `${Number(s.overhead_supply_10pct).toFixed(0)}%` : "–";
+        const ovN = finiteNum(s.overhead_supply_10pct);
+        const ov = ovN !== null ? `${ovN.toFixed(0)}%` : "–";
         return `<tr><td class="l"><strong>${esc(s.name || s.code)}</strong> <span class="mono dim small">${esc(s.code)}</span>${obs}</td>
           <td class="mono">${pct(s.change_pct)}</td><td class="dim mono">${ov}</td><td>${renderMiniKline(s.kline, s.observe_lag_days)}</td></tr>`;
       }).join("");
       return `<div class="card">
         <div class="card-top">
           <h3><span>${esc(dname)}</span>${badge}</h3>
-          <div class="sub">${esc(t("pat_hit_n", { d: latest.trade_date, tot: total, shown: Math.min(6, items.length) }))}</div>
+          <div class="sub">${esc(t("pat_hit_n", { d: latest.trade_date, tot: total, shown: Math.min(6, items.length) }))}${patReportLink}</div>
         </div>
         ${metaBar}
         <div class="scroll"><table><thead><tr><th class="l">${esc(pcols[0])}</th><th>${esc(pcols[1])}</th><th>${esc(pcols[2])}</th><th>${esc(pcols[3])}</th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -2860,6 +3144,12 @@ function renderPatternRadar() {
         syncQueryState();
         renderPatternRadar();
       });
+    }
+    const patSumBadge = $("pat-summary-badge");
+    if (patSumBadge) {
+      const totalHits = patMeta.reduce((acc, x) => acc + nonNegInt(x.total, 0), 0);
+      patSumBadge.textContent = t("pat_sum_badge", { m: patMeta.length, h: totalHits });
+      patSumBadge.style.display = "";
     }
   }
 
@@ -2889,26 +3179,32 @@ function renderPatternRadar() {
       const stab = p.stability || {};
       const mt = p.multiple_testing || {};
       const status = grad.recommended_status || "experimental";
-      const t5ExcessN = Number(h5.excess_scored ?? h5.scored ?? 0);
-      const totalSigN = Number(h5.scored ?? 0) + Number(p.untradable_count || 0);
+      const t5ExcessN = nonNegInt(h5.excess_scored ?? h5.scored, 0);
+      const totalSigN = nonNegInt(h5.scored, 0) + nonNegInt(p.untradable_count, 0);
       const muted = status !== "active" || t5ExcessN < MIN_PATTERN_GRAD_SAMPLE;
       const badge = status === "active"
         ? `<span class="badge active">${esc(t("pat_status_active"))}</span>`
         : `<span class="badge exp">${esc(t("pat_status_exp"))}</span>`;
-      const tStat = stab.t_stat !== null && stab.t_stat !== undefined ? `${Number(stab.t_stat).toFixed(2)}` : "–";
+      const tStatVal = finiteNum(stab.t_stat);
+      const tStat = tStatVal !== null ? `${tStatVal.toFixed(2)}` : "–";
       const tTipParts = [];
-      if (stab.naive_daily_t_stat !== null && stab.naive_daily_t_stat !== undefined) tTipParts.push(`naive t=${Number(stab.naive_daily_t_stat).toFixed(2)}`);
-      if (stab.ew_t_stat !== null && stab.ew_t_stat !== undefined) tTipParts.push(`EW NW t=${Number(stab.ew_t_stat).toFixed(2)}`);
-      if (mt.bh_q_value_csi300 !== null && mt.bh_q_value_csi300 !== undefined) tTipParts.push(`BH q=${Number(mt.bh_q_value_csi300).toFixed(3)}`);
+      const naiveTVal = finiteNum(stab.naive_daily_t_stat);
+      const ewTVal = finiteNum(stab.ew_t_stat);
+      const bhQVal = finiteNum(mt.bh_q_value_csi300);
+      if (naiveTVal !== null) tTipParts.push(`naive t=${naiveTVal.toFixed(2)}`);
+      if (ewTVal !== null) tTipParts.push(`EW NW t=${ewTVal.toFixed(2)}`);
+      if (bhQVal !== null) tTipParts.push(`BH q=${bhQVal.toFixed(3)}`);
       const tTip = tTipParts.join(" · ");
-      const h1d = Number(stab.h1_days ?? 0);
-      const h2d = Number(stab.h2_days ?? 0);
+      const h1d = nonNegInt(stab.h1_days, 0);
+      const h2d = nonNegInt(stab.h2_days, 0);
       const h1h2 = (stab.h1_days || stab.h2_days)
         ? `<div>${pct(stab.h1_daily_excess_mean_pct ?? stab.h1_excess_mean_pct)} <span class="dim">(${esc(String(h1d))}d)</span></div><div>${pct(stab.h2_daily_excess_mean_pct ?? stab.h2_excess_mean_pct)} <span class="dim">(${esc(String(h2d))}d)</span></div>`
         : '<span class="dim">–</span>';
       const grossEx = h5.gross_excess_mean_pct ?? h5.excess_mean_pct;
       const netEx = grad.t5_net_excess_mean_pct ?? h5.net_excess_mean_pct;
-      return `<tr class="${muted ? "low-sample" : ""}">
+      const isFocus = state.patFocus && p.pattern === state.patFocus;
+      const repCls = [muted ? "low-sample" : "", isFocus ? "pat-focus-row" : ""].filter(Boolean).join(" ");
+      return `<tr${repCls ? ` class="${repCls}"` : ""} data-pat-row="${esc(p.pattern)}">
         <td class="l"><strong>${esc(pname(p.pattern, p.display_name))}</strong><div class="mono dim small">${esc(p.pattern)}</div></td>
         <td class="l dim">${esc(p.family)}<div class="small">${esc(p.mode)}</div></td>
         <td class="mono">${esc(String(totalSigN))}</td>
@@ -2934,7 +3230,8 @@ function renderPatternRadar() {
         const small = n < MIN_SLICE_SAMPLE;
         return `<td class="mono ${small ? "muted-cell" : ""}">${n}${small ? "*" : ""} / ${pct(cell.t5_excess_mean_pct)}</td>`;
       }).join("");
-      return `<tr><td class="l">${esc(pname(p.pattern, p.display_name))}</td>${cells}</tr>`;
+      const isFocus = state.patFocus && p.pattern === state.patFocus;
+      return `<tr${isFocus ? ' class="pat-focus-row"' : ""} data-pat-row="${esc(p.pattern)}"><td class="l">${esc(pname(p.pattern, p.display_name))}</td>${cells}</tr>`;
     }).join("");
     $("regime-slice-wrap").innerHTML = `<h3 class="subhead">${t("sl_subhead", { n: MIN_SLICE_SAMPLE })}</h3>
       <div class="panel scroll"><table>${slHead}<tbody>${slRows}</tbody></table></div>`;
@@ -2950,18 +3247,165 @@ function renderPatternRadar() {
           const small = n < MIN_SLICE_SAMPLE;
           return `<td class="mono ${small ? "muted-cell" : ""}">${n}${small ? "*" : ""} / ${pct(cell.t5_excess_mean_pct)} <span class="dim small">${sharePct(cell.t5_win_rate_pct)}</span></td>`;
         }).join("");
-        return `<tr><td class="l">${esc(pname(p.pattern, p.display_name))}</td>${cells}</tr>`;
+        const isFocus = state.patFocus && p.pattern === state.patFocus;
+        return `<tr${isFocus ? ' class="pat-focus-row"' : ""} data-pat-row="${esc(p.pattern)}"><td class="l">${esc(pname(p.pattern, p.display_name))}</td>${cells}</tr>`;
       }).join("");
       $("overhead-slice-wrap").innerHTML = `<h3 class="subhead">${t("ov_subhead", { n: MIN_SLICE_SAMPLE })}</h3>
         <div class="panel scroll"><table>${ovHead}<tbody>${ovRows}</tbody></table></div>`;
     } else {
       $("overhead-slice-wrap").innerHTML = "";
     }
+
+    const hasWf = replay.patterns.some((p) => p.walk_forward_regime_audit && typeof p.walk_forward_regime_audit === "object");
+    if (hasWf) {
+      const WF_MIN_DAYS = 15;
+      const wcols = t("wf_cols");
+      const wfHead = `<thead><tr><th class="l">${esc(wcols[0])}</th><th class="l">${esc(wcols[1])}</th><th class="l">${esc(wcols[2])}</th><th>${esc(wcols[3])}</th><th>${esc(wcols[4])}</th><th>${esc(wcols[5])}</th><th>${esc(wcols[6])}</th><th>${esc(wcols[7])}</th><th>${esc(wcols[8])}</th></tr></thead>`;
+      const fmtStages = (arr) => (Array.isArray(arr) && arr.length ? esc(arr.map((s) => rname(s)).join(" / ")) : `<span class="dim">${esc(t("wf_none"))}</span>`);
+      const fmtPlainPct = (v) => {
+        const n = finiteNum(v);
+        return n === null ? "–" : `${n > 0 ? "+" : ""}${n.toFixed(2)}%`;
+      };
+      const fmtStat = (v) => {
+        const n = finiteNum(v);
+        return n === null ? "–" : n.toFixed(2);
+      };
+      const buildWfCli = (patId, wfObj) => {
+        const j = wfObj && wfObj.h2_non_adverse_low_overhead;
+        const cap = (wfObj && wfObj.low_overhead_threshold_pct) || 15;
+        const adv = Array.isArray(wfObj && wfObj.h1_adverse_regimes) ? wfObj.h1_adverse_regimes : [];
+        const pos = Array.isArray(wfObj && wfObj.h1_positive_regimes) ? wfObj.h1_positive_regimes : [];
+        if (adv.length > 0 || (j && j.days > 0)) {
+          return `alphasift patterns replay --pattern ${patId}${adv.length ? ` --exclude-regimes ${adv.join(",")}` : ""}${j && j.days > 0 ? ` --max-overhead-pct ${cap}` : ""}`;
+        }
+        if (pos.length > 0) {
+          return `alphasift patterns replay --pattern ${patId} --allowed-regimes ${pos.join(",")}`;
+        }
+        return `alphasift patterns replay --pattern ${patId}`;
+      };
+      const renderH2Cell = (blk) => {
+        if (!blk || !blk.days) return '<td class="mono"><span class="dim">–</span></td>';
+        const low = blk.days < WF_MIN_DAYS;
+        const tipLines = [
+          t("wf_tip_h2", { d: blk.days, sig: blk.signals ?? 0, ew: fmtPlainPct(blk.ew_daily_mean_pct), t: fmtStat(blk.t_stat) }),
+        ];
+        if (low) tipLines.push(t("wf_tip_low", { m: WF_MIN_DAYS }));
+        return `<td class="mono${low ? " muted-cell" : ""}" title="${esc(tipLines.join("\n"))}">${pct(blk.daily_mean_pct)} <span class="dim small">(${esc(String(blk.days))}d)</span>${low ? `<span class="tag">&lt;${WF_MIN_DAYS}d</span>` : ""}</td>`;
+      };
+      const renderDeltaCell = (deltaVal, ewDeltaVal, blk, patId, cliFlag, stages, jointWf) => {
+        if (deltaVal === null || deltaVal === undefined || !blk || !blk.days) return '<td class="mono"><span class="dim">–</span></td>';
+        const low = blk.days < WF_MIN_DAYS;
+        const tipLines = [
+          t("wf_tip_delta", { ew: fmtPlainPct(ewDeltaVal), d: blk.days, sig: blk.signals ?? 0, t: fmtStat(blk.t_stat) }),
+        ];
+        if (low) tipLines.push(t("wf_tip_low", { m: WF_MIN_DAYS }));
+        const jBlk = jointWf && jointWf.h2_non_adverse_low_overhead;
+        const ovCap = (jointWf && jointWf.low_overhead_threshold_pct) || 15;
+        if (jBlk && jBlk.days > 0) {
+          tipLines.push(t("wf_tip_joint", {
+            ov: ovCap,
+            mean: fmtPlainPct(jBlk.daily_mean_pct),
+            d: jBlk.days,
+            sig: jBlk.signals ?? 0,
+            delta: fmtPlainPct(jointWf.delta_non_adverse_low_overhead_vs_h2_baseline_pct),
+            ew: fmtPlainPct(jointWf.ew_delta_non_adverse_low_overhead_vs_h2_baseline_pct),
+          }));
+        }
+        const hasStages = Array.isArray(stages) && stages.length > 0;
+        if (patId && (hasStages || (jBlk && jBlk.days > 0))) {
+          const stageArg = hasStages ? ` ${cliFlag} ${stages.join(",")}` : "";
+          const ovArg = (jBlk && jBlk.days > 0) ? ` --max-overhead-pct ${ovCap}` : "";
+          tipLines.push(t("wf_tip_cli", { cmd: `alphasift patterns replay --pattern ${patId}${stageArg}${ovArg}` }));
+        }
+        const valHtml = low ? pct(deltaVal) : `<b>${pct(deltaVal)}</b>`;
+        return `<td class="mono${low ? " muted-cell" : ""}" title="${esc(tipLines.join("\n"))}">${valHtml}</td>`;
+      };
+      const renderJointCliCell = (patId, wfObj) => {
+        const jBlk = wfObj && wfObj.h2_non_adverse_low_overhead;
+        const ovCap = (wfObj && wfObj.low_overhead_threshold_pct) || 15;
+        const cliCmd = buildWfCli(patId, wfObj);
+        const low = Boolean(jBlk && jBlk.days > 0 && jBlk.days < WF_MIN_DAYS);
+        const tip = (jBlk && jBlk.days > 0)
+          ? t("wf_tip_joint", {
+            ov: ovCap,
+            mean: fmtPlainPct(jBlk.daily_mean_pct),
+            d: jBlk.days,
+            sig: jBlk.signals ?? 0,
+            delta: fmtPlainPct(wfObj.delta_non_adverse_low_overhead_vs_h2_baseline_pct),
+            ew: fmtPlainPct(wfObj.ew_delta_non_adverse_low_overhead_vs_h2_baseline_pct),
+          })
+          : t("wf_tip_cli", { cmd: cliCmd });
+        const valHtml = (jBlk && jBlk.days > 0)
+          ? `${pct(jBlk.daily_mean_pct)} <span class="dim small">(${esc(String(jBlk.days))}d)</span>${low ? `<span class="tag">&lt;${WF_MIN_DAYS}d</span>` : ""}`
+          : '<span class="dim">–</span>';
+        const btnHtml = `<button type="button" class="wf-cli-btn" data-cli="${esc(cliCmd)}" title="${esc(t("wf_tip_cli", { cmd: cliCmd }))}" aria-label="${esc(t("wf_tip_cli", { cmd: cliCmd }))}">${esc(t("wf_cli_btn"))}</button>`;
+        return `<td class="mono${low ? " muted-cell" : ""}" title="${esc(tip)}">${valHtml}${btnHtml}</td>`;
+      };
+      const firstWf = replay.patterns.map((p) => p.walk_forward_regime_audit).find((w) => w && typeof w === "object") || {};
+      const splitMid = (replay.pack_summary && replay.pack_summary.eval_mid_date) || firstWf.eval_mid_date || "";
+      const totalPurged = replay.patterns.reduce((acc, p) => acc + nonNegInt(p.walk_forward_regime_audit && p.walk_forward_regime_audit.h1_purged_signals, 0), 0);
+      const wfRows = replay.patterns.map((p) => {
+        const wf = p.walk_forward_regime_audit || {};
+        const h2Base = wf.h2_baseline || {};
+        const h2Pos = wf.h2_positive_only || {};
+        const h2Na = wf.h2_non_adverse || {};
+        const isFocus = state.patFocus && p.pattern === state.patFocus;
+        const rowCls = [wf.status !== "ok" ? "low-sample" : "", isFocus ? "pat-focus-row" : ""].filter(Boolean).join(" ");
+        const patTitleAttr = wf.boundary_policy === "purged_by_exit_date"
+          ? ` title="${esc(t("wf_tip_purged", { mid: wf.eval_mid_date || splitMid || "-", sig: wf.h1_purged_signals ?? 0, d: wf.h1_purged_days ?? 0 }))}"`
+          : "";
+        return `<tr${rowCls ? ` class="${rowCls}"` : ""} data-pat-row="${esc(p.pattern)}">
+          <td class="l"${patTitleAttr}>${esc(pname(p.pattern, p.display_name))}</td>
+          <td class="l small">${fmtStages(wf.h1_positive_regimes)}</td>
+          <td class="l small">${fmtStages(wf.h1_adverse_regimes)}</td>
+          ${renderH2Cell(h2Base)}
+          ${renderH2Cell(h2Pos)}
+          ${renderDeltaCell(wf.delta_positive_vs_h2_baseline_pct, wf.ew_delta_positive_vs_h2_baseline_pct, h2Pos, p.pattern, "--allowed-regimes", wf.h1_positive_regimes, null)}
+          ${renderH2Cell(h2Na)}
+          ${renderDeltaCell(wf.delta_non_adverse_vs_h2_baseline_pct, wf.ew_delta_non_adverse_vs_h2_baseline_pct, h2Na, p.pattern, "--exclude-regimes", wf.h1_adverse_regimes, wf)}
+          ${renderJointCliCell(p.pattern, wf)}
+        </tr>`;
+      }).join("");
+      const wfWrap = $("walk-forward-wrap");
+      const wfUnverified = replay.patterns.some((p) => p.walk_forward_regime_audit && p.walk_forward_regime_audit.boundary_policy !== "purged_by_exit_date");
+      const wfWarnHtml = wfUnverified ? `<p class="sec-hint" style="margin-top:4px;color:var(--warn, #f59e0b);">${esc(t("wf_unverified_note"))}</p>` : "";
+      const wfSummaryHtml = (!wfUnverified && splitMid)
+        ? `<span class="dim small" style="font-weight:400;margin-left:8px;">(${esc(t("wf_purged_summary", { mid: splitMid, n: totalPurged }))})</span>`
+        : "";
+      wfWrap.innerHTML = `<h3 class="subhead">${esc(t("wf_subhead"))}${wfSummaryHtml}</h3>
+        <div class="panel scroll"><table class="compact-tbl">${wfHead}<tbody>${wfRows}</tbody></table></div>
+        <p class="sec-hint" style="margin-top:6px;">${esc(t("wf_note", { m: WF_MIN_DAYS }))}</p>${wfWarnHtml}`;
+      if (!wfWrap.dataset.cliBound) {
+        wfWrap.dataset.cliBound = "1";
+        wfWrap.addEventListener("click", (ev) => {
+          const btn = ev.target && ev.target.closest ? ev.target.closest(".wf-cli-btn") : null;
+          if (!btn || !btn.dataset.cli) return;
+          copyPlainText(btn.dataset.cli, () => {
+            if (btn._cliTimer) clearTimeout(btn._cliTimer);
+            btn.classList.add("copied");
+            btn.textContent = t("wf_cli_copied");
+            btn._cliTimer = setTimeout(() => {
+              btn.classList.remove("copied");
+              btn.textContent = t("wf_cli_btn");
+            }, 1500);
+          });
+        });
+      }
+    } else {
+      $("walk-forward-wrap").innerHTML = "";
+    }
+    const repSumBadge = $("replay-summary-badge");
+    if (repSumBadge) {
+      repSumBadge.textContent = t("replay_sum_badge", { s: ps.eval_sessions ?? "-", p: replay.patterns.length });
+      repSumBadge.style.display = "";
+    }
   } else {
     $("universe-baseline-wrap").innerHTML = "";
+    $("replay-summary-badge") && ($("replay-summary-badge").style.display = "none");
     $("replay-summary-wrap").innerHTML = `<div class="empty">${esc(t("pat_no_replay"))}</div>`;
     $("regime-slice-wrap").innerHTML = "";
     $("overhead-slice-wrap").innerHTML = "";
+    $("walk-forward-wrap").innerHTML = "";
   }
 }
 
@@ -3178,7 +3622,8 @@ function picksTable(picks, withEval) {
       if (e.status === "pending") return `<td class="dim">${esc(t("st_pending"))}</td>`;
       if (e.status === "untradable_limit_up") return `<td class="dim" title="${esc(t("st_untradable_title"))}">${esc(t("st_untradable"))}</td>`;
       if (e.status !== "ok") return `<td class="dim" title="${esc(tStatus(e.status))}">${esc(t("st_nodata"))}</td>`;
-      return `<td class="mono" title="${esc(t("chart_tip_excess"))} ${e.excess_return_pct ?? "–"}%">${pct(e.return_pct, 1)}<br><span class="small">${e.excess_return_pct === null ? "" : esc(t("st_excess_lbl")) + pct(e.excess_return_pct, 1)}</span></td>`;
+      const exTip = finiteNum(e.excess_return_pct);
+      return `<td class="mono" title="${esc(t("chart_tip_excess"))} ${exTip !== null ? exTip.toFixed(1) : "–"}%">${pct(e.return_pct, 1)}<br><span class="small">${exTip === null ? "" : esc(t("st_excess_lbl")) + pct(exTip, 1)}</span></td>`;
     }).join("");
     return `<tr><td><span class="rank-num ${p.rank <= 3 ? "top" : ""}">${p.rank}</span></td><td class="l">${name}</td>${cells}</tr>`;
   }).join("");
@@ -3204,8 +3649,9 @@ function renderLatest() {
   $("latest").innerHTML = runs.length ? runs.map((r) => {
     const badge = r.track === "ai" ? '<span class="badge ai">AI</span>' : "";
     const degNotes = Array.isArray(r.degradation_notes) ? r.degradation_notes.join(" · ") : "";
-    const degLbl = Number(r.degradation || 0) > 1 ? `${t("degraded_lbl")} (${r.degradation})` : t("degraded_lbl");
-    const degHtml = r.degradation ? `<span class="badge warn" title="${esc(degNotes)}">${esc(degLbl)}</span>` : "";
+    const degCnt = nonNegInt(r.degradation, 0);
+    const degLbl = degCnt > 1 ? `${t("degraded_lbl")} (${degCnt})` : t("degraded_lbl");
+    const degHtml = degCnt > 0 ? `<span class="badge warn" title="${esc(degNotes)}">${esc(degLbl)}</span>` : "";
     return `<div class="card">
       <div class="card-top">
         <h3><span>${sname(r.strategy)}${badge}</span><span>${degHtml}<span class="badge">${esc(t("latest_n_picks", { n: r.picks.length }))}</span></span></h3>
@@ -3258,26 +3704,67 @@ async function renderDay(day) {
   }).join("") : `<div class="empty">${esc(t("no_match_day"))}</div>`;
 }
 
-function initExplorerControls() {
+function setExplorerMode(mode) {
+  state.explorerMode = mode;
   const modeWrap = $("explorer-mode");
   const mktSel = $("market-latest");
   const daySel = $("day");
+  if (modeWrap) modeWrap.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+  $("tab-latest").classList.toggle("active", mode === "latest");
+  $("tab-history").classList.toggle("active", mode === "history");
+  if (mktSel) mktSel.style.display = mode === "latest" ? "" : "none";
+  if (daySel) daySel.style.display = mode === "history" ? "" : "none";
+}
+
+function syncClearSearchBtn() {
+  const clearBtn = $("explorer-clear-btn");
+  if (clearBtn) clearBtn.style.display = (state.searchQuery || "").trim() ? "inline-flex" : "none";
+}
+
+function drillDownStrategy(market, strategy, track) {
+  const normTrack = track === "ai" ? "ai" : "rules";
+  const trendSel = $("market-trend");
+  if (trendSel && market && [...trendSel.options].some((o) => o.value === market)) {
+    state.trendMarket = market;
+    trendSel.value = market;
+  }
+  if ((state.trendTrack === "rules" && normTrack === "ai") || (state.trendTrack === "ai" && normTrack === "rules")) {
+    state.trendTrack = "both";
+    document.querySelectorAll("#track-trend button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.t === "both")));
+  }
+  if (strategy) state.trendFocus = `${strategy}:${normTrack}`;
+  renderChart();
+
+  setExplorerMode("latest");
+  const mktSel = $("market-latest");
+  if (mktSel && market && [...mktSel.options].some((o) => o.value === market)) {
+    state.latestMarket = market;
+    mktSel.value = market;
+  }
   const searchEl = $("pick-search");
-  const applyMode = (mode) => {
-    state.explorerMode = mode;
-    if (modeWrap) modeWrap.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
-    $("tab-latest").classList.toggle("active", mode === "latest");
-    $("tab-history").classList.toggle("active", mode === "history");
-    if (mktSel) mktSel.style.display = mode === "latest" ? "" : "none";
-    if (daySel) daySel.style.display = mode === "history" ? "" : "none";
-  };
-  applyMode(state.explorerMode);
+  state.searchQuery = strategy || "";
+  if (searchEl) searchEl.value = state.searchQuery;
+  syncClearSearchBtn();
+  syncQueryState();
+  renderLatest();
+  if (state.currentDay) renderDay(state.currentDay);
+  const explorerEl = $("explorer");
+  if (explorerEl && typeof explorerEl.scrollIntoView === "function") {
+    explorerEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+function initExplorerControls() {
+  const modeWrap = $("explorer-mode");
+  const searchEl = $("pick-search");
+  const clearBtn = $("explorer-clear-btn");
+  setExplorerMode(state.explorerMode);
   if (modeWrap) {
     modeWrap.addEventListener("click", (e) => {
       const btn = e.target.closest("button");
       const mode = btn && btn.dataset && btn.dataset.mode;
       if (!mode) return;
-      applyMode(mode);
+      setExplorerMode(mode);
       syncQueryState();
     });
   }
@@ -3285,10 +3772,76 @@ function initExplorerControls() {
     if (state.searchQuery) searchEl.value = state.searchQuery;
     searchEl.addEventListener("input", () => {
       state.searchQuery = searchEl.value || "";
+      syncClearSearchBtn();
       syncQueryState();
       renderLatest();
       if (state.currentDay) renderDay(state.currentDay);
     });
+  }
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      state.searchQuery = "";
+      if (searchEl) searchEl.value = "";
+      state.trendFocus = null;
+      syncClearSearchBtn();
+      syncQueryState();
+      renderChart();
+      renderLatest();
+      if (state.currentDay) renderDay(state.currentDay);
+    });
+  }
+  syncClearSearchBtn();
+}
+
+function openRadarAccordionsForHash(hashStr) {
+  const h = (hashStr || window.location.hash || "").toLowerCase();
+  const detPat = $("details-patterns");
+  const detRep = $("details-replay");
+  if (h === "#radar-section") {
+    if (detPat) detPat.open = true;
+    if (detRep) detRep.open = true;
+  } else if (h === "#details-patterns") {
+    if (detPat) detPat.open = true;
+  } else if (h === "#details-replay" || h === "#walk-forward-wrap") {
+    if (detRep) detRep.open = true;
+  } else if (state.patFocus && !h) {
+    if (detRep) detRep.open = true;
+  }
+  if ((h === "#walk-forward-wrap" || state.patFocus) && detRep && detRep.open) {
+    requestAnimationFrame(() => {
+      const focused = state.patFocus
+        ? document.querySelector(`#walk-forward-wrap tr[data-pat-row="${state.patFocus}"]`)
+        : null;
+      const target = focused || (h === "#walk-forward-wrap" ? $("walk-forward-wrap") : null);
+      if (target && typeof target.scrollIntoView === "function") {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
+  }
+}
+
+function fallbackCopyPlainText(text, onDone) {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    if (onDone) onDone();
+  } catch (_) {}
+}
+
+function copyPlainText(text, onDone) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => { if (onDone) onDone(); }).catch(() => {
+      fallbackCopyPlainText(text, onDone);
+    });
+  } else {
+    fallbackCopyPlainText(text, onDone);
   }
 }
 
@@ -3297,8 +3850,24 @@ async function init() {
   restoreQueryState();
   initLang();
   initExplorerControls();
+  const shareBtn = $("btn-share");
+  if (shareBtn) {
+    shareBtn.addEventListener("click", () => {
+      syncQueryState();
+      const url = window.location.href;
+      const lbl = shareBtn.querySelector("span");
+      const flashCopied = () => {
+        if (!lbl) return;
+        if (shareBtn._copyTimer) clearTimeout(shareBtn._copyTimer);
+        lbl.textContent = t("btn_copied");
+        shareBtn._copyTimer = setTimeout(() => { lbl.textContent = t("btn_share"); }, 1600);
+      };
+      copyPlainText(url, flashCopied);
+    });
+  }
   try {
     const res = await fetch("site/summary.json", { cache: "no-cache" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.summary = await res.json();
   } catch (err) {
     document.querySelector("main").insertAdjacentHTML("beforeend", `<div class="panel empty">${esc(t("load_fatal", { msg: err.message }))}</div>`);
@@ -3342,6 +3911,11 @@ async function init() {
   renderPatternRadar();
   renderChart();
   renderLatest();
+  openRadarAccordionsForHash(window.location.hash);
+  window.addEventListener("hashchange", () => openRadarAccordionsForHash(window.location.hash));
+  document.querySelectorAll('.nav-center a[href^="#"], .mobile-nav a[href^="#"]').forEach((a) => {
+    a.addEventListener("click", () => openRadarAccordionsForHash(a.getAttribute("href")));
+  });
   const days = (state.summary.days || []).map((d) => d.date);
   $("day").innerHTML = days.map((d) => `<option value="${d}">${esc(t("day_opt", { d, n: state.summary.days.find((x) => x.date === d).runs }))}</option>`).join("");
   $("day").addEventListener("change", (e) => renderDay(e.target.value));

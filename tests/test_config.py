@@ -387,3 +387,61 @@ def test_config_resolves_fork_safe_dashboard_url_and_search_keys(monkeypatch):
     assert cfg.dashboard_url == ""
     assert cfg.tavily_api_keys == ["tvly-a", "tvly-b"]
     assert cfg.serpapi_api_keys == ["serp-1"]
+
+
+def test_default_data_dir_uses_writable_user_dir_for_non_checkout_installs(monkeypatch, tmp_path):
+    import alphasift.config as config_mod
+
+    fake_pkg_parent = tmp_path / "site_packages"
+    fake_pkg_parent.mkdir(parents=True)
+    monkeypatch.setattr(config_mod, "_PROJECT_ROOT", fake_pkg_parent)
+    monkeypatch.delenv("ALPHASIFT_DATA_DIR", raising=False)
+
+    # 1. Honors XDG_DATA_HOME when not inside a source checkout
+    xdg_dir = tmp_path / "xdg_data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_dir))
+    assert config_mod.default_data_dir() == xdg_dir / "alphasift"
+
+    # 2. Falls back to ~/.alphasift/data when XDG_DATA_HOME is unset
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    assert config_mod.default_data_dir() == Path.home() / ".alphasift" / "data"
+
+    # 3. ALPHASIFT_DATA_DIR overrides everything and Config.from_env() propagates it
+    custom = tmp_path / "explicit_data"
+    monkeypatch.setenv("ALPHASIFT_DATA_DIR", str(custom))
+    cfg = Config.from_env()
+    assert cfg.data_dir == custom
+    assert cfg.fallback_snapshot_path == custom / "snapshot.last_good.json"
+    assert cfg.notify_state_path == custom / "notify_state.json"
+
+
+def test_config_defaults_llm_max_tokens_to_8192(monkeypatch):
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    assert Config().llm_max_tokens == 8192
+    assert Config.from_env().llm_max_tokens == 8192
+
+
+def test_config_from_env_handles_blank_malformed_and_nonfinite_numeric_envs(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_TOKENS", "")
+    monkeypatch.setenv("DAILY_LOOKBACK_DAYS", "not-an-int")
+    monkeypatch.setenv("ALPHASIFT_EMAIL_SMTP_PORT", "bad")
+    monkeypatch.setenv("EMAIL_SMTP_PORT", "465")
+    monkeypatch.setenv("LLM_TEMPERATURE", "nan")
+    monkeypatch.setenv("LLM_TIMEOUT_SEC", "inf")
+    monkeypatch.setenv("DSA_TIMEOUT_SEC", "")
+    monkeypatch.setenv("POST_ANALYZER_TIMEOUT_SEC", "-inf")
+    monkeypatch.setenv("SNAPSHOT_FALLBACK_MAX_AGE_HOURS", "inf")
+    monkeypatch.setenv("ALPHASIFT_NOTIFY_TIMEOUT_SEC", "oops")
+
+    cfg = Config.from_env()
+    assert cfg.llm_max_tokens == 8192
+    assert cfg.daily_lookback_days == 120
+    assert cfg.email_smtp_port == 465
+    assert cfg.llm_temperature == 0.2
+    assert cfg.llm_timeout_sec == 60.0
+    assert cfg.dsa_timeout_sec == 120.0
+    assert cfg.post_analyzer_timeout_sec == 120.0
+    assert cfg.snapshot_fallback_max_age_hours is None
+    assert cfg.notify_timeout_sec == 10.0
+
+

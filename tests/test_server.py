@@ -25,6 +25,8 @@ def test_api_health_and_index(tmp_path):
 
     assert status == 200
     assert "/overview" in index["endpoints"]
+    assert "/markets" in index["endpoints"]
+    assert "/patterns/replay" in index["endpoints"]
     assert "/result-schema" in index["endpoints"]
     assert "/strategy" in index["endpoints"]
     assert "/strategy-compare" in index["endpoints"]
@@ -35,8 +37,113 @@ def test_api_health_and_index(tmp_path):
     assert "/data-source-history" in index["endpoints"]
     assert "/strategy-performance" in index["endpoints"]
     assert "/strategy-templates" in index["endpoints"]
+    assert "/markets-digest" in index["endpoints"]
     assert health_status == 200
     assert health == {"status": "ok", "service": "alphasift", "schema_version": 1}
+
+
+def test_api_markets_endpoint(tmp_path):
+    config = _config(tmp_path)
+
+    status_all, payload_all = build_api_response(config, "/markets")
+    assert status_all == 200
+    assert len(payload_all["markets"]) == 7
+    assert {item["id"] for item in payload_all["markets"]} == {"cn", "us", "hk", "jp", "kr", "tw", "in"}
+
+    status_us, payload_us = build_api_response(config, "/markets", query="id=us")
+    assert status_us == 200
+    assert payload_us["market"]["id"] == "us"
+    assert payload_us["market"]["currency"] == "USD"
+
+    status_cn, payload_cn = build_api_response(config, "/markets", query="market=CN")
+    assert status_cn == 200
+    assert payload_cn["market"]["id"] == "cn"
+    assert payload_cn["market"]["supports_daily_pack"] is True
+
+    status_bad, payload_bad = build_api_response(config, "/markets", query="id=unknown_mkt")
+    assert status_bad == 404
+    assert payload_bad["error"] == "market_not_found"
+
+
+def test_api_patterns_replay_endpoint(tmp_path, monkeypatch):
+    import json
+
+    config = _config(tmp_path)
+
+    # 1. Missing DailyPack returns 503 pack_unavailable
+    st_503, pl_503 = build_api_response(config, "/patterns/replay")
+    assert st_503 == 503
+    assert pl_503["error"] == "pack_unavailable"
+
+    class _DummyPack:
+        dates = ["2026-01-05", "2026-01-06"]
+
+    monkeypatch.setattr("alphasift.server.load_pack", lambda _p: _DummyPack())
+
+    # 2. Invalid/traversal pattern rejected before calling replay_patterns
+    st_bad_pat, pl_bad_pat = build_api_response(config, "/patterns/replay", query="pattern=../etc/passwd")
+    assert st_bad_pat == 400
+    assert pl_bad_pat["error"] == "invalid_pattern"
+
+    # 3. Out-of-range float params rejected with 400 invalid_request
+    st_bad_cost, pl_bad_cost = build_api_response(config, "/patterns/replay", query="cost_bps=999")
+    assert st_bad_cost == 400
+    assert pl_bad_cost["error"] == "invalid_request"
+
+    st_bad_ov, pl_bad_ov = build_api_response(config, "/patterns/replay", query="max_overhead_pct=0")
+    assert st_bad_ov == 400
+    assert pl_bad_ov["error"] == "invalid_request"
+
+    # 4. Happy path calls replay_patterns with empty DataFrame when live_benchmark=0
+    seen_calls = []
+
+    def _fake_replay(pack, **kw):
+        seen_calls.append(kw)
+        return {
+            "generated_at": "2026-11-25T09:00:00+00:00",
+            "entry_mode": "next_open",
+            "cost_bps": kw["cost_bps"],
+            "walk_forward_boundary_policy": "purged_by_exit_date",
+            "regime_filter": {"allowed_regimes": kw["allowed_regimes"], "excluded_regimes": kw["excluded_regimes"]},
+            "overhead_filter": {"max_overhead_pct": kw["max_overhead_pct"]},
+            "graduation_rule": {"horizons": [5, 10]},
+            "pack_summary": {"trade_days": 250},
+            "universe_baseline": {"h5_mean_pct": 0.1},
+            "patterns": [
+                {
+                    "pattern": "ma20_shrink_pullback",
+                    "display_name": "MA20缩量回踩",
+                    "family": "pullback",
+                    "mode": "experimental",
+                    "total_signals": 42,
+                    "untradable_share_pct": 1.2,
+                    "horizons": {"5": {"mean_pct": 0.4}},
+                    "graduation": {"graduated": False},
+                    "stability": {"positive_share": 0.5},
+                    "walk_forward_regime_audit": {"eval_mid_date": "2026-06-30"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr("alphasift.server.replay_patterns", _fake_replay)
+    st_ok, pl_ok = build_api_response(
+        config,
+        "/patterns/replay",
+        query="pattern=ma20_shrink_pullback&warmup_days=40&cost_bps=15&exclude_regime=freezing&max_overhead_pct=20",
+    )
+    assert st_ok == 200
+    assert pl_ok["schema_version"] == 1
+    assert pl_ok["walk_forward_boundary_policy"] == "purged_by_exit_date"
+    assert len(pl_ok["patterns"]) == 1
+    assert pl_ok["patterns"][0]["pattern"] == "ma20_shrink_pullback"
+    assert len(seen_calls) == 1
+    assert seen_calls[0]["patterns"] == ["ma20_shrink_pullback"]
+    assert seen_calls[0]["warmup_days"] == 40
+    assert seen_calls[0]["cost_bps"] == 15.0
+    assert seen_calls[0]["excluded_regimes"] == ["freezing"]
+    assert seen_calls[0]["max_overhead_pct"] == 20.0
+    assert seen_calls[0]["benchmark_df"].empty
+    json.dumps(pl_ok, allow_nan=False)
 
 
 def test_api_overview_and_runs_are_ui_ready(tmp_path):
@@ -562,6 +669,25 @@ def test_http_workbench_ui_content_negotiation_security_headers_and_js_syntax(tm
     assert "with_kline=1" in html_text
     assert "cols_strat" in html_text
     assert "cols_fresh" in html_text
+    assert "btn-daily-report" in html_text
+    assert "panel-digest" in html_text
+    assert "loadMarketsDigest" in html_text
+    assert "/markets-digest?markets=" in html_text
+    assert "btn-load-digest" in html_text
+    assert "14 read-only tools · 4 resources" in html_text
+    assert "mcp_resources_lbl" in html_text
+    assert "alphasift://markets" in html_text
+    assert "markets-registry-card" in html_text
+    assert 'fetchJson("/markets")' in html_text
+    assert "btn-replay-patterns" in html_text
+    assert "runPatternReplay" in html_text
+    assert '"/patterns/replay?cost_bps=25"' in html_text
+    assert "pattern-replay-card" in html_text
+    assert "codex mcp add alphasift -- alphasift mcp" in html_text
+    assert "Copy CLI" in html_text
+    assert "refreshReqId" in html_text
+    assert "digestReqId" in html_text
+    assert "aria-busy" in html_text
 
     # Regression checks for Audit #4 security fixes
     from alphasift.daily_report_html import render_daily_report_html
@@ -705,3 +831,257 @@ def test_http_workbench_ui_content_negotiation_security_headers_and_js_syntax(tm
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_api_markets_digest_endpoint_and_validation(tmp_path):
+    cfg = _config(tmp_path)
+    save_screen_result(
+        ScreenResult(
+            strategy="us_momentum_quality",
+            market="us",
+            run_id="srv_us_mom",
+            track="rules",
+            created_at="2026-11-20T22:00:00Z",
+            snapshot_count=400,
+            after_filter_count=10,
+            picks=[
+                Pick(rank=1, code="MSFT", name="Microsoft", final_score=92.0, screen_score=92.0),
+                Pick(rank=2, code="AAPL", name="Apple", final_score=85.0, screen_score=85.0),
+            ],
+        ),
+        data_dir=cfg.data_dir,
+    )
+    save_screen_result(
+        ScreenResult(
+            strategy="global_value",
+            market="us",
+            run_id="srv_us_val",
+            track="rules",
+            created_at="2026-11-20T22:05:00Z",
+            snapshot_count=400,
+            after_filter_count=8,
+            picks=[
+                Pick(rank=1, code="AAPL", name="Apple", final_score=83.0, screen_score=83.0),
+            ],
+        ),
+        data_dir=cfg.data_dir,
+    )
+    save_screen_result(
+        ScreenResult(
+            strategy="global_value",
+            market="hk",
+            run_id="srv_hk_val",
+            track="rules",
+            created_at="2026-11-20T09:00:00Z",
+            snapshot_count=300,
+            after_filter_count=5,
+            picks=[
+                Pick(rank=1, code="00700", name="Tencent", final_score=87.0, screen_score=87.0),
+            ],
+        ),
+        data_dir=cfg.data_dir,
+    )
+
+    status, payload = build_api_response(cfg, "/markets-digest", query="markets=us,hk")
+    assert status == 200
+    assert payload["object"] == "MarketDigest"
+    assert payload["markets"] == ["us", "hk"]
+    assert payload["market_sections"][0]["top_picks"][0]["code"] == "AAPL"
+    assert payload["market_sections"][0]["top_picks"][0]["strategy_count"] == 2
+    assert payload["market_news"]["items"] == []
+
+    bad_mkt_status, bad_mkt_payload = build_api_response(cfg, "/markets-digest", query="markets=mars")
+    assert bad_mkt_status == 400
+    assert bad_mkt_payload["error"] == "invalid_request"
+
+    bad_date_status, bad_date_payload = build_api_response(
+        cfg, "/markets-digest", query="markets=us&trade_date=2026/11/20"
+    )
+    assert bad_date_status == 400
+    assert bad_date_payload["error"] == "invalid_request"
+
+
+def test_http_send_json_sanitizes_nonfinite_and_dates(tmp_path, monkeypatch):
+    from datetime import date
+    from http.server import ThreadingHTTPServer
+    import json
+    import threading
+    import urllib.request
+    import alphasift.server as server_mod
+
+    cfg = _config(tmp_path)
+
+    def _fake_api(_cfg, _path, query="", *, live=False):
+        return 200, {
+            "nan_val": float("nan"),
+            "inf_val": float("inf"),
+            "day": date(2026, 11, 25),
+            "path": tmp_path / "sample.json",
+        }
+
+    monkeypatch.setattr(server_mod, "build_api_response", _fake_api)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), server_mod._handler_for_config(cfg))
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as resp:
+            assert resp.status == 200
+            raw = resp.read().decode("utf-8")
+
+        def _reject_constant(token):
+            raise AssertionError(f"Non-RFC-8259 JSON constant emitted: {token}")
+
+        parsed = json.loads(raw, parse_constant=_reject_constant)
+        assert parsed == {
+            "nan_val": None,
+            "inf_val": None,
+            "day": "2026-11-25",
+            "path": str(tmp_path / "sample.json"),
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_http_handler_supports_head_and_returns_json_500_on_unexpected_error(tmp_path, monkeypatch):
+    import http.client
+    import json
+    import threading
+    import alphasift.server as server_mod
+
+    cfg = _config(tmp_path)
+
+    def _boom_or_ok(_cfg, path, query="", *, live=False):
+        if path == "/boom":
+            raise RuntimeError("secret stack detail")
+        return 200, {"status": "ok"}
+
+    monkeypatch.setattr(server_mod, "build_api_response", _boom_or_ok)
+    server = server_mod.ThreadingHTTPServer(("127.0.0.1", 0), server_mod._handler_for_config(cfg))
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("HEAD", "/health")
+        resp_head = conn.getresponse()
+        body_head = resp_head.read()
+        assert resp_head.status == 200
+        assert int(resp_head.getheader("Content-Length")) > 0
+        assert body_head == b""
+
+        conn.request("HEAD", "/ui")
+        resp_ui = conn.getresponse()
+        body_ui = resp_ui.read()
+        assert resp_ui.status == 200
+        assert int(resp_ui.getheader("Content-Length")) > 0
+        assert body_ui == b""
+
+        conn.request("GET", "/boom")
+        resp_err = conn.getresponse()
+        err_payload = json.loads(resp_err.read().decode("utf-8"))
+        assert resp_err.status == 500
+        assert err_payload == {"error": "internal_error", "message": "Internal server error"}
+        conn.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_parse_accept_q_rejects_nan_and_inf():
+    from alphasift.server import _parse_accept_q, _prefers_html
+
+    assert _parse_accept_q(["q=nan"]) == 0.0
+    assert _parse_accept_q(["q=inf"]) == 0.0
+    assert _parse_accept_q(["q=-inf"]) == 0.0
+    assert _prefers_html("text/html;q=nan, application/json;q=0.5", "") is False
+
+
+def test_workbench_ui_js_helpers_scrub_nonfinite_and_bool():
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+    from alphasift.workbench_ui import render_workbench_html
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+
+    html = render_workbench_html()
+    start = html.index("  function finiteNum(")
+    end = html.index("  function renderHeaderAndTabs()")
+    js_slice = html[start:end]
+
+    runner = r"""
+const fs = require("fs");
+const vm = require("vm");
+const assert = require("assert");
+const snippet = fs.readFileSync(0, "utf8");
+function makeNode(tag, attrs, text) {
+  return {
+    tag,
+    attrs: Object.assign({}, attrs || {}),
+    text: text || "",
+    children: [],
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    appendChild(c) { this.children.push(c); },
+  };
+}
+const ctx = {
+  SVG_NS: "http://www.w3.org/2000/svg",
+  el: (tag, opts) => makeNode(tag, opts, opts && opts.text),
+  document: { createElementNS: (_ns, tag) => makeNode(tag) },
+};
+const api = vm.runInNewContext(snippet + "\n;({ finiteNum, nonNegInt, makeSvgKline });", ctx);
+
+assert.strictEqual(api.finiteNum(3.5), 3.5);
+assert.strictEqual(api.finiteNum(" -1.25 "), -1.25);
+assert.strictEqual(api.finiteNum(0), 0);
+assert.strictEqual(api.finiteNum(true), null);
+assert.strictEqual(api.finiteNum(false), null);
+assert.strictEqual(api.finiteNum(null), null);
+assert.strictEqual(api.finiteNum(""), null);
+assert.strictEqual(api.finiteNum("   "), null);
+assert.strictEqual(api.finiteNum([]), null);
+assert.strictEqual(api.finiteNum(NaN), null);
+assert.strictEqual(api.finiteNum(Infinity), null);
+
+assert.strictEqual(api.nonNegInt(5.9), 5);
+assert.strictEqual(api.nonNegInt("4"), 4);
+assert.strictEqual(api.nonNegInt(-1), 0);
+assert.strictEqual(api.nonNegInt(true, 7), 7);
+assert.strictEqual(api.nonNegInt(NaN, 2), 2);
+
+const badKline = api.makeSvgKline([[1, 2, null, 1.5], [1, true, 0, 1], [1, NaN, 0, 1]]);
+assert.strictEqual(badKline.tag, "span");
+assert.strictEqual(badKline.text, "-");
+
+const mixedKline = api.makeSvgKline([
+  [10, 12, 9, 11],
+  [1, Infinity, 0, 1],
+  [11, 13, 10, 12.5],
+]);
+assert.strictEqual(mixedKline.tag, "svg");
+assert.strictEqual(mixedKline.children.length, 4);
+for (const child of mixedKline.children) {
+  for (const val of Object.values(child.attrs)) {
+    assert.ok(!val.includes("NaN") && !val.includes("Infinity"), "bad attr: " + val);
+  }
+}
+console.log(JSON.stringify({ ok: true, children: mixedKline.children.length }));
+"""
+    proc = subprocess.run(
+        [node, "-e", runner],
+        input=js_slice,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    data = json.loads(proc.stdout.strip())
+    assert data["ok"] is True
+    assert data["children"] == 4
+
+

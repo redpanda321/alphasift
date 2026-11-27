@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 
+from alphasift.jsonutil import finite_float, safe_int
 from alphasift.models import EvaluationResult, PickEvaluation
 from alphasift.store import evaluation_from_dict
 from alphasift.timeutil import MIN_TIMESTAMP, parse_timestamp
@@ -20,7 +21,8 @@ def build_strategy_performance_summary(
     strategy: str | None = None,
 ) -> dict[str, object]:
     """Summarize saved T+N evaluation files without re-running live evaluation."""
-    evaluations = _list_saved_evaluations(data_dir=data_dir, limit=limit, strategy=strategy)
+    limit_val = max(safe_int(limit, default=0), 0)
+    evaluations = _list_saved_evaluations(data_dir=data_dir, limit=limit_val, strategy=strategy)
     strategy_rows = [_strategy_summary(items) for items in _group_by_strategy(evaluations).values()]
     strategy_rows.sort(
         key=lambda item: (
@@ -35,7 +37,7 @@ def build_strategy_performance_summary(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "evaluation_count": len(evaluations),
         "strategy_count": len(strategy_rows),
-        "limit": int(limit),
+        "limit": limit_val,
         "strategy_filter": strategy or "",
         "summary": _history_summary(evaluations),
         "strategies": strategy_rows,
@@ -52,8 +54,8 @@ def _list_saved_evaluations(
     evaluations_dir = data_dir / "evaluations"
     if not evaluations_dir.is_dir():
         return []
-    limit = int(limit)
-    if limit <= 0:
+    limit_val = max(safe_int(limit, default=0), 0)
+    if limit_val <= 0:
         return []
     rows: list[EvaluationResult] = []
     for path in sorted(evaluations_dir.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
@@ -64,7 +66,7 @@ def _list_saved_evaluations(
             continue
         item.saved_path = str(path)
         rows.append(item)
-        if len(rows) >= limit:
+        if len(rows) >= limit_val:
             break
     return rows
 
@@ -168,9 +170,9 @@ def _history_summary(evaluations: list[EvaluationResult]) -> dict[str, object]:
 
 
 def _pick_stats(picks: list[PickEvaluation]) -> dict[str, object]:
-    returns = [float(item.return_pct) for item in picks if item.return_pct is not None]
-    drawdowns = [float(item.max_drawdown_pct) for item in picks if item.max_drawdown_pct is not None]
-    runups = [float(item.max_runup_pct) for item in picks if item.max_runup_pct is not None]
+    returns = [val for item in picks if (val := finite_float(item.return_pct)) is not None]
+    drawdowns = [val for item in picks if (val := finite_float(item.max_drawdown_pct)) is not None]
+    runups = [val for item in picks if (val := finite_float(item.max_runup_pct)) is not None]
     return {
         "pick_count": len(picks),
         "evaluated_pick_count": len(returns),
@@ -192,10 +194,11 @@ def _all_picks(evaluations: list[EvaluationResult]) -> list[PickEvaluation]:
 def _run_returns(evaluations: list[EvaluationResult]) -> list[float]:
     values: list[float] = []
     for item in evaluations:
-        if item.average_return_pct is not None:
-            values.append(float(item.average_return_pct))
+        avg_ret = finite_float(item.average_return_pct)
+        if avg_ret is not None:
+            values.append(avg_ret)
             continue
-        returns = [float(pick.return_pct) for pick in item.picks if pick.return_pct is not None]
+        returns = [val for pick in item.picks if (val := finite_float(pick.return_pct)) is not None]
         if returns:
             values.append(sum(returns) / len(returns))
     return values
@@ -208,18 +211,22 @@ def _performance_score(
     pick_count: object,
     missing_count: int,
 ) -> float | None:
-    if average_return_pct is None or win_rate is None or int(pick_count or 0) <= 0:
+    avg_val = finite_float(average_return_pct)
+    win_val = finite_float(win_rate)
+    picks = safe_int(pick_count, default=0)
+    if avg_val is None or win_val is None or picks <= 0:
         return None
-    missing_rate = float(missing_count) / float(pick_count or 1)
-    score = 50.0 + (float(average_return_pct) * 2.0) + ((float(win_rate) - 50.0) * 0.5) - (missing_rate * 20.0)
+    missing = max(0, min(safe_int(missing_count, default=0), picks))
+    missing_rate = float(missing) / float(picks)
+    score = 50.0 + (avg_val * 2.0) + ((win_val - 50.0) * 0.5) - (missing_rate * 20.0)
     return round(max(0.0, min(100.0, score)), 1)
 
 
 def _performance_outcome(*, average_return_pct: object, win_rate: object) -> str:
-    if average_return_pct is None or win_rate is None:
+    avg = finite_float(average_return_pct)
+    wins = finite_float(win_rate)
+    if avg is None or wins is None:
         return "insufficient_data"
-    avg = float(average_return_pct)
-    wins = float(win_rate)
     if avg >= 2.0 and wins >= 60.0:
         return "strong"
     if avg > 0.0 and wins >= 50.0:
@@ -251,42 +258,42 @@ def _compact_evaluation(item: EvaluationResult) -> dict[str, object]:
         "elapsed_days": item.elapsed_days,
         "snapshot_source": item.snapshot_source,
         "pick_count": len(item.picks),
-        "evaluated_pick_count": sum(1 for pick in item.picks if pick.return_pct is not None),
+        "evaluated_pick_count": sum(1 for pick in item.picks if finite_float(pick.return_pct) is not None),
         "missing_count": len(item.missing_codes),
-        "average_return_pct": item.average_return_pct,
-        "win_rate": item.win_rate,
+        "average_return_pct": finite_float(item.average_return_pct),
+        "win_rate": finite_float(item.win_rate),
         "saved_path": item.saved_path,
     }
 
 
 def _average(values: list[float]) -> float | None:
-    if not values:
+    clean = [num for item in values if (num := finite_float(item)) is not None]
+    if not clean:
         return None
-    return round(sum(values) / len(values), 4)
+    return round(sum(clean) / len(clean), 4)
 
 
 def _median(values: list[float]) -> float | None:
-    if not values:
+    clean = [num for item in values if (num := finite_float(item)) is not None]
+    if not clean:
         return None
-    return round(float(median(values)), 4)
+    return round(float(median(clean)), 4)
 
 
 def _rate(count: int, total: int, *, percent: bool = False) -> float | None:
-    if total <= 0:
+    count_val = finite_float(count)
+    total_val = finite_float(total)
+    if count_val is None or total_val is None or total_val <= 0:
         return None
-    value = float(count) / float(total)
+    value = count_val / total_val
     if percent:
         value *= 100.0
     return round(value, 4)
 
 
 def _score_value(value: object) -> float:
-    if value is None:
-        return -1.0
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return -1.0
+    num = finite_float(value)
+    return num if num is not None else -1.0
 
 
 def _evaluation_sort_key(item: EvaluationResult) -> tuple[datetime, str]:

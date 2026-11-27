@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 from alphasift.config import Config
+from alphasift.jsonutil import atomic_write_strict_json, atomic_write_text
 from alphasift.pack import load_pack, pack_dir
 from alphasift.pattern_replay import load_cn_benchmark, render_replay_markdown, replay_patterns
 
@@ -19,6 +19,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--benchmark-csv", default=None, help="Optional CSV with date,open,close columns")
     parser.add_argument("--warmup-days", type=int, default=60, help="Warmup sessions before evaluating signals")
     parser.add_argument("--cost-bps", type=float, default=0.0, help="Round-trip cost in bps")
+    parser.add_argument(
+        "--allowed-regimes",
+        default=None,
+        help="Comma-separated permitted regime stages (e.g. startup,main_up)",
+    )
+    parser.add_argument(
+        "--exclude-regimes",
+        default=None,
+        help="Comma-separated excluded regime stages (e.g. freezing,ebb)",
+    )
+    parser.add_argument(
+        "--max-overhead-pct",
+        type=float,
+        default=None,
+        help="Keep only signals whose top-10%% overhead supply is strictly below this percentage (e.g. 15)",
+    )
     parser.add_argument("--output-json", default=None, help="Write replay JSON report")
     parser.add_argument("--output-md", default=None, help="Write replay Markdown report")
     args = parser.parse_args(argv)
@@ -36,17 +52,22 @@ def main(argv: list[str] | None = None) -> int:
         benchmark_df=bench,
         warmup_days=args.warmup_days,
         cost_bps=args.cost_bps,
+        allowed_regimes=[
+            s.strip() for s in (args.allowed_regimes or "").split(",") if s.strip()
+        ]
+        or None,
+        excluded_regimes=[
+            s.strip() for s in (args.exclude_regimes or "").split(",") if s.strip()
+        ]
+        or None,
+        max_overhead_pct=args.max_overhead_pct,
     )
     md = render_replay_markdown(report)
 
     if args.output_json:
-        out_json = Path(args.output_json)
-        out_json.parent.mkdir(parents=True, exist_ok=True)
-        out_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        atomic_write_strict_json(args.output_json, report, indent=2, trailing_newline=True)
     if args.output_md:
-        out_md = Path(args.output_md)
-        out_md.parent.mkdir(parents=True, exist_ok=True)
-        out_md.write_text(md, encoding="utf-8")
+        atomic_write_text(args.output_md, md)
 
     print(md)
     return 0

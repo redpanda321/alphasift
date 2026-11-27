@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from alphasift.jsonutil import atomic_write_strict_json, dumps_strict_json
 from alphasift.lifecycle_sector_report import US_SECTORS
 
 
@@ -74,12 +75,12 @@ def main(base=Path("data"), report_only=False):
                 f = future.result()
                 f.setdefault("retrieved_at", pd.Timestamp.now(tz="UTC").isoformat())
                 rows.append(f)
-                stream.write(json.dumps(f, ensure_ascii=False, allow_nan=False) + "\n")
+                stream.write(dumps_strict_json(f, indent=None) + "\n")
                 stream.flush()
                 if i % 20 == 0:
                     print(f"Financial fetch {i}/{len(requests)}", flush=True)
-    (base / "lifecycle-fundamentals-all.json").write_text(json.dumps(dict(started_at=now.isoformat(),
-        finished_at=pd.Timestamp.now(tz="UTC").isoformat(), rows=rows), ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+    atomic_write_strict_json(base / "lifecycle-fundamentals-all.json", dict(started_at=now.isoformat(),
+        finished_at=pd.Timestamp.now(tz="UTC").isoformat(), rows=rows))
     lookup = {(r['market'], r['code']): r for r in rows}
     scored = [score_candidate(s, lookup[(s['market'], s['code'])], ranker) for s in stocks]
     groups = defaultdict(list)
@@ -135,7 +136,7 @@ def main(base=Path("data"), report_only=False):
         for r in scored:
             f = r['financial']
             writer.writerow({**r, **{k:f.get(k) for k in audit_fields if k not in r}, 'financial_currency':f.get('currency')})
-    stem.with_suffix('.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
+    atomic_write_strict_json(stem.with_suffix('.json'), payload)
     stem.with_suffix('.md').write_text('\n'.join(lines), encoding='utf-8')
     stem.with_suffix('.html').write_text('<!doctype html><meta charset="utf-8"><title>各行业综合前5</title><style>body{font:14px system-ui;padding:24px}table{border-collapse:collapse;white-space:nowrap}td,th{padding:8px;border:1px solid #ddd}details{overflow:auto;margin:20px 0}summary{font-size:18px;font-weight:bold}p{line-height:1.8}</style><h1>各行业基本面综合前5</h1><p>'+html.escape(note)+'</p>'+''.join(sections), encoding='utf-8')
     flat = []
@@ -147,8 +148,8 @@ def main(base=Path("data"), report_only=False):
             writer = csv.DictWriter(stream, fieldnames=sorted(set().union(*(r.keys() for r in flat))))
             writer.writeheader()
             writer.writerows(flat)
-    print(json.dumps(dict(scope=len(scored), selected=len(chosen), eligible=sum(r['eligible'] for r in scored),
-                          markets=dict(Counter(r['market'] for r in chosen)), groups=len(groups)), ensure_ascii=False), flush=True)
+    print(dumps_strict_json(dict(scope=len(scored), selected=len(chosen), eligible=sum(r['eligible'] for r in scored),
+                          markets=dict(Counter(r['market'] for r in chosen)), groups=len(groups)), indent=None), flush=True)
 
 
 if __name__ == '__main__':

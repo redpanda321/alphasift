@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from alphasift.lifecycle_contract import strategy_contract
+from alphasift.jsonutil import atomic_write_strict_json, dumps_strict_json
 
 
 def validate_scan(payload):
@@ -42,13 +43,13 @@ def main(argv=None):
     expected = {m: latest_completed_session(m) for m in ("cn", "us")}
     if args.check:
         print(
-            json.dumps(
+            dumps_strict_json(
                 {
                     "status": "configuration_ok",
                     "sessions": expected,
                     "python": sys.executable,
                     "strategy": strategy_contract(),
-                }
+                }, indent=None
             )
         )
         return
@@ -85,9 +86,7 @@ def main(argv=None):
         manifest_path = work / "manifest.json"
 
         def save():
-            manifest_path.write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            atomic_write_strict_json(manifest_path, manifest)
 
         save()
         env = dict(os.environ, PYTHONUTF8="1", PYTHONPATH=str(root))
@@ -142,17 +141,13 @@ def main(argv=None):
                 exclusions=result["exclusions"],
             )
             save()
-            pointer = runs / "latest-success.tmp"
-            pointer.write_text(
-                json.dumps(
-                    {
-                        "run": str(work),
-                        "report": str(data / "lifecycle-industry-top5.html"),
-                    }
-                ),
-                encoding="utf-8",
+            atomic_write_strict_json(
+                runs / "latest-success.json",
+                {
+                    "run": str(work),
+                    "report": str(data / "lifecycle-industry-top5.html"),
+                },
             )
-            pointer.replace(runs / "latest-success.json")
             import html
 
             link = (data / "lifecycle-industry-top5.html").as_uri()

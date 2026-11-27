@@ -40,11 +40,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from alphasift.jsonutil import atomic_write_strict_json, atomic_write_text, finite_float, safe_int  # noqa: E402
+
 SESSIONS = {"asia": ["cn", "hk", "jp", "kr", "tw", "in"], "us": ["us"]}
 WINDOWS = [5, 10, 20]
 SNAPSHOT_TIMEOUT_SEC = 5 * 60
 SCREEN_TIMEOUT_SEC = 20 * 60
-AI_SCREEN_TIMEOUT_SEC = 120
+AI_SCREEN_TIMEOUT_SEC = max(60, safe_int(os.getenv("ALPHASIFT_AI_SCREEN_TIMEOUT_SEC"), default=210))
 AI_TRACK_MARKETS = frozenset({"cn"})
 MAX_MISSING_RETRY_DAYS = 90
 SKIPPED_STATUSES = frozenset({"skipped_holiday", "skipped_duplicate"})
@@ -303,7 +305,7 @@ def record_cn_patterns(
         payload["stale_reason"] = f"数据包截止 {pack_date}，落后目标交易日 {target_expected}（降级展示）"
 
     sig_codes: list[str] = []
-    cap = max(1, int(max_signals_per_pattern))
+    cap = max(1, safe_int(max_signals_per_pattern, default=20))
     for pat_name, items in payload.get("signals_by_pattern", {}).items():
         trimmed = list(items)[:cap]
         payload["signals_by_pattern"][pat_name] = trimmed
@@ -324,21 +326,21 @@ def record_cn_patterns(
     out_dir = track / "data" / "patterns"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{scan.trade_date}.json"
-    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_strict_json(out_path, payload, indent=2, trailing_newline=True)
 
     if replay_json_path is not None and Path(replay_json_path).is_file():
         replay_data = _read_json(Path(replay_json_path))
         if isinstance(replay_data, dict):
-            (out_dir / "replay.json").write_text(
-                json.dumps(replay_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            atomic_write_strict_json(
+                out_dir / "replay.json", replay_data, indent=2, trailing_newline=True
             )
     elif include_replay:
         from alphasift.pattern_replay import load_cn_benchmark, replay_patterns
 
         bench = load_cn_benchmark(lookback_days=max(len(daily_pack.dates) + 40, 320))
         replay_data = replay_patterns(daily_pack, benchmark_df=bench, cost_bps=25.0)
-        (out_dir / "replay.json").write_text(
-            json.dumps(replay_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        atomic_write_strict_json(
+            out_dir / "replay.json", replay_data, indent=2, trailing_newline=True
         )
     return payload
 
@@ -635,8 +637,7 @@ def run_session(
     if ai_entries:
         log["ai_entries"] = ai_entries
     log_path = track / "data" / "logs" / f"{log_date}-{session}.json"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_strict_json(log_path, log, indent=2)
     return log
 
 
@@ -902,8 +903,7 @@ def evaluate_markets(
         "windows": WINDOWS,
         "runs": runs_out,
     }
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    atomic_write_strict_json(out_path, payload, indent=1)
     return payload
 
 
@@ -1027,7 +1027,7 @@ def _load_latest_report_summary(path: Path) -> dict[str, Any] | None:
         "ai_brief": ai_brief,
         "market_news": compact_news,
         "announcement_risks": {
-            "checked_count": int(ann.get("checked_count") or 0),
+            "checked_count": max(safe_int(ann.get("checked_count"), default=0), 0),
             "flagged_count": len(flagged),
             "flagged_items": flagged,
             "errors": list(ann.get("errors") or []),
@@ -1061,14 +1061,14 @@ def build_site(track: Path) -> dict[str, Any]:
         by_day.setdefault(run["date"], []).append(run)
     for day, day_runs in by_day.items():
         payload = {"date": day, "runs": [{k: v for k, v in run.items() if k != "path"} for run in day_runs]}
-        (site / "days" / f"{day}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        atomic_write_strict_json(site / "days" / f"{day}.json", payload, indent=None)
 
     markets = sorted({run["market"] for run in runs}, key=lambda m: list(SESSIONS["asia"] + SESSIONS["us"]).index(m))
     sc = scorecard(runs, evaluation)
     tc = track_comparison(runs, evaluation)
     pb = _build_pattern_board(track)
     if pb is not None:
-        (site / "patterns.json").write_text(json.dumps(pb, ensure_ascii=False), encoding="utf-8")
+        atomic_write_strict_json(site / "patterns.json", pb, indent=None)
         latest_pat = pb["latest"]
         pb_summary: dict[str, Any] | None = {
             "latest": {
@@ -1167,8 +1167,10 @@ def build_site(track: Path) -> dict[str, Any]:
         "days": [{"date": day, "runs": len(by_day[day])} for day in sorted(by_day, reverse=True)],
         "run_count": len(runs),
     }
-    (site / "summary.json").write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
-    (site / "feed.xml").write_text(render_atom_feed(summary), encoding="utf-8")
+    atomic_write_strict_json(site / "summary.json", summary, indent=None)
+    atomic_write_text(site / "feed.xml", render_atom_feed(summary))
+    atomic_write_text(track / "robots.txt", render_robots_txt())
+    atomic_write_text(track / "sitemap.xml", render_sitemap_xml(summary))
 
     # Emit standard `sha256sum -c` manifest relative to `site/` covering all published site files.
     manifest_path = site / "manifest.sha256"
@@ -1177,9 +1179,9 @@ def build_site(track: Path) -> dict[str, Any]:
         rel = fpath.relative_to(site).as_posix()
         digest = integrity_files.get(rel) or hashlib.sha256(fpath.read_bytes()).hexdigest()
         manifest_entries.append(f"{digest}  {rel}")
-    manifest_path.write_text("\n".join(manifest_entries) + ("\n" if manifest_entries else ""), encoding="utf-8")
+    atomic_write_text(manifest_path, "\n".join(manifest_entries) + ("\n" if manifest_entries else ""))
 
-    (track / "README.md").write_text(render_readme(summary), encoding="utf-8")
+    atomic_write_text(track / "README.md", render_readme(summary))
     return summary
 
 
@@ -1292,14 +1294,15 @@ def _window_pick_details(
     names = {str(p.get("code")): str(p.get("name") or "") for p in run_item.get("picks", []) if p.get("code")}
     details: dict[str, dict[str, Any]] = {}
     for code, out in picks.items():
-        if out.get("status") == "ok" and out.get("excess_return_pct") is not None:
+        ex_val = finite_float(out.get("excess_return_pct"))
+        if out.get("status") == "ok" and ex_val is not None:
             sc = str(code)
             details[sc] = {
                 "date": str(run_item.get("date") or ""),
                 "code": sc,
                 "name": names.get(sc, ""),
-                "return_pct": _round(out.get("return_pct"), 2),
-                "excess_return_pct": _round(float(out["excess_return_pct"]), 2),
+                "return_pct": _round(finite_float(out.get("return_pct")), 2),
+                "excess_return_pct": _round(ex_val, 2),
             }
     return details
 
@@ -1313,8 +1316,9 @@ def _window_day_excess_stats(
     picks = win.get("picks") or {}
     by_code: dict[str, float] = {}
     for code, out in picks.items():
-        if out.get("status") == "ok" and out.get("excess_return_pct") is not None:
-            by_code[str(code)] = float(out["excess_return_pct"])
+        ex_val = finite_float(out.get("excess_return_pct"))
+        if out.get("status") == "ok" and ex_val is not None:
+            by_code[str(code)] = ex_val
     if not by_code:
         return None, {}
     return float(statistics.fmean(by_code.values())), by_code
@@ -1401,35 +1405,48 @@ def track_comparison(
                         rules_dropped_items.append(r_details[c])
 
             paired_days = len(deltas)
-            sample_sufficient = paired_days >= int(min_paired_days)
+            min_days = max(safe_int(min_paired_days, default=MIN_PAIRED_AI_DAYS), 1)
+            sample_sufficient = paired_days >= min_days
             re = _round(statistics.fmean(rules_day_vals)) if rules_day_vals else None
             ae = _round(statistics.fmean(ai_day_vals)) if ai_day_vals else None
             best_ai_adds = sorted(
-                (item for item in ai_unique_items if float(item["excess_return_pct"]) > 0),
-                key=lambda x: (-float(x["excess_return_pct"]), x["date"], x["code"]),
+                (
+                    item for item in ai_unique_items
+                    if (v := finite_float(item.get("excess_return_pct"))) is not None and v > 0
+                ),
+                key=lambda x: (-(finite_float(x.get("excess_return_pct")) or 0.0), x["date"], x["code"]),
             )[:3]
             worst_ai_adds = sorted(
-                (item for item in ai_unique_items if float(item["excess_return_pct"]) < 0),
-                key=lambda x: (float(x["excess_return_pct"]), x["date"], x["code"]),
+                (
+                    item for item in ai_unique_items
+                    if (v := finite_float(item.get("excess_return_pct"))) is not None and v < 0
+                ),
+                key=lambda x: (finite_float(x.get("excess_return_pct")) or 0.0, x["date"], x["code"]),
             )[:2]
             best_ai_avoids = sorted(
-                (item for item in rules_dropped_items if float(item["excess_return_pct"]) < 0),
-                key=lambda x: (float(x["excess_return_pct"]), x["date"], x["code"]),
+                (
+                    item for item in rules_dropped_items
+                    if (v := finite_float(item.get("excess_return_pct"))) is not None and v < 0
+                ),
+                key=lambda x: (finite_float(x.get("excess_return_pct")) or 0.0, x["date"], x["code"]),
             )[:3]
             missed_by_ai = sorted(
-                (item for item in rules_dropped_items if float(item["excess_return_pct"]) > 0),
-                key=lambda x: (-float(x["excess_return_pct"]), x["date"], x["code"]),
+                (
+                    item for item in rules_dropped_items
+                    if (v := finite_float(item.get("excess_return_pct"))) is not None and v > 0
+                ),
+                key=lambda x: (-(finite_float(x.get("excess_return_pct")) or 0.0), x["date"], x["code"]),
             )[:2]
             win_deltas[str(window)] = {
                 "paired_days": paired_days,
-                "min_paired_days": int(min_paired_days),
+                "min_paired_days": min_days,
                 "sample_sufficient": sample_sufficient,
                 "rules_matched": rules_matched,
                 "ai_matched": ai_matched,
                 "rules_excess_pct": re,
                 "ai_excess_pct": ae,
                 "ai_minus_rules_pct": _round(statistics.fmean(deltas)) if sample_sufficient else None,
-                "delta_hidden_reason": None if sample_sufficient else f"同日配对 {paired_days} < {int(min_paired_days)} 天",
+                "delta_hidden_reason": None if sample_sufficient else f"同日配对 {paired_days} < {min_days} 天",
                 "ai_win_days": ai_win_days,
                 "ai_win_day_rate": _round(ai_win_days / paired_days, 3) if paired_days else None,
                 "ai_unique_count": len(ai_unique_vals),
@@ -1493,11 +1510,13 @@ def _build_pattern_board(track: Path) -> dict[str, Any] | None:
             "generated_at": replay.get("generated_at"),
             "entry_mode": replay.get("entry_mode", "next_open"),
             "benchmark": replay.get("benchmark", "sh000300"),
-            "cost_bps": float(replay.get("cost_bps", 0.0)),
+            "cost_bps": finite_float(replay.get("cost_bps")) or 0.0,
             "graduation_rule": replay.get("graduation_rule"),
             "pack_summary": replay.get("pack_summary"),
             "regime_distribution": replay.get("regime_distribution"),
             "universe_baseline": replay.get("universe_baseline"),
+            "regime_filter": replay.get("regime_filter"),
+            "overhead_filter": replay.get("overhead_filter"),
             "patterns": [
                 {
                     "pattern": item.get("pattern"),
@@ -1512,6 +1531,7 @@ def _build_pattern_board(track: Path) -> dict[str, Any] | None:
                     "multiple_testing": item.get("multiple_testing"),
                     "by_regime": item.get("by_regime"),
                     "by_overhead_supply": item.get("by_overhead_supply"),
+                    "walk_forward_regime_audit": item.get("walk_forward_regime_audit"),
                 }
                 for item in (replay.get("patterns") or [])
             ],
@@ -1625,6 +1645,58 @@ def _atom_escape_attr(value: str) -> str:
     return _xml_escape(value, {'"': "&quot;"})
 
 
+def _resolve_dashboard_url(dashboard_url: str | None = None) -> str:
+    base = (
+        str(dashboard_url or os.getenv("ALPHASIFT_DASHBOARD_URL") or "https://alphasift.zhulinsen.tech/").strip()
+        or "https://alphasift.zhulinsen.tech/"
+    )
+    if not base.endswith("/"):
+        base += "/"
+    return base
+
+
+def render_robots_txt(*, dashboard_url: str | None = None) -> str:
+    """Render fork-safe robots.txt pointing crawlers to the live sitemap."""
+    base = _resolve_dashboard_url(dashboard_url)
+    return f"User-agent: *\nAllow: /\n\nSitemap: {base}sitemap.xml\n"
+
+
+def render_sitemap_xml(summary: dict[str, Any], *, dashboard_url: str | None = None) -> str:
+    """Render a minimal sitemap.xml covering the live dashboard, printable report, and Atom feed."""
+    base = _resolve_dashboard_url(dashboard_url)
+    days = summary.get("days") or []
+    latest_day = str(days[0].get("date") or "").strip() if days and isinstance(days[0], dict) else ""
+    fallback_date = latest_day or str(summary.get("generated_at") or _now())[:10]
+
+    urls: list[tuple[str, str, str, str]] = [
+        (base, fallback_date, "daily", "1.0"),
+    ]
+    report_html_art = ((summary.get("artifacts") or {}).get("daily_report_html") or {})
+    if report_html_art.get("exists"):
+        rep_date = str(report_html_art.get("trade_date") or "").strip() or fallback_date
+        urls.append((f"{base}site/daily_report.html", rep_date, "daily", "0.8"))
+    urls.append((f"{base}site/feed.xml", fallback_date, "daily", "0.6"))
+
+    url_blocks = [
+        "\n".join([
+            "  <url>",
+            f"    <loc>{_xml_escape(loc)}</loc>",
+            f"    <lastmod>{_xml_escape(lastmod)}</lastmod>",
+            f"    <changefreq>{changefreq}</changefreq>",
+            f"    <priority>{priority}</priority>",
+            "  </url>",
+        ])
+        for loc, lastmod, changefreq, priority in urls
+    ]
+    return "\n".join([
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+        *url_blocks,
+        "</urlset>",
+        "",
+    ])
+
+
 def render_atom_feed(
     summary: dict[str, Any],
     *,
@@ -1632,12 +1704,7 @@ def render_atom_feed(
     max_entries: int = 14,
 ) -> str:
     """Render an Atom 1.0 RSS feed (zero external dependencies) for static Pages subscriptions."""
-    base = (
-        str(dashboard_url or os.getenv("ALPHASIFT_DASHBOARD_URL") or "https://alphasift.zhulinsen.tech/").strip()
-        or "https://alphasift.zhulinsen.tech/"
-    )
-    if not base.endswith("/"):
-        base += "/"
+    base = _resolve_dashboard_url(dashboard_url)
     feed_url = f"{base}site/feed.xml"
     report_url = f"{base}site/daily_report.html"
     updated = str(summary.get("generated_at") or _now())
@@ -1646,10 +1713,10 @@ def render_atom_feed(
     t5_leaders = [
         r
         for r in sc
-        if ((r.get("windows") or {}).get("5") or {}).get("average_excess_return_pct") is not None
+        if finite_float(((r.get("windows") or {}).get("5") or {}).get("average_excess_return_pct")) is not None
     ]
     t5_leaders.sort(
-        key=lambda r: float(((r.get("windows") or {}).get("5") or {})["average_excess_return_pct"]),
+        key=lambda r: finite_float(((r.get("windows") or {}).get("5") or {}).get("average_excess_return_pct")) or 0.0,
         reverse=True,
     )
     leader_line = ""
@@ -1657,26 +1724,27 @@ def render_atom_feed(
         top = t5_leaders[0]
         w5 = top["windows"]["5"]
         s_name = (summary.get("strategy_names") or {}).get(top.get("strategy"), top.get("strategy"))
-        ex = float(w5["average_excess_return_pct"])
-        beat = w5.get("beat_rate")
-        beat_txt = f", beat {round(float(beat) * 100)}%" if beat is not None else ""
+        ex = finite_float(w5.get("average_excess_return_pct")) or 0.0
+        beat = finite_float(w5.get("beat_rate"))
+        beat_txt = f", beat {round(beat * 100)}%" if beat is not None else ""
+        ev_cnt = max(safe_int(w5.get("evaluated"), default=0), 0)
         leader_line = (
             f"T+5 leader ({top.get('market', '').upper()}): "
-            f"{s_name} ({ex:+.2f}% excess, n={w5.get('evaluated', 0)}{beat_txt})."
+            f"{s_name} ({ex:+.2f}% excess, n={ev_cnt}{beat_txt})."
         )
 
     latest_rep = summary.get("latest_report") or {}
     brief_headline = str(((latest_rep.get("ai_brief") or {}).get("headline") or "")).strip()
     rep_date = str(latest_rep.get("trade_date") or "").strip()
 
-    days = (summary.get("days") or [])[: max(1, int(max_entries))]
+    days = (summary.get("days") or [])[: max(1, safe_int(max_entries, default=14))]
     entries_xml: list[str] = []
     latest_by_mkt = summary.get("latest") or {}
     for idx, day_info in enumerate(days):
         day = str(day_info.get("date") or "").strip()
         if not day:
             continue
-        run_cnt = int(day_info.get("runs") or 0)
+        run_cnt = max(safe_int(day_info.get("runs"), default=0), 0)
         entry_updated = updated if idx == 0 else f"{day}T18:30:00+08:00"
         title_bits = [f"AlphaSift · {day}", f"{run_cnt} runs"]
         summary_bits = [f"{run_cnt} strategy runs recorded on {day}."]
@@ -1750,22 +1818,26 @@ def _read_json(path: Path) -> Any:
 
 
 def _round(value: Any, digits: int = 4) -> Any:
+    if isinstance(value, bool) or value is None:
+        return None
     if isinstance(value, float):
-        return round(value, digits) if value == value else None
+        return round(value, digits) if finite_float(value) is not None else None
     return value
 
 
 def _mean(values) -> float | None:
-    values = list(values)
-    return _round(statistics.fmean(values)) if values else None
+    clean = [v for raw in values if (v := finite_float(raw)) is not None]
+    return _round(statistics.fmean(clean)) if clean else None
 
 
 def _pct(value: float | None) -> str:
-    return "–" if value is None else f"{value:+.2f}%"
+    num = finite_float(value)
+    return "–" if num is None else f"{num:+.2f}%"
 
 
 def _rate(value: float | None) -> str:
-    return "–" if value is None else f"{value * 100:.0f}%"
+    num = finite_float(value)
+    return "–" if num is None else f"{num * 100:.0f}%"
 
 
 def _now() -> str:

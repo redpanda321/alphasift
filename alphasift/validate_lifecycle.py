@@ -7,7 +7,6 @@ Use --input-dir with cn_CODE.csv/us_CODE.csv to replay saved histories offline.
 from __future__ import annotations
 
 import argparse
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +14,7 @@ import pandas as pd
 
 from alphasift.daily import _normalize_daily_history, fetch_daily_history
 from alphasift.lifecycle import compute_lifecycle_features
+from alphasift.jsonutil import atomic_write_strict_json, dumps_strict_json
 from alphasift.strategy import load_strategy
 
 SAMPLES = {
@@ -177,11 +177,8 @@ def main():
             key=lambda r: r[f"{stage}_score"],
             reverse=True,
         )[:20]
-    args.output.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
-    print(json.dumps(report["summary"], ensure_ascii=False), flush=True)
+    atomic_write_strict_json(args.output, report)
+    print(dumps_strict_json(report["summary"], indent=None), flush=True)
     return (
         0
         if all(

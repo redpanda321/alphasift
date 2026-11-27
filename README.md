@@ -13,6 +13,7 @@
 *A股 / 美股 / 港股 / 日韩台印全市场多因子筛选 → AI 情报复核与排雷 → 公开 T+N 纸面跟踪验证*
 
 [![GitHub stars](https://img.shields.io/github/stars/ZhuLinsen/alphasift?style=social)](https://github.com/ZhuLinsen/alphasift/stargazers)
+[![PyPI](https://img.shields.io/pypi/v/alphasift?color=2563eb)](https://pypi.org/project/alphasift/)
 [![Live Dashboard](https://img.shields.io/badge/Live%20Dashboard-GitHub%20Pages-0ea5e9.svg)](https://alphasift.zhulinsen.tech/?lang=zh)
 [![MCP Ready](https://img.shields.io/badge/MCP-STDIO%20Ready-8b5cf6.svg)](docs/ecosystem.md)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3b82f6.svg)](https://www.python.org/downloads/)
@@ -84,7 +85,7 @@
 
 ### 1. 接入 Claude Code / OpenClaw / Cursor / Codex（原生 MCP）
 
-安装 AlphaSift 后，在客户端 MCP 配置加入 5 行 JSON 即可让 AI 助手直接调用 `10` 个只读量化工具（默认不触发外发推送）：
+安装 AlphaSift 后，在客户端 MCP 配置加入 5 行 JSON 即可让 AI 助手直接调用 `14` 个只读量化工具与 `4` 项资源（默认不触发外发推送）：
 
 ```json
 {
@@ -105,11 +106,11 @@
 
 ### 2. 本机命令行、交互式 Web 工作台 & Docker
 
-可直接从 [`v0.3.0` Release](https://github.com/ZhuLinsen/alphasift/releases/tag/v0.3.0) 安装独立 wheel 包，或源码可编辑安装：
+可直接从 [PyPI (`alphasift`)](https://pypi.org/project/alphasift/) 一键安装（或从 [`v0.3.1` Release](https://github.com/ZhuLinsen/alphasift/releases/tag/v0.3.1) / 源码可编辑安装）：
 
 ```bash
-# 方式 A：直接安装 v0.3.0 Release Wheel
-pip install https://github.com/ZhuLinsen/alphasift/releases/download/v0.3.0/alphasift-0.3.0-py3-none-any.whl
+# 方式 A：从 PyPI 安装（推荐，支持 pip / uvx）
+pip install alphasift
 
 # 方式 B：源码克隆安装
 git clone https://github.com/ZhuLinsen/alphasift.git && cd alphasift
@@ -269,7 +270,7 @@ NOTIFY_URLS="pushplus://TOKEN,sct://SENDKEY,bark://api.day.app/KEY,mailto://send
 
 > 本项目仅用于量化研究、开源工程验证与个人学习，不构成任何投资建议、收益承诺或买卖指令。行情源、大模型输出与形态统计均可能存在延迟或偏差。
 
-[使用指南](docs/usage.md) · [配置参考](docs/configuration.md) · [生态与 MCP](docs/ecosystem.md) · [部署与镜像](docs/deployment.md) · [策略指南](docs/strategy-guide.md) · [评分体系](docs/scoring.md) · [输出契约](docs/result-schema.md) · [参考资料](docs/reference.md) · [参与贡献](CONTRIBUTING.md) · [安全策略](SECURITY.md) · [更新记录](docs/CHANGELOG.md) · [SKILL.md](SKILL.md)
+[使用指南](docs/usage.md) · [配置参考](docs/configuration.md) · [情绪实证研究](docs/pattern-regime-research.md) · [生态与 MCP](docs/ecosystem.md) · [部署与镜像](docs/deployment.md) · [策略指南](docs/strategy-guide.md) · [评分体系](docs/scoring.md) · [输出契约](docs/result-schema.md) · [参考资料](docs/reference.md) · [参与贡献](CONTRIBUTING.md) · [安全策略](SECURITY.md) · [更新记录](docs/CHANGELOG.md) · [SKILL.md](SKILL.md)
 
 基于 [Apache License 2.0](LICENSE) 开源。
 

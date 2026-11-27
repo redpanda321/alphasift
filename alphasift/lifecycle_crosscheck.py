@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import json
 import logging
 import os
 from pathlib import Path
@@ -19,6 +18,7 @@ import pandas as pd
 from alphasift.daily import _normalize_daily_history, cn_code_to_yfinance_symbol
 from alphasift.lifecycle import compute_lifecycle_features, _pivots, _select_slow_cycle_frame
 from alphasift.lifecycle_contract import FALLBACK_WINDOW_YEARS, STAGES, strategy_contract
+from alphasift.jsonutil import atomic_write_strict_json, dumps_strict_json
 
 
 def classify_window(history: pd.DataFrame, *, min_history_days: int | None = None) -> dict:
@@ -520,19 +520,16 @@ def main(argv=None):
     }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
+    atomic_write_strict_json(output, payload)
     print(
-        json.dumps(
+        dumps_strict_json(
             {
                 "output": str(output),
                 "as_of": as_of,
                 "statuses": pd.Series([r["status"] for r in rows])
                 .value_counts()
                 .to_dict(),
-            }
+            }, indent=None
         )
     )
 
