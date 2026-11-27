@@ -10,6 +10,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
+from alphasift import __version__
 from alphasift.audit import audit_project
 from alphasift.config import Config
 from alphasift.doctor import doctor_data_sources, doctor_radar_readiness, write_doctor_report
@@ -23,6 +24,8 @@ from alphasift.hotspot import (
     save_hotspots_json,
 )
 from alphasift.industry import fetch_akshare_board_map, save_industry_map
+from alphasift.jsonutil import atomic_write_strict_json, atomic_write_text, dumps_strict_json, safe_int
+from alphasift.normalize import safe_float as normalize_safe_float
 from alphasift.overview import build_overview
 from alphasift.performance_history import build_strategy_performance_summary
 from alphasift.pipeline import screen
@@ -55,6 +58,7 @@ def main():
         format="%(levelname)s %(name)s: %(message)s",
     )
     parser = argparse.ArgumentParser(prog="alphasift", description="自动选股 Skill")
+    parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--env-file",
         action="append",
@@ -170,6 +174,11 @@ def main():
     cross.add_argument("--market", choices=["cn", "us"], required=True)
     cross.add_argument("--symbols", default=None)
     cross.add_argument("--output", required=True)
+
+    # markets
+    mkp = sub.add_parser("markets", help="列出支持的多市场元数据与交易时段规范")
+    mkp.add_argument("--market", default=None, help="只查看单个市场规范（cn/us/hk/jp/kr/tw/in）")
+    mkp.add_argument("--json", action="store_true", help="以 JSON 输出市场规范元数据")
 
     # strategies
     stp = sub.add_parser("strategies", help="列出可用策略")
@@ -442,6 +451,22 @@ def main():
     pat_replay.add_argument("--cost-bps", type=float, default=0.0, help="扣减双边交易成本（bps）")
     pat_replay.add_argument("--output-json", default=None, help="写出 JSON 回放报告")
     pat_replay.add_argument("--output-md", default=None, help="写出 Markdown 回放报告")
+    pat_replay.add_argument(
+        "--allowed-regimes",
+        default=None,
+        help="仅保留指定市场情绪阶段（逗号分隔，支持 freezing/startup/main_up/divergence/ebb/neutral 或中文标签）",
+    )
+    pat_replay.add_argument(
+        "--exclude-regimes",
+        default=None,
+        help="剔除指定市场情绪阶段（逗号分隔，例如 freezing,ebb）",
+    )
+    pat_replay.add_argument(
+        "--max-overhead-pct",
+        type=float,
+        default=None,
+        help="仅保留上方 10% 套牢筹码占比严格低于该百分数的信号（例如 15 表示 <15%）",
+    )
     pat_replay.add_argument("--json", action="store_true", help="以 JSON 输出")
 
     # daily-report (CN daily report + multi-market digest + IM card + idempotent push)
@@ -538,7 +563,30 @@ def main():
         elif args.jsonl:
             print("\n".join(screen_result_to_jsonl(result)))
         else:
-            print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
+            print(dumps_strict_json(asdict(result), indent=2))
+
+    elif args.command == "markets":
+        from alphasift.markets import MARKETS, get_market
+
+        market_arg = str(getattr(args, "market", "") or "").strip().lower()
+        if market_arg:
+            try:
+                spec = get_market(market_arg)
+            except ValueError as exc:
+                parser.error(str(exc))
+            if args.json:
+                print(dumps_strict_json({"schema_version": 1, "market": asdict(spec)}, indent=2))
+            else:
+                print(_format_markets_explain([spec]))
+        else:
+            specs = list(MARKETS.values())
+            if args.json:
+                print(
+                    dumps_strict_json(
+                        {"schema_version": 1, "markets": [asdict(item) for item in specs]}, indent=2)
+                )
+            else:
+                print(_format_markets_explain(specs))
 
     elif args.command == "strategies":
         if args.templates and args.template:
@@ -546,7 +594,7 @@ def main():
         if args.templates:
             templates = list_strategy_templates()
             if args.json:
-                print(json.dumps(templates, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(templates, indent=2))
             elif args.explain:
                 print(_format_strategy_templates_explain(templates))
             else:
@@ -563,7 +611,7 @@ def main():
             except ValueError as exc:
                 parser.error(str(exc))
             if args.json:
-                print(json.dumps(template, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(template, indent=2))
             elif args.explain:
                 print(_format_strategy_template_explain(template))
             else:
@@ -574,7 +622,7 @@ def main():
             except ValueError as exc:
                 parser.error(str(exc))
             if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(payload, indent=2))
             else:
                 print(_format_strategy_compare_explain(payload))
         elif _has_strategy_match_args(args):
@@ -593,7 +641,7 @@ def main():
                 limit=args.limit,
             )
             if args.json:
-                print(json.dumps(matches, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(matches, indent=2))
             elif args.explain:
                 print(_format_strategy_matches_explain(matches, criteria=criteria))
             else:
@@ -602,7 +650,7 @@ def main():
         else:
             strategies = list_strategies()
             if args.json:
-                print(json.dumps([asdict(item) for item in strategies], ensure_ascii=False, indent=2))
+                print(dumps_strict_json([asdict(item) for item in strategies], indent=2))
             elif args.explain:
                 print(_format_strategies_explain(strategies))
             else:
@@ -640,7 +688,7 @@ def main():
         elif args.jsonl:
             print("\n".join(evaluation_result_to_jsonl(result)))
         else:
-            print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
+            print(dumps_strict_json(asdict(result), indent=2))
 
     elif args.command == "evaluate-batch":
         config = Config.from_env()
@@ -656,15 +704,11 @@ def main():
             price_path_lookback_days=args.price_path_lookback_days,
         )
         if args.output:
-            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.output).write_text(
-                json.dumps(result, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            atomic_write_strict_json(args.output, result, indent=2)
         if args.explain:
             print(_format_evaluation_batch_explain(result))
         else:
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print(dumps_strict_json(result, indent=2))
 
     elif args.command == "performance":
         config = Config.from_env()
@@ -676,7 +720,7 @@ def main():
         if args.explain and not args.json:
             print(_format_performance_summary_explain(payload))
         else:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            print(dumps_strict_json(payload, indent=2))
 
     elif args.command == "evaluate-strategies":
         config = Config.from_env()
@@ -734,21 +778,17 @@ def main():
             payload["review_window_days"] = result.get("review_window_days")
             payload["window_reviews"] = result.get("window_reviews", [])
         if args.output:
-            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.output).write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            atomic_write_strict_json(args.output, payload, indent=2)
         if args.explain or not args.json:
             print(_format_evaluate_strategies_explain(payload))
         else:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            print(dumps_strict_json(payload, indent=2))
 
     elif args.command == "runs":
         config = Config.from_env()
         runs = list_saved_runs(data_dir=config.data_dir, limit=args.limit, strategy=args.strategy)
         if args.json:
-            print(json.dumps(runs, ensure_ascii=False, indent=2))
+            print(dumps_strict_json(runs, indent=2))
             return
         for item in runs:
             print(
@@ -772,15 +812,11 @@ def main():
             match_limit=args.match_limit,
         )
         if args.output:
-            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.output).write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            atomic_write_strict_json(args.output, payload, indent=2)
         if args.explain:
             print(_format_overview_explain(payload))
         else:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            print(dumps_strict_json(payload, indent=2))
 
     elif args.command == "serve":
         config = Config.from_env()
@@ -845,13 +881,13 @@ def main():
                 f"notes={' | '.join(notes)}"
             )
         else:
-            print(json.dumps({
+            print(dumps_strict_json({
                 "path": str(output_path),
                 "metadata_path": str(metadata_path),
                 "history_path": str(history_path),
                 "rows": len(mapping),
                 "notes": notes,
-            }, ensure_ascii=False, indent=2))
+            }, indent=2))
 
     elif args.command == "hotspots":
         hotspots = discover_hotspots(
@@ -866,7 +902,7 @@ def main():
         if args.explain:
             print(_format_hotspots_explain(hotspots, provider=args.provider))
         else:
-            print(json.dumps([asdict(item) for item in hotspots], ensure_ascii=False, indent=2))
+            print(dumps_strict_json([asdict(item) for item in hotspots], indent=2))
 
     elif args.command == "hotspot":
         timeline_path = args.timeline_path if args.timeline else None
@@ -879,16 +915,11 @@ def main():
             fallback_cache_path=args.fallback_cache,
         )
         if args.output:
-            output_path = Path(args.output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(
-                json.dumps(hotspot_detail_to_dict(detail), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            atomic_write_strict_json(args.output, hotspot_detail_to_dict(detail), indent=2)
         if args.explain:
             print(_format_hotspot_detail_explain(detail))
         else:
-            print(json.dumps(hotspot_detail_to_dict(detail), ensure_ascii=False, indent=2))
+            print(dumps_strict_json(hotspot_detail_to_dict(detail), indent=2))
 
     elif args.command == "hotspot-cache":
         hotspots = discover_hotspots(
@@ -928,7 +959,7 @@ def main():
                 f"fallback={fallback_used}"
             )
         else:
-            print(json.dumps({
+            print(dumps_strict_json({
                 "path": str(output_path),
                 "metadata_path": str(metadata_path),
                 "history_path": str(history_path) if history_path is not None else "",
@@ -936,13 +967,13 @@ def main():
                 "rows": len(hotspots),
                 "fallback_used": fallback_used,
                 "source_errors": getattr(hotspots, "source_errors", []),
-            }, ensure_ascii=False, indent=2))
+            }, indent=2))
 
     elif args.command == "audit":
         config = Config.from_env()
         result = audit_project(config.strategies_dir)
         if args.json:
-            print(json.dumps(result, ensure_ascii=False, indent=2))
+            print(dumps_strict_json(result, indent=2))
         else:
             print(_format_audit_explain(result))
 
@@ -967,7 +998,7 @@ def main():
             if args.output:
                 write_doctor_report(args.output, result)
             if args.json or not args.explain:
-                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+                print(dumps_strict_json(result.to_dict(), indent=2))
             else:
                 print(_format_data_sources_doctor_explain(result.to_dict()))
         elif args.doctor_command == "dsa-readiness":
@@ -976,10 +1007,9 @@ def main():
                 timeout_sec=args.timeout_sec,
             )
             if args.output:
-                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-                Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+                atomic_write_strict_json(args.output, result, indent=2)
             if args.json or not args.explain:
-                print(json.dumps(result, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(result, indent=2))
             else:
                 print(_format_dsa_readiness_explain(result))
         elif args.doctor_command == "radar":
@@ -991,7 +1021,7 @@ def main():
             if args.explain and not args.json:
                 print(_format_radar_doctor_explain(result))
             else:
-                print(json.dumps(result, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(result, indent=2))
             pack_info = result.get("pack") or {}
             if args.strict_pack and (
                 not pack_info.get("valid")
@@ -1036,7 +1066,7 @@ def main():
                 )
         except (OSError, RuntimeError, ValueError) as exc:
             parser.error(str(exc))
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(dumps_strict_json(result, indent=2))
 
     elif args.command == "market-stats":
         from alphasift import pack
@@ -1065,7 +1095,7 @@ def main():
             print(_format_market_stats_explain(items))
         else:
             payload: object = items[0].to_dict() if args.days <= 1 else [item.to_dict() for item in items]
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            print(dumps_strict_json(payload, indent=2))
 
     elif args.command == "patterns":
         from alphasift import pack
@@ -1076,7 +1106,7 @@ def main():
         if args.patterns_command == "list":
             specs = list_patterns(include_experimental=args.include_experimental)
             if args.json:
-                print(json.dumps([asdict(s) for s in specs], ensure_ascii=False, indent=2))
+                print(dumps_strict_json([asdict(s) for s in specs], indent=2))
             else:
                 print(f"patterns={len(specs)}")
                 for spec in specs:
@@ -1100,7 +1130,7 @@ def main():
             if args.explain and not args.json:
                 print(_format_pattern_scan_explain(result, limit=args.limit))
             else:
-                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+                print(dumps_strict_json(result.to_dict(), indent=2))
         else:
             directory = Path(args.pack_dir).expanduser() if args.pack_dir else pack.pack_dir(config)
             try:
@@ -1115,19 +1145,24 @@ def main():
                     benchmark_df=bench,
                     warmup_days=args.warmup_days,
                     cost_bps=args.cost_bps,
+                    allowed_regimes=[
+                        s.strip() for s in (args.allowed_regimes or "").split(",") if s.strip()
+                    ]
+                    or None,
+                    excluded_regimes=[
+                        s.strip() for s in (args.exclude_regimes or "").split(",") if s.strip()
+                    ]
+                    or None,
+                    max_overhead_pct=args.max_overhead_pct,
                 )
             except (OSError, RuntimeError, ValueError, IndexError) as exc:
                 parser.error(str(exc))
             if args.output_json:
-                out_json = Path(args.output_json)
-                out_json.parent.mkdir(parents=True, exist_ok=True)
-                out_json.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                atomic_write_strict_json(args.output_json, report, indent=2, trailing_newline=True)
             if args.output_md:
-                out_md = Path(args.output_md)
-                out_md.parent.mkdir(parents=True, exist_ok=True)
-                out_md.write_text(render_replay_markdown(report), encoding="utf-8")
+                atomic_write_text(args.output_md, render_replay_markdown(report))
             if args.json:
-                print(json.dumps(report, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(report, indent=2))
             else:
                 print(render_replay_markdown(report))
 
@@ -1266,7 +1301,7 @@ def main():
         if args.explain and not args.json:
             print(_format_daily_report_explain(report))
         else:
-            print(json.dumps(report, ensure_ascii=False, indent=2))
+            print(dumps_strict_json(report, indent=2))
 
     elif args.command == "notify":
         from alphasift.notify import notify_readiness, send_test_notification
@@ -1275,7 +1310,7 @@ def main():
         if args.notify_action == "status":
             info = notify_readiness(config)
             if args.json:
-                print(json.dumps(info, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(info, indent=2))
             else:
                 chans = ", ".join(info["configured_channels"]) or "none"
                 print(f"Configured channels: {chans}")
@@ -1291,7 +1326,7 @@ def main():
             except ValueError as exc:
                 parser.error(str(exc))
             if args.json:
-                print(json.dumps(res, ensure_ascii=False, indent=2))
+                print(dumps_strict_json(res, indent=2))
             else:
                 print(
                     f"notify_test status={res['status']} "
@@ -1730,8 +1765,9 @@ def _format_strategy_match_line(item: dict[str, object]) -> str:
     data = ",".join(str(value) for value in item.get("data_requirements", []) or []) or "-"
     matched = _format_match_tokens(item.get("matched", []) or [])
     missing = _format_match_tokens(item.get("missing", []) or [])
+    score_val = _safe_float(item.get("score"))
     return (
-        f"{float(item.get('score', 0.0)):>4.1f} "
+        f"{(score_val if score_val is not None else 0.0):>4.1f} "
         f"{str(item.get('name', '')):<24} "
         f"{str(item.get('category', '-')):<9} "
         f"style={_format_strategy_style(style):<40} "
@@ -1767,8 +1803,11 @@ def _format_match_tokens(values: object, *, limit: int = 6) -> str:
 def _format_top_factor_weights(weights: dict[str, float], *, limit: int = 4) -> str:
     if not weights:
         return "-"
-    ordered = sorted(weights.items(), key=lambda item: (-float(item[1]), item[0]))[:limit]
-    return ",".join(f"{name}:{float(value):.2f}" for name, value in ordered)
+    clean = [(str(name), val) for name, raw in weights.items() if (val := _safe_float(raw)) is not None]
+    if not clean:
+        return "-"
+    ordered = sorted(clean, key=lambda item: (-item[1], item[0]))[:limit]
+    return ",".join(f"{name}:{value:.2f}" for name, value in ordered)
 
 
 def _format_strategy_style(style: dict[str, object]) -> str:
@@ -2061,8 +2100,8 @@ def _format_data_quality_review_explain(review: object) -> list[str]:
 def _format_partial_benchmark(window: dict) -> str:
     """When only some picks have benchmark data, bench/excess cover just
     those picks; show how many and their own average return."""
-    evaluated = int(window.get("evaluated_pick_count") or 0)
-    matched = int(window.get("benchmark_pick_count") or 0)
+    evaluated = max(safe_int(window.get("evaluated_pick_count"), default=0), 0)
+    matched = max(safe_int(window.get("benchmark_pick_count"), default=0), 0)
     if not evaluated or matched >= evaluated:
         return ""
     return f"bench_n={matched}/{evaluated} matched_ret={window.get('average_matched_return_pct')!s} "
@@ -2173,8 +2212,8 @@ def _format_failure_review_explain(
                 if not isinstance(reason_values, list):
                     reason_values = []
                 reasons = ",".join(str(value) for value in reason_values[:4]) or "-"
-                ret = item.get("return_pct")
-                ret_text = "-" if ret is None else f"{float(ret):.2f}%"
+                ret = _safe_float(item.get("return_pct"))
+                ret_text = "-" if ret is None else f"{ret:.2f}%"
                 lines.append(
                     f"{str(item.get('run_id') or ''):<16} {str(item.get('strategy') or ''):<20} "
                     f"{item.get('rank')!s:<4} {str(item.get('code') or ''):<8} "
@@ -2291,18 +2330,22 @@ def _top_dimension_items(items: dict, *, limit: int = 5) -> list[str]:
 def _top_failure_dimension_items(items: object, *, limit: int = 5) -> list[str]:
     if not isinstance(items, dict):
         return []
+    def _failure_sort_key(item: tuple[str, dict]) -> tuple[int, bool, float, str]:
+        worst = _safe_float(item[1].get("worst_return_pct"))
+        return (
+            -max(safe_int(item[1].get("failure_count"), default=0), 0),
+            worst is None,
+            worst if worst is not None else 0.0,
+            item[0],
+        )
+
     ranked = sorted(
         (
             (str(label), stats)
             for label, stats in items.items()
             if isinstance(stats, dict)
         ),
-        key=lambda item: (
-            -int(item[1].get("failure_count", 0) or 0),
-            item[1].get("worst_return_pct") is None,
-            float(item[1].get("worst_return_pct") or 0),
-            item[0],
-        ),
+        key=_failure_sort_key,
     )
     return [
         (
@@ -2314,11 +2357,13 @@ def _top_failure_dimension_items(items: object, *, limit: int = 5) -> list[str]:
 
 
 def _fmt_pct(value: float | None) -> str:
-    return "-" if value is None else f"{float(value):.2f}%"
+    num = _safe_float(value)
+    return "-" if num is None else f"{num:.2f}%"
 
 
 def _fmt_optional_float(value: float | None) -> str:
-    return "-" if value is None else f"{float(value):.2f}"
+    num = _safe_float(value)
+    return "-" if num is None else f"{num:.2f}"
 
 
 def _format_audit_explain(result: dict) -> str:
@@ -2492,8 +2537,8 @@ def _format_snapshot_reconciliation_explain(reconciliation: dict) -> list[str]:
         for item in sources:
             missing = _join_or_dash(item.get("missing_fields") or [])
             errors = _join_or_dash(item.get("errors") or [])
-            overlap = item.get("overlap_with_baseline_ratio")
-            overlap_text = "-" if overlap is None else f"{float(overlap):.2f}"
+            overlap = _safe_float(item.get("overlap_with_baseline_ratio"))
+            overlap_text = "-" if overlap is None else f"{overlap:.2f}"
             lines.append(
                 f"{str(item.get('source') or ''):<16} {str(item.get('status') or ''):<9} "
                 f"{item.get('rows', 0)!s:<6} {overlap_text:<7} "
@@ -2554,8 +2599,7 @@ def _write_industry_cache_metadata(
         "history_path": str(history_path) if history_path is not None else "",
         "notes": notes,
     }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    return metadata_path
+    return atomic_write_strict_json(metadata_path, metadata, indent=2)
 
 
 def _write_hotspot_cache_metadata(
@@ -2582,8 +2626,7 @@ def _write_hotspot_cache_metadata(
         "source_errors": source_errors or [],
         "history_appended": history_appended,
     }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    return metadata_path
+    return atomic_write_strict_json(metadata_path, metadata, indent=2)
 
 
 def _append_industry_cache_history(
@@ -2598,7 +2641,7 @@ def _append_industry_cache_history(
     if records:
         with history_path.open("a", encoding="utf-8") as handle:
             for record in records:
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+                handle.write(dumps_strict_json(record, indent=None) + "\n")
     else:
         history_path.touch()
     return history_path
@@ -2645,15 +2688,9 @@ def _split_board_heat_summary(value: object) -> list[str]:
 
 
 def _safe_float(value: object) -> float | None:
-    if value is None:
+    if isinstance(value, bool):
         return None
-    text = str(value).strip().replace("%", "").replace(",", "")
-    if not text or text.lower() in {"nan", "none", "<na>"}:
-        return None
-    try:
-        return float(text)
-    except (TypeError, ValueError):
-        return None
+    return normalize_safe_float(value)
 
 
 def _apply_env_file_args(env_files: list[str] | None) -> None:
@@ -2696,17 +2733,39 @@ def _split_csv_args(values: list[str] | None) -> list[str] | None:
     return result
 
 
+def _format_markets_explain(specs: list) -> str:
+    lines = ["id  name              ccy  timezone            session      pack   benchmark"]
+    for spec in specs:
+        pack_flag = "yes" if spec.supports_daily_pack else "no"
+        bench = spec.benchmark_name or spec.benchmark or "-"
+        session = f"{spec.session_open}-{spec.session_close}"
+        lines.append(
+            f"{spec.id:<3} {spec.name:<17} {spec.currency:<4} {spec.timezone:<19} "
+            f"{session:<12} {pack_flag:<6} {bench}"
+        )
+    return "\n".join(lines)
+
+
 def _format_market_stats_explain(items: list) -> str:
     lines = ["date       stage       up%    lu  brk  seal%   ld  maxLB  prevLU%   amt_yi"]
     for item in items:
-        seal = "-" if item.seal_rate_pct is None else f"{item.seal_rate_pct:5.1f}"
-        prev_ret = "-" if item.prev_limit_up_avg_return_pct is None else f"{item.prev_limit_up_avg_return_pct:+6.2f}"
-        amt = "-" if item.total_amount_yi is None else f"{item.total_amount_yi:8.1f}"
+        seal_val = _safe_float(item.seal_rate_pct)
+        seal = "-" if seal_val is None else f"{seal_val:5.1f}"
+        prev_val = _safe_float(item.prev_limit_up_avg_return_pct)
+        prev_ret = "-" if prev_val is None else f"{prev_val:+6.2f}"
+        amt_val = _safe_float(item.total_amount_yi)
+        amt = "-" if amt_val is None else f"{amt_val:8.1f}"
+        adv_val = _safe_float(item.advance_ratio_pct)
+        adv = "  -  " if adv_val is None else f"{adv_val:5.1f}"
+        lu_cnt = max(safe_int(item.non_st_limit_up_count, default=0), 0)
+        brk_cnt = max(safe_int(item.non_st_broken_board_count, default=0), 0)
+        ld_cnt = max(safe_int(item.non_st_limit_down_count, default=0), 0)
+        max_lb = max(safe_int(item.max_consecutive_limit_up, default=0), 0)
         stage_disp = f"{item.regime_stage}({item.regime_stage_label})"
         lines.append(
-            f"{item.trade_date} {stage_disp:<11} {item.advance_ratio_pct:5.1f} "
-            f"{item.non_st_limit_up_count:4d} {item.non_st_broken_board_count:4d} {seal:>6} "
-            f"{item.non_st_limit_down_count:4d} {item.max_consecutive_limit_up:6d} {prev_ret:>8} {amt:>8}"
+            f"{item.trade_date} {stage_disp:<11} {adv} "
+            f"{lu_cnt:4d} {brk_cnt:4d} {seal:>6} "
+            f"{ld_cnt:4d} {max_lb:6d} {prev_ret:>8} {amt:>8}"
         )
     if items:
         last = items[-1]
@@ -2717,21 +2776,28 @@ def _format_market_stats_explain(items: list) -> str:
 
 def _format_pattern_scan_explain(scan_result, *, limit: int = 20) -> str:
     reg = scan_result.market_regime
+    lu_cnt = max(safe_int(reg.non_st_limit_up_count, default=0), 0)
+    ld_cnt = max(safe_int(reg.non_st_limit_down_count, default=0), 0)
+    limit_n = max(1, safe_int(limit, default=20))
     lines = [
         f"trade_date={scan_result.trade_date} universe={scan_result.universe_count} "
-        f"regime={reg.regime_stage}({reg.regime_stage_label}) lu={reg.non_st_limit_up_count} "
-        f"ld={reg.non_st_limit_down_count} policy={scan_result.usage_policy}"
+        f"regime={reg.regime_stage}({reg.regime_stage_label}) lu={lu_cnt} "
+        f"ld={ld_cnt} policy={scan_result.usage_policy}"
     ]
     for pattern_name in scan_result.patterns_evaluated:
         items = scan_result.signals_by_pattern.get(pattern_name, [])
         lines.append(f"[{pattern_name}] hits={len(items)}")
-        for sig in items[: max(1, int(limit))]:
+        for sig in items[:limit_n]:
             obs = f" obs={sig.observe_date}(-{sig.observe_lag_days}d)" if sig.observe_date else ""
-            ov = f"{sig.overhead_supply_10pct:.1f}%" if sig.overhead_supply_10pct is not None else "-"
-            amt_m = f"{sig.proxy_amount / 1e8:.2f}亿" if sig.proxy_amount is not None else "-"
+            ov_val = _safe_float(sig.overhead_supply_10pct)
+            ov = f"{ov_val:.1f}%" if ov_val is not None else "-"
+            amt_val = _safe_float(sig.proxy_amount)
+            amt_m = f"{amt_val / 1e8:.2f}亿" if amt_val is not None else "-"
+            chg_val = _safe_float(sig.change_pct)
+            chg_txt = f"{chg_val:+5.2f}%" if chg_val is not None else "   -  "
             lines.append(
                 f"  {sig.code} {sig.name or '-':<8} {sig.industry or '-':<8} "
-                f"chg={sig.change_pct:+5.2f}% amt={amt_m:<7} ov10={ov}{obs}"
+                f"chg={chg_txt} amt={amt_m:<7} ov10={ov}{obs}"
             )
     return "\n".join(lines)
 

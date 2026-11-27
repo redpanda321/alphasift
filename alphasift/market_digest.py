@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from alphasift.config import Config
 from alphasift.daily_brief import resolve_strategy_display_names
 from alphasift.daily_report import IM_CARD_MAX_CHARS, _format_strategy_entry, ensure_im_card_length
+from alphasift.jsonutil import finite_float, safe_int
 from alphasift.market_news import fetch_region_market_news
 from alphasift.markets import get_market, latest_settled_close
 from alphasift.models import ScreenResult
@@ -50,7 +51,7 @@ def load_multi_market_runs(
     trade_date: str | None = None,
 ) -> dict[str, list[ScreenResult]]:
     """Load latest (or trade_date-matched) saved runs grouped by market."""
-    req_markets = [str(m).strip().lower() for m in markets if str(m).strip()]
+    req_markets = list(dict.fromkeys(str(m).strip().lower() for m in markets if str(m).strip()))
     req_set = set(req_markets)
     if not req_set:
         return {}
@@ -79,7 +80,7 @@ def load_multi_market_runs(
         if not candidates:
             out[mkt] = []
             continue
-        target_sess = trade_date or max(sd for sd, _ in candidates if sd) or ""
+        target_sess = trade_date or max((sd for sd, _ in candidates if sd), default="")
         # Deduplicate by (strategy, track) keeping latest created_at for target session date
         by_key: dict[tuple[str, str], ScreenResult] = {}
         for sd, sr in candidates:
@@ -118,20 +119,23 @@ def _top_picks_for_market(
                     "industry": str(pk.get("industry") or "").strip(),
                     "strategies": [],
                     "scores": [],
-                    "price": pk.get("price"),
-                    "pe_ratio": pk.get("pe_ratio"),
-                    "pb_ratio": pk.get("pb_ratio"),
-                    "change_pct": pk.get("change_pct"),
+                    "price": finite_float(pk.get("price")),
+                    "pe_ratio": finite_float(pk.get("pe_ratio")),
+                    "pb_ratio": finite_float(pk.get("pb_ratio")),
+                    "change_pct": finite_float(pk.get("change_pct")),
                     "ranking_reason": str(pk.get("ranking_reason") or "").strip(),
                 },
             )
             if sname and sname not in item["strategies"]:
                 item["strategies"].append(sname)
-            if pk.get("final_score") is not None:
-                item["scores"].append(float(pk["final_score"]))
+            score_val = finite_float(pk.get("final_score"))
+            if score_val is not None:
+                item["scores"].append(score_val)
             for fld in ("price", "pe_ratio", "pb_ratio", "change_pct"):
-                if item[fld] is None and pk.get(fld) is not None:
-                    item[fld] = pk.get(fld)
+                if item[fld] is None:
+                    finite_val = finite_float(pk.get(fld))
+                    if finite_val is not None:
+                        item[fld] = finite_val
             if not item["ranking_reason"] and pk.get("ranking_reason"):
                 item["ranking_reason"] = str(pk.get("ranking_reason") or "").strip()
 
@@ -167,11 +171,11 @@ def render_market_digest_im_card(
     if sections:
         for sec in sections[:6]:
             m_name = sec.get("market_name") or str(sec.get("market") or "").upper()
-            st_cnt = int(sec.get("strategy_count") or 0)
+            st_cnt = max(safe_int(sec.get("strategy_count"), default=0), 0)
             top = sec.get("top_picks") or []
             if top:
                 top_txt = "、".join(
-                    f"{p.get('code')} {str(p.get('name') or '')[:8]}({p.get('avg_final_score'):.1f}分)"
+                    f"{p.get('code')} {str(p.get('name') or '')[:8]}({(finite_float(p.get('avg_final_score')) or 0.0):.1f}分)"
                     for p in top[:3]
                 )
                 lines.append(f"- **{m_name}**（{st_cnt} 组策略 · {sec.get('trade_date', '-')}）：{top_txt}")
@@ -203,7 +207,7 @@ def build_markets_digest(
     regional_news_collector: Callable[..., tuple[list[dict[str, Any]], list[str]]] | None = None,
 ) -> dict[str, Any]:
     """Build a multi-market post-close screening digest (object='MarketDigest')."""
-    req_markets = [str(m).strip().lower() for m in markets if str(m).strip()]
+    req_markets = list(dict.fromkeys(str(m).strip().lower() for m in markets if str(m).strip()))
     summary_names = (
         track_summary.get("strategy_names")
         if isinstance(track_summary, dict) and isinstance(track_summary.get("strategy_names"), dict)

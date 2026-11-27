@@ -9,6 +9,13 @@ from math import isfinite
 from pathlib import Path
 
 from alphasift.models import EvaluationResult, Pick, PickEvaluation, ScreenResult
+from alphasift.jsonutil import (
+    atomic_write_strict_json,
+    atomic_write_text,
+    dumps_strict_json,
+    finite_float,
+    safe_int,
+)
 
 _RUN_METADATA_SUFFIX = ".meta"
 _RUN_SOURCE_ERROR_SAMPLE_LIMIT = 5
@@ -24,15 +31,11 @@ def save_screen_result(
 ) -> Path:
     """Persist a screen result and return the written path."""
     output_path = Path(path) if path is not None else data_dir / "runs" / f"{result.run_id}.json"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     result.saved_path = str(output_path)
     if jsonl:
-        output_path.write_text("\n".join(screen_result_to_jsonl(result)) + "\n", encoding="utf-8")
+        atomic_write_text(output_path, "\n".join(screen_result_to_jsonl(result)) + "\n")
     else:
-        output_path.write_text(
-            json.dumps(asdict(result), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_strict_json(output_path, asdict(result), indent=2)
     _write_screen_result_metadata(result, output_path)
     return output_path
 
@@ -70,15 +73,11 @@ def save_evaluation_result(
     jsonl: bool = False,
 ) -> Path:
     output_path = Path(path) if path is not None else data_dir / "evaluations" / f"{result.run_id}.json"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     result.saved_path = str(output_path)
     if jsonl:
-        output_path.write_text("\n".join(evaluation_result_to_jsonl(result)) + "\n", encoding="utf-8")
+        atomic_write_text(output_path, "\n".join(evaluation_result_to_jsonl(result)) + "\n")
     else:
-        output_path.write_text(
-            json.dumps(asdict(result), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_strict_json(output_path, asdict(result), indent=2)
     return output_path
 
 
@@ -92,8 +91,8 @@ def list_saved_runs(
     runs_dir = data_dir / "runs"
     if not runs_dir.is_dir():
         return []
-    limit = int(limit)
-    if limit <= 0:
+    limit_val = max(safe_int(limit, default=0), 0)
+    if limit_val <= 0:
         return []
     items = []
     for path in sorted(runs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -105,7 +104,7 @@ def list_saved_runs(
         if market and metadata.get("market") != market:
             continue
         items.append(metadata)
-        if len(items) >= limit:
+        if len(items) >= limit_val:
             break
     return items
 
@@ -138,10 +137,7 @@ def _write_screen_result_metadata(result: ScreenResult, output_path: Path) -> No
         "path": str(output_path),
         "report_path": str(output_path.with_suffix(".md")),
     }
-    metadata_path.write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_strict_json(metadata_path, metadata, indent=2)
 
 
 def _run_metadata_path(run_path: Path) -> Path:
@@ -168,15 +164,9 @@ def _read_run_metadata(path: Path) -> dict[str, object] | None:
 
 def _normalize_run_metadata(data: dict, path: Path) -> dict[str, object]:
     picks = data.get("picks", [])
-    if isinstance(picks, list):
-        pick_count = len(picks)
-    else:
-        try:
-            pick_count = int(picks)
-        except (TypeError, ValueError):
-            pick_count = 0
+    pick_count = len(picks) if isinstance(picks, list) else safe_int(picks)
     return {
-        "schema_version": int(_metadata_value(data, "schema_version", 1) or 1),
+        "schema_version": safe_int(_metadata_value(data, "schema_version", 1), default=1) or 1,
         "run_id": data.get("run_id", path.stem),
         "strategy": data.get("strategy", ""),
         "market": data.get("market") or "cn",
@@ -184,17 +174,21 @@ def _normalize_run_metadata(data: dict, path: Path) -> dict[str, object]:
         "strategy_category": data.get("strategy_category", ""),
         "created_at": data.get("created_at", ""),
         "picks": pick_count,
-        "snapshot_count": int(_metadata_value(data, "snapshot_count", 0) or 0),
-        "after_filter_count": int(_metadata_value(data, "after_filter_count", 0) or 0),
+        "snapshot_count": safe_int(_metadata_value(data, "snapshot_count", 0)),
+        "after_filter_count": safe_int(_metadata_value(data, "after_filter_count", 0)),
         "snapshot_source": data.get("snapshot_source", ""),
-        "source_error_count": int(_metadata_value(data, "source_error_count", _list_count(data.get("source_errors"))) or 0),
+        "source_error_count": safe_int(
+            _metadata_value(data, "source_error_count", _list_count(data.get("source_errors")))
+        ),
         "source_errors": _string_list(data.get("source_errors", []))[:_RUN_SOURCE_ERROR_SAMPLE_LIMIT],
-        "degradation_count": int(_metadata_value(data, "degradation_count", _list_count(data.get("degradation"))) or 0),
+        "degradation_count": safe_int(
+            _metadata_value(data, "degradation_count", _list_count(data.get("degradation")))
+        ),
         "degradation": _string_list(data.get("degradation", []))[:_RUN_DEGRADATION_SAMPLE_LIMIT],
         "llm_ranked": bool(data.get("llm_ranked", False)),
-        "llm_coverage": data.get("llm_coverage"),
+        "llm_coverage": finite_float(data.get("llm_coverage")),
         "daily_enriched": bool(data.get("daily_enriched", False)),
-        "daily_enrich_count": int(_metadata_value(data, "daily_enrich_count", 0) or 0),
+        "daily_enrich_count": safe_int(_metadata_value(data, "daily_enrich_count", 0)),
         "daily_source_counts": _int_count_dict(data.get("daily_source_counts")),
         "daily_quality_flag_counts": _int_count_dict(data.get("daily_quality_flag_counts")),
         "post_analyzers": _string_list(data.get("post_analyzers", [])),
@@ -260,18 +254,18 @@ def resolve_run_path(run_ref: str | Path, *, data_dir: Path) -> Path:
 def screen_result_to_jsonl(result: ScreenResult) -> list[str]:
     data = asdict(result)
     picks = data.pop("picks", [])
-    lines = [json.dumps({"type": "run", **data}, ensure_ascii=False)]
+    lines = [dumps_strict_json({"type": "run", **data}, indent=None)]
     for pick in picks:
-        lines.append(json.dumps({"type": "pick", "run_id": result.run_id, **pick}, ensure_ascii=False))
+        lines.append(dumps_strict_json({"type": "pick", "run_id": result.run_id, **pick}, indent=None))
     return lines
 
 
 def evaluation_result_to_jsonl(result: EvaluationResult) -> list[str]:
     data = asdict(result)
     picks = data.pop("picks", [])
-    lines = [json.dumps({"type": "evaluation", **data}, ensure_ascii=False)]
+    lines = [dumps_strict_json({"type": "evaluation", **data}, indent=None)]
     for pick in picks:
-        lines.append(json.dumps({"type": "pick_evaluation", "run_id": result.run_id, **pick}, ensure_ascii=False))
+        lines.append(dumps_strict_json({"type": "pick_evaluation", "run_id": result.run_id, **pick}, indent=None))
     return lines
 
 

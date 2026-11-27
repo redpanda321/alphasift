@@ -15,6 +15,8 @@ from typing import Any
 
 import pandas as pd
 
+from alphasift.jsonutil import atomic_write_strict_json, dumps_strict_json
+
 
 def _value(frame: pd.DataFrame, key: str, date: Any) -> float | None:
     if key not in frame.index or date not in frame.columns:
@@ -378,10 +380,7 @@ def build_report(
 
 def write_report(report: dict[str, Any], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "lifecycle-industry-top5.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
+    atomic_write_strict_json(output_dir / "lifecycle-industry-top5.json", report)
     if report["top5"]:
         with (output_dir / "lifecycle-industry-top5.csv").open(
             "w", encoding="utf-8-sig", newline=""
@@ -436,7 +435,7 @@ def main() -> None:
     report = build_report(scans)
     write_report(report, args.data_dir)
     print(
-        json.dumps({key: report[key] for key in ("scope", "eligible", "selected")}),
+        dumps_strict_json({key: report[key] for key in ("scope", "eligible", "selected")}, indent=None),
         flush=True,
     )
 

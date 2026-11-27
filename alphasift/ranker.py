@@ -9,7 +9,14 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from alphasift.llm_client import LLMClientError, build_attempts, complete, configuration_error
+from alphasift.jsonutil import finite_float, safe_int
+from alphasift.llm_client import (
+    DEFAULT_LLM_MAX_TOKENS,
+    LLMClientError,
+    build_attempts,
+    complete,
+    configuration_error,
+)
 from alphasift.models import Pick
 from alphasift.normalize import (
     bounded_float as _bounded_float,
@@ -80,6 +87,39 @@ def _strip_negated_risk_phrases(text: str) -> str:
     return _NEGATED_RISK_RE.sub(" ", text)
 
 
+def _finite_or_default(value: object, default: float) -> float:
+    parsed = finite_float(value)
+    return parsed if parsed is not None else default
+
+
+def _opt_finite(value: object) -> float | None:
+    return finite_float(value)
+
+
+def _opt_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    num = finite_float(value)
+    return int(num) if num is not None else None
+
+
+def _fmt_score_fixed(value: object, digits: int, default: float = 0.0) -> str:
+    return f"{_finite_or_default(value, default):.{digits}f}"
+
+
+def _scrub_factor_scores_for_prompt(scores: object) -> dict[str, float]:
+    if not isinstance(scores, dict):
+        return {}
+    cleaned: dict[str, float] = {}
+    for key, raw in scores.items():
+        val = finite_float(raw)
+        if val is not None:
+            cleaned[str(key)] = val
+    return cleaned
+
+
 @dataclass
 class RankingParseResult:
     picks: list[Pick]
@@ -126,7 +166,7 @@ def rank_candidates(
     config_path: str = "",
     timeout_sec: float = 60.0,
     max_prompt_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
-    max_tokens: int | None = 2048,
+    max_tokens: int | None = DEFAULT_LLM_MAX_TOKENS,
 ) -> list[Pick]:
     """Use LLM to re-rank candidates and add ranking_reason / risk_summary.
 
@@ -174,7 +214,7 @@ def rank_candidates_with_metadata(
     timeout_sec: float = 60.0,
     max_prompt_chars: int | None = _DEFAULT_RANKING_PROMPT_MAX_CHARS,
     degradation: list[str] | None = None,
-    max_tokens: int | None = 2048,
+    max_tokens: int | None = DEFAULT_LLM_MAX_TOKENS,
     candidate_context_rows: list[dict[str, object]] | None = None,
 ) -> LLMRankingResult:
     """Use LLM to re-rank candidates and return global research metadata."""
@@ -197,18 +237,29 @@ def rank_candidates_with_metadata(
         if severe:
             adverse_context_by_code[norm_code] = severe
 
-    prompt = _build_ranking_prompt(
-        candidates,
-        ranking_hints,
-        context,
-        max_chars=max_prompt_chars,
-        degradation=degradation,
+    eff_rank_weight = min(max(_finite_or_default(rank_weight, 0.40), 0.0), 1.0)
+    eff_min_coverage = min(max(_finite_or_default(min_coverage, 0.60), 0.0), 1.0)
+    eff_max_retries = max(0, safe_int(max_retries, default=1))
+    eff_temperature = min(max(_finite_or_default(temperature, 0.2), 0.0), 2.0)
+    raw_timeout = finite_float(timeout_sec)
+    eff_timeout_sec = raw_timeout if (raw_timeout is not None and raw_timeout > 0.0) else 60.0
+    eff_max_prompt_chars = (
+        max(0, safe_int(max_prompt_chars, default=_DEFAULT_RANKING_PROMPT_MAX_CHARS))
+        if max_prompt_chars is not None
+        else None
     )
 
     try:
+        prompt = _build_ranking_prompt(
+            candidates,
+            ranking_hints,
+            context,
+            max_chars=eff_max_prompt_chars,
+            degradation=degradation,
+        )
         last_errors: list[str] = []
         parsed: RankingParseResult | None = None
-        for attempt in range(max_retries + 1):
+        for attempt in range(eff_max_retries + 1):
             attempt_prompt = prompt
             if attempt:
                 attempt_prompt += (
@@ -221,22 +272,23 @@ def rank_candidates_with_metadata(
                 llm_model,
                 llm_base_url,
                 fallback_models=fallback_models or [],
-                temperature=temperature,
+                temperature=eff_temperature,
                 json_mode=json_mode,
                 silent=silent,
                 channels=channels or [],
                 config_path=config_path,
-                timeout_sec=timeout_sec,
+                timeout_sec=eff_timeout_sec,
                 max_tokens=max_tokens,
+                degradation=degradation,
             )
             parsed = _parse_ranking_response_detail(
                 response,
                 [deepcopy(pick) for pick in candidates],
             )
             last_errors = parsed.errors
-            if parsed.coverage >= min_coverage and parsed.matched_count > 0:
+            if parsed.coverage >= eff_min_coverage and parsed.matched_count > 0:
                 break
-        if parsed is None or parsed.coverage < min_coverage or parsed.matched_count == 0:
+        if parsed is None or parsed.coverage < eff_min_coverage or parsed.matched_count == 0:
             raise ValueError(
                 "LLM ranking response coverage below threshold: "
                 f"{0 if parsed is None else parsed.coverage:.2f}; "
@@ -244,13 +296,15 @@ def rank_candidates_with_metadata(
             )
         ranked = parsed.picks
         matched_codes = parsed.matched_codes
-        weight = min(max(rank_weight, 0.0), 1.0)
+        weight = eff_rank_weight
         pre_risk_by_code = {
             _normalize_code(p.code): str(p.risk_summary)
             for p in candidates
             if _normalize_code(p.code) and p.risk_summary
         }
         for i, pick in enumerate(ranked):
+            base_screen = _finite_or_default(pick.screen_score, _finite_or_default(pick.final_score, 0.0))
+            pick.screen_score = base_screen
             norm_code = _normalize_code(pick.code)
             was_matched = matched_codes is None or norm_code in matched_codes
             prior_risk = pre_risk_by_code.get(norm_code, "")
@@ -266,17 +320,19 @@ def rank_candidates_with_metadata(
                 if "llm_omitted" not in pick.risk_flags:
                     pick.risk_flags = [*pick.risk_flags, "llm_omitted"]
                 if adverse_reasons:
-                    cap_final = float(pick.screen_score) * (1.0 - weight) + _LLM_RED_FLAG_MAX_SCORE * weight
-                    pick.final_score = min(float(pick.screen_score), cap_final)
+                    cap_final = base_screen * (1.0 - weight) + _LLM_RED_FLAG_MAX_SCORE * weight
+                    pick.final_score = min(base_screen, cap_final)
                     if "red_flag_capped" not in pick.risk_flags:
                         pick.risk_flags = [*pick.risk_flags, "red_flag_capped"]
                     note = f"触发红线上限({_LLM_RED_FLAG_MAX_SCORE:.0f}): {', '.join(adverse_reasons[:3])}"
                     pick.risk_summary = f"{pick.risk_summary}; {note}" if pick.risk_summary else note
                 else:
-                    pick.final_score = float(pick.screen_score)
+                    pick.final_score = base_screen
                 continue
-            if pick.llm_score is None:
-                pick.llm_score = 100.0 - i * (100.0 / max(len(ranked), 1))
+            llm_val = finite_float(pick.llm_score)
+            if llm_val is None:
+                llm_val = 100.0 - i * (100.0 / max(len(ranked), 1))
+            pick.llm_score = llm_val
             if adverse_reasons and pick.llm_score > _LLM_RED_FLAG_MAX_SCORE:
                 pick.llm_score = _LLM_RED_FLAG_MAX_SCORE
                 if "red_flag_capped" not in pick.llm_risks:
@@ -285,7 +341,7 @@ def rank_candidates_with_metadata(
                     pick.risk_flags = [*pick.risk_flags, "red_flag_capped"]
                 note = f"触发红线上限({_LLM_RED_FLAG_MAX_SCORE:.0f}): {', '.join(adverse_reasons[:3])}"
                 pick.risk_summary = f"{pick.risk_summary}; {note}" if pick.risk_summary else note
-            pick.final_score = pick.screen_score * (1 - weight) + (pick.llm_score or 0.0) * weight
+            pick.final_score = base_screen * (1 - weight) + pick.llm_score * weight
         ranked.sort(key=lambda item: item.final_score, reverse=True)
         for i, pick in enumerate(ranked, start=1):
             pick.rank = i
@@ -301,6 +357,16 @@ def rank_candidates_with_metadata(
     except Exception as e:
         logger.warning("LLM ranking failed, falling back to screen_score: %s", e)
         return LLMRankingResult(picks=candidates, errors=[str(e)])
+
+
+def _note_truncation(degradation: list[str] | None, exc: LLMClientError) -> None:
+    """Record a truncated ranking completion so the run report cannot hide it."""
+    note = f"LLM ranking: {exc}; raise LLM_MAX_TOKENS"
+    if exc.partial_content:
+        note += f"; partial answer discarded ({len(exc.partial_content)} chars)"
+    logger.warning(note)
+    if degradation is not None:
+        degradation.append(note)
 
 
 def _unresolved_adverse_reasons(
@@ -381,6 +447,8 @@ def _render_ranking_prompt(hints: str, context: str, candidates_text: str) -> st
 
 ## 输出要求
 只返回 JSON，不要 Markdown，不要解释 JSON 以外的文本。
+- 必须覆盖候选列表中全部股票代码（`code` 与输入精确一致），不得遗漏或中途截断。
+- 控制输出精简以防截断：`market_view` / `selection_logic` / `portfolio_risk` 与每只股票的 `theme` / `thesis` / `reason` / `risk` / `style_fit` 均用 1 句精炼短语（建议 ≤ 35 字）；列表字段 `catalysts` / `risk_flags` / `tags` / `watch_items` / `invalidators` 各保留 1~2 个短词（无则用 `[]`）。
 格式：
 {{
   "market_view": "一句话概括当前候选池和市场背景是否适合该策略",
@@ -472,39 +540,47 @@ def _build_bounded_ranking_prompt(
 
 
 def _format_candidate_for_prompt(p: Pick, *, detail: str = "full") -> str:
+    rank_val = _opt_int(p.rank)
+    screen_txt = _fmt_score_fixed(p.screen_score, 1)
+    final_txt = _fmt_score_fixed(p.final_score, 1, default=_finite_or_default(p.screen_score, 0.0))
     if detail == "identity":
         return (
-            f"- {p.code} {p.name}: rank={p.rank}, "
-            f"screen_score={p.screen_score:.1f}, final_score={p.final_score:.1f}"
+            f"- {p.code} {p.name}: rank={rank_val}, "
+            f"screen_score={screen_txt}, final_score={final_txt}"
         )
+    price_val = _opt_finite(p.price)
+    chg_val = _opt_finite(p.change_pct)
+    amt_txt = _fmt_score_fixed(p.amount, 0)
+    bheat_val = _opt_finite(p.board_heat_score)
+    sig_val = _opt_finite(p.signal_score)
     if detail == "compact":
         return (
-            f"- {p.code} {p.name}: rank={p.rank}, price={p.price}, "
-            f"change_pct={p.change_pct}%, amount={p.amount:.0f}, "
-            f"screen_score={p.screen_score:.1f}, industry={p.industry or 'unknown'}, "
-            f"concepts={p.concepts or 'unknown'}, board_heat_score={p.board_heat_score}, "
-            f"signal_score={p.signal_score}, dsa_context={_format_dsa_context_for_prompt(p)}"
+            f"- {p.code} {p.name}: rank={rank_val}, price={price_val}, "
+            f"change_pct={chg_val}%, amount={amt_txt}, "
+            f"screen_score={screen_txt}, industry={p.industry or 'unknown'}, "
+            f"concepts={p.concepts or 'unknown'}, board_heat_score={bheat_val}, "
+            f"signal_score={sig_val}, dsa_context={_format_dsa_context_for_prompt(p)}"
         )
     return (
-        f"- {p.code} {p.name}: price={p.price}, change_pct={p.change_pct}%, "
-        f"amount={p.amount:.0f}, turnover={p.turnover_rate}, volume_ratio={p.volume_ratio}, "
-        f"total_mv={p.total_mv}, PE={p.pe_ratio}, PB={p.pb_ratio}, "
+        f"- {p.code} {p.name}: price={price_val}, change_pct={chg_val}%, "
+        f"amount={amt_txt}, turnover={_opt_finite(p.turnover_rate)}, volume_ratio={_opt_finite(p.volume_ratio)}, "
+        f"total_mv={_opt_finite(p.total_mv)}, PE={_opt_finite(p.pe_ratio)}, PB={_opt_finite(p.pb_ratio)}, "
         f"industry={p.industry or 'unknown'}, concepts={p.concepts or 'unknown'}, "
-        f"industry_rank={p.industry_rank}, industry_change_pct={p.industry_change_pct}, "
-        f"board_heat_score={p.board_heat_score}, board_heat_summary={p.board_heat_summary or 'unknown'}, "
-        f"board_heat_latest_score={p.board_heat_latest_score}, "
-        f"board_heat_trend_score={p.board_heat_trend_score}, "
-        f"board_heat_persistence_score={p.board_heat_persistence_score}, "
-        f"board_heat_cooling_score={p.board_heat_cooling_score}, "
-        f"board_heat_observations={p.board_heat_observations}, "
+        f"industry_rank={_opt_int(p.industry_rank)}, industry_change_pct={_opt_finite(p.industry_change_pct)}, "
+        f"board_heat_score={bheat_val}, board_heat_summary={p.board_heat_summary or 'unknown'}, "
+        f"board_heat_latest_score={_opt_finite(p.board_heat_latest_score)}, "
+        f"board_heat_trend_score={_opt_finite(p.board_heat_trend_score)}, "
+        f"board_heat_persistence_score={_opt_finite(p.board_heat_persistence_score)}, "
+        f"board_heat_cooling_score={_opt_finite(p.board_heat_cooling_score)}, "
+        f"board_heat_observations={_opt_int(p.board_heat_observations)}, "
         f"board_heat_state={p.board_heat_state or 'unknown'}, "
-        f"change_60d={p.change_60d}, signal_score={p.signal_score}, "
+        f"change_60d={_opt_finite(p.change_60d)}, signal_score={sig_val}, "
         f"macd={p.macd_status}, rsi={p.rsi_status}, "
-        f"breakout_20d_pct={p.breakout_20d_pct}, range_20d_pct={p.range_20d_pct}, "
-        f"volume_ratio_20d={p.volume_ratio_20d}, body_pct={p.body_pct}, "
-        f"pullback_to_ma20_pct={p.pullback_to_ma20_pct}, "
-        f"consolidation_days_20d={p.consolidation_days_20d}, "
-        f"screen_score={p.screen_score:.1f}, factor_scores={p.factor_scores}, "
+        f"breakout_20d_pct={_opt_finite(p.breakout_20d_pct)}, range_20d_pct={_opt_finite(p.range_20d_pct)}, "
+        f"volume_ratio_20d={_opt_finite(p.volume_ratio_20d)}, body_pct={_opt_finite(p.body_pct)}, "
+        f"pullback_to_ma20_pct={_opt_finite(p.pullback_to_ma20_pct)}, "
+        f"consolidation_days_20d={_opt_int(p.consolidation_days_20d)}, "
+        f"screen_score={screen_txt}, factor_scores={_scrub_factor_scores_for_prompt(p.factor_scores)}, "
         f"dsa_context={_format_dsa_context_for_prompt(p)}"
     )
 
@@ -576,8 +652,9 @@ def _format_dsa_context_for_prompt(p: Pick) -> str:
     if quote:
         parts.append(
             "quote="
-            f"price:{quote.get('price')},change_pct:{quote.get('change_pct')},"
-            f"amount:{quote.get('amount')}"
+            f"price:{_opt_finite(quote.get('price'))},"
+            f"change_pct:{_opt_finite(quote.get('change_pct'))},"
+            f"amount:{_opt_finite(quote.get('amount'))}"
         )
 
     fundamentals = context.get("fundamentals") if isinstance(context.get("fundamentals"), dict) else {}
@@ -633,9 +710,10 @@ def _call_llm_with_metadata(
     channels: list[dict[str, object]] | None = None,
     config_path: str = "",
     timeout_sec: float = 60.0,
-    max_tokens: int | None = 2048,
+    max_tokens: int | None = DEFAULT_LLM_MAX_TOKENS,
     reasoning_effort: str | None = None,
     validator: Callable[[str], Any] | None = None,
+    degradation: list[str] | None = None,
 ) -> tuple[str, str]:
     """Try configured OpenAI-compatible endpoints and return (content, used_model)."""
     if error := configuration_error(channels or [], config_path):
@@ -655,6 +733,7 @@ def _call_llm_with_metadata(
     response_format = {"type": "json_object"} if json_mode else None
     formats = (response_format, None) if json_mode else (None,)
     last_error: LLMClientError | None = None
+    truncation_noted = False
 
     for attempt in attempts:
         for requested_format in formats:
@@ -671,6 +750,11 @@ def _call_llm_with_metadata(
                 )
             except LLMClientError as exc:
                 last_error = exc
+                if exc.truncated and not truncation_noted:
+                    # Recorded here rather than by the caller: a fallback model can
+                    # still rescue the run, and the truncation must survive that.
+                    _note_truncation(degradation, exc)
+                    truncation_noted = True
                 if exc.timed_out:
                     # Do not blindly retry the SAME endpoint without response_format
                     # after a timeout, but fall through to remaining fallback models/channels.
@@ -704,7 +788,8 @@ def _call_llm(
     channels: list[dict[str, object]] | None = None,
     config_path: str = "",
     timeout_sec: float = 60.0,
-    max_tokens: int | None = 2048,
+    max_tokens: int | None = DEFAULT_LLM_MAX_TOKENS,
+    degradation: list[str] | None = None,
 ) -> str:
     """Try configured OpenAI-compatible endpoints for one LLM prompt."""
     text, _ = _call_llm_with_metadata(
@@ -720,6 +805,7 @@ def _call_llm(
         config_path=config_path,
         timeout_sec=timeout_sec,
         max_tokens=max_tokens,
+        degradation=degradation,
     )
     return text
 

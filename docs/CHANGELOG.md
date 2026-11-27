@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+- **Purged Walk-Forward 时间边界严格隔离与回放联动**：
+  - 按每条样本 `exit_date` 执行严格 Walk-Forward 截断，禁止未闭合前瞻窗口或同批退出前样本泄漏至 `H1` 实证标签与联合 OOS 评估。
+  - 公开看板、盘后 HTML/Markdown 日报与 `alphasift-workbench` 同步暴露样本外时间边界、待验证标签标记与 `250D Purged Replay` 回放审计表。
+- **MCP 能力扩展至 14 个只读工具与 4 个只读资源**：
+  - 新增 `alphasift_markets` 工具与 `alphasift://markets` 资源，覆盖 7 个多市场目录配置与时区/基准指数查询；保持零交易、零外部下单边界。
+- **HTTP `/serve`、CLI 与 Workbench UI 完善**：
+  - HTTP 只读服务新增 `/markets`、`/patterns/replay`、`/daily-report`、`/daily-report.html` 与 `/markets-digest` 端点，并统一复用 `_json_safe(..., allow_nan=False)` 输出严格合法 RFC 8259 JSON（自动将 `NaN`/`Inf` 转为 `null`）。
+  - CLI 新增 `alphasift markets` 子命令；Workbench UI 新增多市场注册表卡片与 `250D Purged Replay` 回放面板。
+
+## v0.3.1 (2026-11-23)
+
+- **Walk-Forward 市场情绪阶段门控与零前视审计（v0.4 研究基础）**：
+  - 在 `alphasift/pattern_replay.py` 中新增 `_summarize_walk_forward_regime_audit`（严格按前半段 `H1` 选正超额/剔除逆风阶段，固定投影到后半段 `H2` 进行零前视样本外对照，杜绝“看全样本事后挑阶段”）并写入 `site/patterns.json` 与 `render_replay_markdown`。
+  - `replay_patterns`、CLI（`alphasift patterns replay`）及 `scripts/replay_patterns.py` 新增 `--allowed-regimes` 与 `--exclude-regimes` 参数（支持阶段英文 key 与中文标签及输入校验）。
+  - 新增 250 日（5,577 只 A 股 / 180 有效日）情绪分化实证研究报告 [`docs/pattern-regime-research.md`](pattern-regime-research.md)。
+- **T+5 实证里程碑解锁与 LLM 鲁棒性加固**：
+  - 公开跟踪站 `2026-11-23` 正式解锁 `T+5 (n=20)`：`momentum_quality`（趋势质量）`+2.86%` 净超额 / `85%` 胜率领跑规则赛道。
+  - 默认 `LLM_MAX_TOKENS` 上调至 `4096`（上限 `8192`，不自动扩写），完善 OpenAI-compatible 兼容客户端与多策略去重鲁棒性，同步刷新 `2026-11-23` 看板与盘后日报可视化素材。
+
 ## v0.3.0 (2026-11-22)
 
 - `lifecycle_5y_full_wm` 升级到 v2.2.0：补齐 C（第二次已确认高点回踩，一个周期高于B）、F（D后第二个更深低点及反弹，一个已确认Lower High）、G（D后第三个更深低点及反弹，两个已确认Lower High）三个阶段，完成 A/B/C/D/E/F/G/H 全阶段扫描，A股和美股均适用；`STAGES` 契约、日报和前端筛选一并更新

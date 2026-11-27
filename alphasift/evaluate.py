@@ -86,6 +86,15 @@ def evaluate_saved_run(
         with_price_path = config.evaluation_price_path_enabled
     if price_path_lookback_days is None:
         price_path_lookback_days = config.evaluation_price_path_lookback_days
+    cost_bps_val = _safe_finite_float(cost_bps)
+    if cost_bps_val is None:
+        cost_bps_val = _safe_finite_float(config.evaluation_cost_bps) or 0.0
+    follow_through_val = _safe_finite_float(follow_through_pct)
+    if follow_through_val is None:
+        follow_through_val = _safe_finite_float(config.evaluation_follow_through_pct) or 3.0
+    failed_breakout_val = _safe_finite_float(failed_breakout_pct)
+    if failed_breakout_val is None:
+        failed_breakout_val = _safe_finite_float(config.evaluation_failed_breakout_pct) or -3.0
     if horizon_days is not None:
         horizon_days = max(int(horizon_days), 1)
         with_price_path = True
@@ -146,11 +155,12 @@ def evaluate_saved_run(
     for pick in run.picks:
         code = _normalize_code(pick.code)
         current_price = by_code.get(code)
+        entry_price = _safe_positive_float(pick.price)
         path_metrics = _price_path_metrics(
             effective_price_paths.get(code),
             entry_price=pick.price,
             created_at=run.created_at,
-            cost_bps=float(cost_bps),
+            cost_bps=cost_bps_val,
             market=run.market,
             horizon_days=horizon_days,
             entry_mode=entry_mode,
@@ -174,22 +184,25 @@ def evaluate_saved_run(
         excess_return_pct = None
         pick_benchmark_pct = None
         if horizon_days is not None:
-            if entry_mode == "close" and pick.price <= 0:
+            if entry_mode == "close" and entry_price is None:
                 status = "bad_entry_price"
             elif path_status == "ok":
-                return_pct = path_metrics["path_end_return_pct"]
-                returns.append(float(return_pct))
-                if benchmark_bars is not None:
-                    pick_benchmark_pct, error = _benchmark_open_return(
-                        benchmark_bars, entry_date, exit_date.normalize(), benchmark_label
-                    )
-                    if error and error not in benchmark_errors:
-                        benchmark_errors.append(error)
-                else:
-                    pick_benchmark_pct = _benchmark_return_through(benchmark_curve, exit_date)
-                if pick_benchmark_pct is not None:
-                    excess_return_pct = _safe_round(float(return_pct) - pick_benchmark_pct)
-                    excess_returns.append(float(excess_return_pct))
+                ret_val = _safe_finite_float(path_metrics["path_end_return_pct"])
+                if ret_val is not None:
+                    return_pct = ret_val
+                    returns.append(ret_val)
+                    if benchmark_bars is not None:
+                        pick_benchmark_pct, error = _benchmark_open_return(
+                            benchmark_bars, entry_date, exit_date.normalize(), benchmark_label
+                        )
+                        if error and error not in benchmark_errors:
+                            benchmark_errors.append(error)
+                    else:
+                        pick_benchmark_pct = _benchmark_return_through(benchmark_curve, exit_date)
+                    if pick_benchmark_pct is not None:
+                        excess_return_pct = _safe_round(ret_val - pick_benchmark_pct)
+                        if excess_return_pct is not None:
+                            excess_returns.append(excess_return_pct)
             elif path_status == "pending":
                 status = "pending"
                 pending_count += 1
@@ -202,26 +215,31 @@ def evaluate_saved_run(
         elif current_price is None:
             status = "missing"
             missing_codes.append(pick.code)
-        elif pick.price <= 0:
+        elif entry_price is None:
             status = "bad_entry_price"
         else:
-            return_pct = (current_price / pick.price - 1.0) * 100
-            return_pct -= float(cost_bps) / 100.0
-            returns.append(return_pct)
+            raw_ret = _compute_snapshot_return_pct(current_price, entry_price, cost_bps_val)
+            if raw_ret is not None:
+                return_pct = raw_ret
+                returns.append(raw_ret)
+            else:
+                status = "bad_entry_price"
         shape_status, shape_tags = _classify_shape_status(
             pick,
             return_pct,
-            follow_through_pct=float(follow_through_pct),
-            failed_breakout_pct=float(failed_breakout_pct),
+            follow_through_pct=follow_through_val,
+            failed_breakout_pct=failed_breakout_val,
         )
+        safe_raw_entry = _safe_finite_float(pick.price)
+        safe_final_score = _safe_finite_float(pick.final_score)
         evaluations.append(PickEvaluation(
             code=pick.code,
             name=pick.name,
             rank=pick.rank,
-            entry_price=pick.price,
+            entry_price=0.0 if safe_raw_entry is None else safe_raw_entry,
             current_price=current_price,
-            return_pct=None if return_pct is None else round(return_pct, 4),
-            final_score=pick.final_score,
+            return_pct=_safe_round(return_pct),
+            final_score=0.0 if safe_final_score is None else safe_final_score,
             status=status,
             llm_sector=pick.llm_sector or pick.industry,
             llm_theme=pick.llm_theme,
@@ -300,6 +318,13 @@ def evaluate_result_against_snapshot(
 ) -> EvaluationResult:
     """Convenience helper for tests and custom integrations."""
     by_code = _snapshot_by_code(snapshot)
+    cost_bps_val = _safe_finite_float(cost_bps) or 0.0
+    follow_through_val = _safe_finite_float(follow_through_pct)
+    if follow_through_val is None:
+        follow_through_val = 3.0
+    failed_breakout_val = _safe_finite_float(failed_breakout_pct)
+    if failed_breakout_val is None:
+        failed_breakout_val = -3.0
     picks = []
     returns = []
     missing = []
@@ -307,13 +332,17 @@ def evaluate_result_against_snapshot(
     for pick in run.picks:
         code = _normalize_code(pick.code)
         current_price = by_code.get(code)
+        entry_price = _safe_positive_float(pick.price)
         return_pct = None
         status = "missing"
-        if current_price is not None and pick.price > 0:
-            return_pct = (current_price / pick.price - 1.0) * 100
-            return_pct -= float(cost_bps) / 100.0
-            returns.append(return_pct)
-            status = "ok"
+        if current_price is not None and entry_price is not None:
+            raw_ret = _compute_snapshot_return_pct(current_price, entry_price, cost_bps_val)
+            if raw_ret is not None:
+                return_pct = raw_ret
+                returns.append(raw_ret)
+                status = "ok"
+            else:
+                status = "bad_entry_price"
         elif current_price is not None:
             status = "bad_entry_price"
         else:
@@ -321,24 +350,26 @@ def evaluate_result_against_snapshot(
         shape_status, shape_tags = _classify_shape_status(
             pick,
             return_pct,
-            follow_through_pct=follow_through_pct,
-            failed_breakout_pct=failed_breakout_pct,
+            follow_through_pct=follow_through_val,
+            failed_breakout_pct=failed_breakout_val,
         )
         path_metrics = _price_path_metrics(
             effective_price_paths.get(code),
             entry_price=pick.price,
             created_at=run.created_at,
-            cost_bps=float(cost_bps),
+            cost_bps=cost_bps_val,
             market=run.market,
         )
+        safe_raw_entry = _safe_finite_float(pick.price)
+        safe_final_score = _safe_finite_float(pick.final_score)
         picks.append(PickEvaluation(
             code=pick.code,
             name=pick.name,
             rank=pick.rank,
-            entry_price=pick.price,
+            entry_price=0.0 if safe_raw_entry is None else safe_raw_entry,
             current_price=current_price,
-            return_pct=None if return_pct is None else round(return_pct, 4),
-            final_score=pick.final_score,
+            return_pct=_safe_round(return_pct),
+            final_score=0.0 if safe_final_score is None else safe_final_score,
             status=status,
             llm_sector=pick.llm_sector or pick.industry,
             llm_theme=pick.llm_theme,
@@ -734,11 +765,11 @@ def _snapshot_by_code(snapshot: pd.DataFrame) -> dict[str, float]:
         return {}
     result = {}
     for _, row in snapshot.iterrows():
-        price = pd.to_numeric(row.get("price"), errors="coerce")
-        if pd.notna(price) and isfinite(float(price)):
+        price = _safe_positive_float(row.get("price"))
+        if price is not None:
             code = _normalize_code(row.get("code", ""))
             if code:
-                result[code] = float(price)
+                result[code] = price
     return result
 
 
@@ -859,8 +890,10 @@ def _price_path_metrics(
             pick_code=pick_code,
             pick_name=pick_name,
         )
-    if entry_price <= 0:
+    valid_entry = _safe_positive_float(entry_price)
+    if valid_entry is None:
         return {**empty, "path_status": "bad_entry_price"}
+    entry_price = valid_entry
     as_of = now or _history_fetched_at(path)
     df = _normalize_price_path(path)
     if df.empty:
@@ -892,16 +925,29 @@ def _price_path_metrics(
     return _summarize_price_path(df, entry_price, cost_bps)
 
 
+def _positive_series(series: pd.Series) -> pd.Series:
+    numeric = (
+        pd.to_numeric(series, errors="coerce")
+        .replace([float("inf"), float("-inf")], float("nan"))
+        .dropna()
+    )
+    return numeric[numeric > 0]
+
+
 def _summarize_price_path(df: pd.DataFrame, entry_price: float, cost_bps: float) -> dict[str, object]:
-    close = pd.to_numeric(df["close"], errors="coerce").dropna()
-    high = pd.to_numeric(df["high"], errors="coerce").dropna()
-    low = pd.to_numeric(df["low"], errors="coerce").dropna()
+    valid_entry = _safe_positive_float(entry_price)
+    if valid_entry is None:
+        return {**_EMPTY_PATH_METRICS, "path_status": "bad_entry_price"}
+    cost_bps_val = _safe_finite_float(cost_bps) or 0.0
+    close = _positive_series(df["close"])
+    high = _positive_series(df["high"])
+    low = _positive_series(df["low"])
     if close.empty:
         return {**_EMPTY_PATH_METRICS, "path_status": "no_close"}
 
-    end_return = (float(close.iloc[-1]) / entry_price - 1.0) * 100 - cost_bps / 100.0
-    max_runup = (float(high.max()) / entry_price - 1.0) * 100 if not high.empty else None
-    max_drawdown = (float(low.min()) / entry_price - 1.0) * 100 if not low.empty else None
+    end_return = (float(close.iloc[-1]) / valid_entry - 1.0) * 100 - cost_bps_val / 100.0
+    max_runup = (float(high.max()) / valid_entry - 1.0) * 100 if not high.empty else None
+    max_drawdown = (float(low.min()) / valid_entry - 1.0) * 100 if not low.empty else None
     return {
         "path_status": "ok",
         "path_end_date": df["date"].iloc[-1] if "date" in df.columns else None,
@@ -1308,29 +1354,33 @@ def _classify_shape_status(
 ) -> tuple[str, list[str]]:
     tags: list[str] = []
     status = ""
+    ret = _safe_finite_float(return_pct)
+    breakout = _safe_finite_float(pick.breakout_20d_pct)
+    pullback = _safe_finite_float(pick.pullback_to_ma20_pct)
+    consolidation = _safe_finite_float(pick.consolidation_days_20d)
 
-    if pick.breakout_20d_pct is not None and pick.breakout_20d_pct >= -1.5:
+    if breakout is not None and breakout >= -1.5:
         tags.append("breakout_setup")
-        if return_pct is None:
+        if ret is None:
             status = "breakout_pending"
-        elif return_pct >= follow_through_pct:
+        elif ret >= follow_through_pct:
             status = "breakout_follow_through"
-        elif return_pct <= failed_breakout_pct:
+        elif ret <= failed_breakout_pct:
             status = "failed_breakout"
         else:
             status = "breakout_unconfirmed"
 
-    if pick.pullback_to_ma20_pct is not None and -3.0 <= pick.pullback_to_ma20_pct <= 6.0:
+    if pullback is not None and -3.0 <= pullback <= 6.0:
         tags.append("ma20_pullback_setup")
         if not status:
-            if return_pct is None:
+            if ret is None:
                 status = "pullback_pending"
-            elif return_pct > 0:
+            elif ret > 0:
                 status = "pullback_rebound"
             else:
                 status = "pullback_failed"
 
-    if pick.consolidation_days_20d is not None and pick.consolidation_days_20d >= 8:
+    if consolidation is not None and consolidation >= 8:
         tags.append("consolidation_setup")
 
     return status, tags
@@ -1338,40 +1388,40 @@ def _classify_shape_status(
 
 def _aggregate_evaluations(evaluations: list[EvaluationResult]) -> dict[str, object]:
     returns = [
-        float(pick.return_pct)
+        value
         for evaluation in evaluations
         for pick in evaluation.picks
-        if pick.return_pct is not None
+        if (value := _safe_finite_float(pick.return_pct)) is not None
     ]
     drawdowns = [
-        float(pick.max_drawdown_pct)
+        value
         for evaluation in evaluations
         for pick in evaluation.picks
-        if pick.max_drawdown_pct is not None
+        if (value := _safe_finite_float(pick.max_drawdown_pct)) is not None
     ]
     runups = [
-        float(pick.max_runup_pct)
+        value
         for evaluation in evaluations
         for pick in evaluation.picks
-        if pick.max_runup_pct is not None
+        if (value := _safe_finite_float(pick.max_runup_pct)) is not None
     ]
     excess = [
-        float(pick.excess_return_pct)
+        value
         for evaluation in evaluations
         for pick in evaluation.picks
-        if pick.excess_return_pct is not None
+        if (value := _safe_finite_float(pick.excess_return_pct)) is not None
     ]
     # Benchmark and excess cover only picks with benchmark data for their own
     # window. The matched return average is over the same picks, so
     # matched_return - bench == excess even when coverage is partial; the
     # all-pick average_return_pct can differ from it.
     matched = [
-        (float(pick.return_pct), float(pick.benchmark_return_pct))
+        (ret, bench)
         for evaluation in evaluations
         for pick in evaluation.picks
-        if pick.excess_return_pct is not None
-        and pick.benchmark_return_pct is not None
-        and pick.return_pct is not None
+        if _safe_finite_float(pick.excess_return_pct) is not None
+        and (bench := _safe_finite_float(pick.benchmark_return_pct)) is not None
+        and (ret := _safe_finite_float(pick.return_pct)) is not None
     ]
     benchmark_returns = [bench for _, bench in matched]
     benchmarks = sorted({evaluation.benchmark for evaluation in evaluations if evaluation.benchmark})
@@ -1429,24 +1479,24 @@ def _aggregate_portfolios(evaluations: list[EvaluationResult]) -> dict[str, obje
     evaluated_runs = 0
     for evaluation in evaluations:
         pick_returns = [
-            float(pick.return_pct)
+            value
             for pick in evaluation.picks
-            if pick.return_pct is not None
+            if (value := _safe_finite_float(pick.return_pct)) is not None
         ]
         if pick_returns:
             evaluated_runs += 1
             returns.append(sum(pick_returns) / len(pick_returns))
         pick_drawdowns = [
-            float(pick.max_drawdown_pct)
+            value
             for pick in evaluation.picks
-            if pick.max_drawdown_pct is not None
+            if (value := _safe_finite_float(pick.max_drawdown_pct)) is not None
         ]
         if pick_drawdowns:
             drawdowns.append(sum(pick_drawdowns) / len(pick_drawdowns))
         pick_runups = [
-            float(pick.max_runup_pct)
+            value
             for pick in evaluation.picks
-            if pick.max_runup_pct is not None
+            if (value := _safe_finite_float(pick.max_runup_pct)) is not None
         ]
         if pick_runups:
             runups.append(sum(pick_runups) / len(pick_runups))
@@ -2122,6 +2172,18 @@ def _safe_finite_float(value: object) -> float | None:
     return parsed if isfinite(parsed) else None
 
 
+def _safe_positive_float(value: object) -> float | None:
+    parsed = _safe_finite_float(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _compute_snapshot_return_pct(
+    current_price: float, entry_price: float, cost_bps: float
+) -> float | None:
+    raw = (current_price / entry_price - 1.0) * 100 - cost_bps / 100.0
+    return raw if isfinite(raw) else None
+
+
 def _safe_positive_int(value: object) -> int:
     if isinstance(value, bool):
         return 0
@@ -2296,8 +2358,8 @@ def _aggregate_by_pick_label(
     for evaluation in evaluations:
         for pick in evaluation.picks:
             value = str(getattr(pick, field, "") or "unknown").strip() or "unknown"
-            if pick.return_pct is not None:
-                groups.setdefault(value, []).append(float(pick.return_pct))
+            if (ret := _safe_finite_float(pick.return_pct)) is not None:
+                groups.setdefault(value, []).append(ret)
             else:
                 groups.setdefault(value, [])
     return {
@@ -2316,8 +2378,8 @@ def _aggregate_by_pick_multi_label(
             labels = _normalize_labels(getattr(pick, field, []) or ["none"])
             for label in labels:
                 key = str(label or "none").strip() or "none"
-                if pick.return_pct is not None:
-                    groups.setdefault(key, []).append(float(pick.return_pct))
+                if (ret := _safe_finite_float(pick.return_pct)) is not None:
+                    groups.setdefault(key, []).append(ret)
                 else:
                     groups.setdefault(key, [])
     return {
@@ -2339,8 +2401,8 @@ def _aggregate_by_holding_period(evaluations: list[EvaluationResult]) -> dict[st
     for evaluation in evaluations:
         bucket = _holding_period_bucket(evaluation.elapsed_days)
         for pick in evaluation.picks:
-            if pick.return_pct is not None:
-                groups.setdefault(bucket, []).append(float(pick.return_pct))
+            if (ret := _safe_finite_float(pick.return_pct)) is not None:
+                groups.setdefault(bucket, []).append(ret)
             else:
                 groups.setdefault(bucket, [])
     return {
@@ -2350,12 +2412,17 @@ def _aggregate_by_holding_period(evaluations: list[EvaluationResult]) -> dict[st
 
 
 def _return_stats(values: list[float]) -> dict[str, object]:
+    clean = [
+        value
+        for item in values
+        if (value := _safe_finite_float(item)) is not None
+    ]
     return {
-        "pick_count": len(values),
-        "average_return_pct": _safe_round(sum(values) / len(values)) if values else None,
-        "median_return_pct": _safe_round(float(pd.Series(values).median())) if values else None,
-        "win_rate": _safe_round(sum(1 for value in values if value > 0) / len(values) * 100)
-        if values else None,
+        "pick_count": len(clean),
+        "average_return_pct": _safe_round(sum(clean) / len(clean)) if clean else None,
+        "median_return_pct": _safe_round(float(pd.Series(clean).median())) if clean else None,
+        "win_rate": _safe_round(sum(1 for value in clean if value > 0) / len(clean) * 100)
+        if clean else None,
     }
 
 
@@ -2372,6 +2439,11 @@ def _holding_period_bucket(days: int | None) -> str:
 
 
 def _evaluation_brief(evaluation: EvaluationResult) -> dict[str, object]:
+    drawdowns = [
+        value
+        for pick in evaluation.picks
+        if (value := _safe_finite_float(pick.max_drawdown_pct)) is not None
+    ]
     return {
         "run_id": evaluation.run_id,
         "strategy": evaluation.strategy,
@@ -2383,10 +2455,7 @@ def _evaluation_brief(evaluation: EvaluationResult) -> dict[str, object]:
         "win_rate": evaluation.win_rate,
         "portfolio_return_pct": evaluation.average_return_pct,
         "path_pick_count": sum(1 for pick in evaluation.picks if pick.path_status == "ok"),
-        "average_max_drawdown_pct": _safe_round(
-            sum(float(pick.max_drawdown_pct) for pick in evaluation.picks if pick.max_drawdown_pct is not None)
-            / sum(1 for pick in evaluation.picks if pick.max_drawdown_pct is not None)
-        ) if any(pick.max_drawdown_pct is not None for pick in evaluation.picks) else None,
+        "average_max_drawdown_pct": _safe_round(sum(drawdowns) / len(drawdowns)) if drawdowns else None,
         "missing_count": len(evaluation.missing_codes),
         "horizon_days": evaluation.horizon_days,
         "entry_mode": evaluation.entry_mode,

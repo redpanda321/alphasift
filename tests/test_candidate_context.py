@@ -8,7 +8,9 @@ from alphasift.candidate_context import (
     classify_announcement_categories,
     classify_negative_events,
     collect_candidate_context,
+    fetch_stock_fund_flow_summary,
     fetch_stock_quote_summary,
+    reset_provider_cooldowns,
 )
 
 
@@ -374,3 +376,193 @@ def test_fetch_cn_market_news_dedupes_filters_noise_and_falls_back(monkeypatch, 
     monkeypatch.setattr("alphasift.market_news.requests.post", broken_post)
     monkeypatch.setenv("TAVILY_API_KEYS", "tvly-super-secret-xyz")
     assert search_stock_news_via_web("test query") == []
+
+
+def test_market_news_handles_malformed_containers_timestamps_and_cache(monkeypatch, tmp_path):
+    import json
+    from datetime import datetime, timezone
+    from alphasift.market_news import _format_pub_time, _read_news_cache, fetch_cn_market_news
+
+    assert _format_pub_time("123") == ""
+    assert _format_pub_time("²") == ""
+    assert _format_pub_time("2026-11-27T08:30:00Z") == "11-27 08:30"
+    epoch_out = _format_pub_time("1764201600000")
+    assert "-" in epoch_out and ":" in epoch_out
+
+    class _Resp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return self._body
+
+    def fake_get(url: str, **kwargs):
+        if "eastmoney.com" in url:
+            return _Resp({"data": ["unexpected-list"]})
+        if "10jqka.com.cn" in url:
+            return _Resp({"data": "unexpected-str"})
+        return _Resp({"result": {"data": ["bad-feed-container"]}})
+
+    monkeypatch.setattr("alphasift.market_news.requests.get", fake_get)
+    items, sources, errs = fetch_cn_market_news(
+        limit=3,
+        trade_date="../escape",
+        cache_dir=tmp_path,
+        tavily_keys=[],
+        serpapi_keys=[],
+    )
+    assert items == []
+    assert sources == []
+    assert errs == []
+
+    # Cache validation with timezone-aware timestamp, bool TTL rejection, and corrupted payloads.
+    cache_file = tmp_path / "market_news_cn_test.json"
+    cache_file.write_text(
+        json.dumps({
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "items": [{"title": "Valid headline", "source": "Test"}],
+            "sources": ["Test"],
+        }),
+        encoding="utf-8",
+    )
+    assert _read_news_cache(cache_file, ttl_hours=True) is None
+    loaded = _read_news_cache(cache_file, ttl_hours=2)
+    assert loaded is not None and loaded["items"][0]["title"] == "Valid headline"
+
+    bad_cache = tmp_path / "market_news_cn_bad.json"
+    bad_cache.write_text("[]", encoding="utf-8")
+    assert _read_news_cache(bad_cache, ttl_hours=2) is None
+
+
+def test_fetch_stock_fund_flow_summary_supports_akshare_1_20_rename(monkeypatch):
+    seen_calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeAkNew:
+        @staticmethod
+        def stock_fund_flow_individual_hist_em(symbol):
+            seen_calls.append(("new", {"symbol": symbol}))
+            return pd.DataFrame([
+                {"日期": "2026-11-24", "主力净流入-净额": "2.1亿", "主力净流入-净占比": "6.2%"},
+            ])
+
+    monkeypatch.setitem(__import__("sys").modules, "akshare", FakeAkNew)
+    summary_new = fetch_stock_fund_flow_summary("600519")
+    assert seen_calls == [("new", {"symbol": "600519"})]
+    assert "主力净流入-净额=2.1亿" in summary_new
+
+    class FakeAkLegacy:
+        @staticmethod
+        def stock_individual_fund_flow(stock, market):
+            seen_calls.append(("legacy", {"stock": stock, "market": market}))
+            return pd.DataFrame([
+                {"日期": "2026-11-24", "主力净流入-净额": "-800万"},
+            ])
+
+    monkeypatch.setitem(__import__("sys").modules, "akshare", FakeAkLegacy)
+    summary_legacy = fetch_stock_fund_flow_summary("000001")
+    assert seen_calls[-1] == ("legacy", {"stock": "000001", "market": "sz"})
+    assert "主力净流入-净额=-800万" in summary_legacy
+
+
+def test_fund_flow_rate_limit_trips_circuit_breaker_and_collapses_errors(monkeypatch):
+    reset_provider_cooldowns()
+    calls: list[str] = []
+
+    def fake_news(code, *, limit=3):
+        return f"{code} 新闻正常"
+
+    def fake_fund_flow(code):
+        calls.append(code)
+        raise ConnectionError(
+            "东方财富 push2 行情服务器断开了连接，通常是短时间内请求过多，当前 IP 被临时限流。"
+            "首次限流一般约 5 分钟后恢复，反复触发后可能需要 40 分钟以上；等待期间不要重复调用东方财富的行情接口。"
+        )
+
+    monkeypatch.setattr(candidate_context, "fetch_stock_news_summary", fake_news)
+    monkeypatch.setattr(candidate_context, "fetch_stock_fund_flow_summary", fake_fund_flow)
+    candidates = pd.DataFrame([
+        {"code": "600699", "name": "均胜电子"},
+        {"code": "688308", "name": "欧科亿"},
+        {"code": "002414", "name": "高德红外"},
+        {"code": "000021", "name": "深科技"},
+    ])
+    try:
+        rows, errors = collect_candidate_context(candidates, max_rows=4, providers=["news", "fund_flow"])
+        assert len(calls) == 1
+        assert len(rows) == 4
+        assert len(errors) == 2
+        assert len(errors[0]) <= 160
+        assert "fund_flow:" in errors[0]
+        assert errors[1] == "fund_flow: provider cooldown active (skipped 3 candidates)"
+
+        # Subsequent batch in the same process should keep fund_flow skipped cleanly (0 calls)
+        rows2, errors2 = collect_candidate_context(candidates.head(2), max_rows=2, providers=["news", "fund_flow"])
+        assert len(calls) == 1
+        assert len(rows2) == 2
+        assert errors2 == ["fund_flow: provider cooldown active (skipped 2 candidates)"]
+
+        # Resetting cooldown restores normal fund_flow calls immediately
+        reset_provider_cooldowns()
+        monkeypatch.setattr(candidate_context, "fetch_stock_fund_flow_summary", lambda code: f"{code} 主力净流入=500万")
+        rows3, errors3 = collect_candidate_context(candidates.head(1), max_rows=1, providers=["news", "fund_flow"])
+        assert errors3 == []
+        assert "500万" in str(rows3[0]["fund_flow"])
+    finally:
+        reset_provider_cooldowns()
+
+
+def test_fund_flow_non_rate_limit_error_does_not_trip_cooldown(monkeypatch):
+    reset_provider_cooldowns()
+
+    def fake_fund_flow(code):
+        if code == "600001":
+            raise ValueError("bad symbol payload")
+        return f"{code} 主力净流入=100万"
+
+    monkeypatch.setattr(candidate_context, "fetch_stock_fund_flow_summary", fake_fund_flow)
+    candidates = pd.DataFrame([
+        {"code": "600001", "name": "A"},
+        {"code": "600002", "name": "B"},
+    ])
+    try:
+        rows, errors = collect_candidate_context(candidates, max_rows=2, providers=["fund_flow"])
+        assert errors == ["600001 fund_flow: bad symbol payload"]
+        assert [row["code"] for row in rows] == ["600002"]
+        assert "100万" in str(rows[0]["fund_flow"])
+    finally:
+        reset_provider_cooldowns()
+
+
+def test_candidate_context_scrubs_nonfinite_and_bool_cooldown_and_weights():
+    import math
+
+    reset_provider_cooldowns()
+    try:
+        candidate_context._trip_provider_cooldown("fund_flow", cooldown_sec=float("nan"), now=100.0)
+        until_nan_cd = candidate_context._PROVIDER_COOLDOWN_UNTIL["fund_flow"]
+        assert math.isfinite(until_nan_cd)
+        assert until_nan_cd == 100.0 + candidate_context._PROVIDER_COOLDOWN_SEC
+
+        reset_provider_cooldowns()
+        candidate_context._trip_provider_cooldown("fund_flow", cooldown_sec=True, now=float("inf"))  # type: ignore[arg-type]
+        until_bool_inf = candidate_context._PROVIDER_COOLDOWN_UNTIL["fund_flow"]
+        assert math.isfinite(until_bool_inf)
+        assert until_bool_inf > 0.0
+
+        weights = candidate_context._normalized_source_weights({
+            "news": float("nan"),
+            "announcement": float("inf"),
+            "fund_flow": True,  # type: ignore[dict-item]
+            "quote": -2.0,
+        })
+        assert weights["news"] == candidate_context._SOURCE_WEIGHTS["news"]
+        assert weights["announcement"] == candidate_context._SOURCE_WEIGHTS["announcement"]
+        assert weights["fund_flow"] == candidate_context._SOURCE_WEIGHTS["fund_flow"]
+        assert weights["quote"] == 0.0
+    finally:
+        reset_provider_cooldowns()

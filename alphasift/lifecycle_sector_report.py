@@ -3,6 +3,7 @@ from collections import Counter, defaultdict
 import csv
 import html
 import json
+from alphasift.jsonutil import atomic_write_strict_json, dumps_strict_json
 from pathlib import Path
 
 from alphasift.lifecycle_contract import STAGES
@@ -115,8 +116,8 @@ def build(base=Path("data")):
     prefix.with_suffix(".html").write_text(document.replace('DATA_DATES', html.escape(date_label)), encoding="utf-8")
     payload = dict(coverage=coverage, sectors=summary, selected_rows=len(ranked),
                    all_rows=len(all_candidates), ranked=ranked)
-    prefix.with_suffix(".json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"coverage":coverage,"selected_rows":len(ranked),"all_rows":len(all_candidates),"sectors":summary},ensure_ascii=False))
+    atomic_write_strict_json(prefix.with_suffix(".json"), payload)
+    print(dumps_strict_json({"coverage":coverage,"selected_rows":len(ranked),"all_rows":len(all_candidates),"sectors":summary}, indent=None))
 
 
 if __name__ == "__main__":

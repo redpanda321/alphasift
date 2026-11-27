@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timezone
-import json
 from pathlib import Path
 import re
 from typing import Any
@@ -25,6 +24,7 @@ from alphasift.daily_brief import (
     generate_ai_daily_brief,
     resolve_strategy_display_names,
 )
+from alphasift.jsonutil import atomic_write_strict_json, atomic_write_text, finite_float, safe_int
 from alphasift.market_news import fetch_cn_market_news
 from alphasift.markets import get_market, latest_settled_close
 from alphasift.models import ScreenResult
@@ -41,6 +41,10 @@ _ANNOUNCEMENT_TIMEOUT_SEC = 25.0
 _MARKET_NEWS_TIMEOUT_SEC = 8.0
 _STOCK_NEWS_TIMEOUT_SEC = 15.0
 DEFAULT_DASHBOARD_URL = "https://alphasift.zhulinsen.tech/"
+
+
+def _non_neg_int(value: object, default: int = 0) -> int:
+    return max(safe_int(value, default=default), 0)
 _FACTOR_CN_LABELS = {
     "value": "估值",
     "quality": "质量",
@@ -137,7 +141,7 @@ def screen_announcement_risks(
     """Best-effort announcement risk check over shortlisted CN candidates."""
     deduped: list[dict[str, str]] = []
     seen: set[str] = set()
-    limit = max(0, int(max_codes))
+    limit = _non_neg_int(max_codes, default=20)
     for item in candidates:
         code = normalize_code(item.get("code"), allow_ticker=False)
         if not code or code in seen:
@@ -197,7 +201,7 @@ def screen_announcement_risks(
             "announcement_date": ann_date,
             "days_ago": days_ago,
             "recency": recency,
-            "consensus_count": int(prio.get(code, 0)),
+            "consensus_count": _non_neg_int(prio.get(code), default=0),
         }
         by_code[code] = info
         if neg_flags:
@@ -206,8 +210,8 @@ def screen_announcement_risks(
     flagged_items.sort(
         key=lambda x: (
             _RECENCY_RANK.get(str(x.get("recency") or "unknown"), 2),
-            -int(x.get("consensus_count") or 0),
-            int(x["days_ago"]) if x.get("days_ago") is not None else 999,
+            -_non_neg_int(x.get("consensus_count"), default=0),
+            safe_int(x.get("days_ago"), default=999),
             str(x.get("code") or ""),
         )
     )
@@ -294,19 +298,19 @@ def _derive_pick_reason(p: Any) -> str:
     fscores = getattr(p, "factor_scores", None)
     if isinstance(fscores, dict) and fscores:
         ranked_f = sorted(
-            ((k, float(v)) for k, v in fscores.items() if v is not None),
+            ((k, val) for k, v in fscores.items() if (val := finite_float(v)) is not None),
             key=lambda kv: -kv[1],
         )
         labels = [_FACTOR_CN_LABELS.get(k, k) for k, _ in ranked_f[:2]]
         if labels:
             return f"{'+'.join(labels)}因子靠前"
     bits: list[str] = []
-    pe = getattr(p, "pe_ratio", None)
-    pb = getattr(p, "pb_ratio", None)
-    if pe is not None and float(pe) > 0:
-        bits.append(f"PE {float(pe):.1f}")
-    if pb is not None and float(pb) > 0:
-        bits.append(f"PB {float(pb):.2f}")
+    pe = finite_float(getattr(p, "pe_ratio", None))
+    pb = finite_float(getattr(p, "pb_ratio", None))
+    if pe is not None and pe > 0:
+        bits.append(f"PE {pe:.1f}")
+    if pb is not None and pb > 0:
+        bits.append(f"PB {pb:.2f}")
     return " · ".join(bits)
 
 
@@ -319,20 +323,21 @@ def _format_strategy_entry(
     names_map = display_names or resolve_strategy_display_names()
     picks = []
     for p in run.picks[:5]:
-        raw_price = getattr(p, "price", None)
-        price_val = round(float(raw_price), 2) if raw_price is not None and float(raw_price) > 0 else None
-        raw_pe = getattr(p, "pe_ratio", None)
-        pe_val = round(float(raw_pe), 1) if raw_pe is not None else None
-        raw_pb = getattr(p, "pb_ratio", None)
-        pb_val = round(float(raw_pb), 2) if raw_pb is not None else None
-        raw_mv = getattr(p, "total_mv", None)
+        raw_price = finite_float(getattr(p, "price", None))
+        price_val = round(raw_price, 2) if raw_price is not None and raw_price > 0 else None
+        raw_pe = finite_float(getattr(p, "pe_ratio", None))
+        pe_val = round(raw_pe, 1) if raw_pe is not None else None
+        raw_pb = finite_float(getattr(p, "pb_ratio", None))
+        pb_val = round(raw_pb, 2) if raw_pb is not None else None
+        raw_mv = finite_float(getattr(p, "total_mv", None))
         mv_yi = (
-            round(float(raw_mv) / 1e8, 1)
-            if raw_mv is not None and float(raw_mv) >= 1e6
+            round(raw_mv / 1e8, 1)
+            if raw_mv is not None and raw_mv >= 1e6
             else None
         )
+        raw_chg = finite_float(getattr(p, "change_pct", None))
         picks.append({
-            "rank": int(p.rank),
+            "rank": safe_int(p.rank) or 0,
             "code": str(p.code),
             "name": str(p.name),
             "industry": str(p.industry),
@@ -340,9 +345,9 @@ def _format_strategy_entry(
             "pe_ratio": pe_val,
             "pb_ratio": pb_val,
             "market_cap_yi": mv_yi,
-            "final_score": round(float(p.final_score), 2),
-            "screen_score": round(float(p.screen_score), 2),
-            "change_pct": round(float(p.change_pct), 2) if p.change_pct is not None else None,
+            "final_score": round(finite_float(p.final_score) or 0.0, 2),
+            "screen_score": round(finite_float(p.screen_score) or 0.0, 2),
+            "change_pct": round(raw_chg, 2) if raw_chg is not None else None,
             "risk_level": str(p.risk_level),
             "risk_flags": list(p.risk_flags),
             "ranking_reason": _derive_pick_reason(p),
@@ -391,7 +396,7 @@ def _build_ai_highlights(strategy_runs: Sequence[ScreenResult]) -> list[dict[str
             {
                 "code": str(p.code),
                 "name": str(p.name),
-                "final_score": round(float(p.final_score), 2),
+                "final_score": round(finite_float(p.final_score) or 0.0, 2),
                 "ranking_reason": str(getattr(p, "ranking_reason", "") or "")[:120],
             }
             for p in ai_run.picks
@@ -435,9 +440,9 @@ def _extract_strategy_track_stats(
             continue
         track_name = str(row.get("track") or "rules")
         w5 = ((row.get("windows") or {}).get("5") or {}) if isinstance(row.get("windows"), dict) else {}
-        matched = int(w5.get("matched") or 0)
-        ex = w5.get("average_excess_return_pct")
-        beat = w5.get("beat_rate")
+        matched = safe_int(w5.get("matched")) or 0
+        ex = finite_float(w5.get("average_excess_return_pct"))
+        beat = finite_float(w5.get("beat_rate"))
         if matched <= 0 and ex is None:
             continue
         # Prefer rules baseline row unless only ai track exists for that strategy
@@ -446,8 +451,8 @@ def _extract_strategy_track_stats(
         out[strat] = {
             "track": track_name,
             "t5_matched": matched,
-            "t5_avg_excess_pct": round(float(ex), 2) if ex is not None else None,
-            "t5_beat_rate_pct": round(float(beat) * 100.0, 1) if beat is not None else None,
+            "t5_avg_excess_pct": round(ex, 2) if ex is not None else None,
+            "t5_beat_rate_pct": round(beat * 100.0, 1) if beat is not None else None,
         }
     return out
 
@@ -467,7 +472,7 @@ def _extract_pattern_replay_map(
         iter_items = [x for x in items if isinstance(x, dict)]
     else:
         return {}
-    cost_pct = float(replay_obj.get("cost_bps") or 0.0) / 100.0
+    cost_pct = (finite_float(replay_obj.get("cost_bps")) or 0.0) / 100.0
     out: dict[str, dict[str, Any]] = {}
     for p in iter_items:
         pname = str(p.get("pattern") or "").strip()
@@ -475,25 +480,50 @@ def _extract_pattern_replay_map(
             continue
         h5 = ((p.get("horizons") or {}).get("t5") or {}) if isinstance(p.get("horizons"), dict) else {}
         grad = p.get("graduation") if isinstance(p.get("graduation"), dict) else {}
-        net_val = grad.get("t5_net_excess_mean_pct")
+        net_val = finite_float(grad.get("t5_net_excess_mean_pct"))
         if net_val is None:
-            net_val = h5.get("net_excess_mean_pct")
+            net_val = finite_float(h5.get("net_excess_mean_pct"))
         if net_val is None:
-            gross_val = h5.get("gross_excess_mean_pct")
+            gross_val = finite_float(h5.get("gross_excess_mean_pct"))
             if gross_val is None:
-                gross_val = h5.get("excess_mean_pct")
+                gross_val = finite_float(h5.get("excess_mean_pct"))
             if gross_val is not None:
-                net_val = float(gross_val) - cost_pct
-        win_val = h5.get("excess_win_rate_pct")
+                net_val = gross_val - cost_pct
+        win_val = finite_float(h5.get("excess_win_rate_pct"))
         if win_val is None:
-            win_val = h5.get("win_rate_pct")
-        samples = h5.get("excess_scored")
-        if samples is None:
-            samples = h5.get("scored")
+            win_val = finite_float(h5.get("win_rate_pct"))
+        raw_samples = finite_float(h5.get("excess_scored"))
+        if raw_samples is None:
+            raw_samples = finite_float(h5.get("scored"))
+        samples = int(raw_samples) if raw_samples is not None else None
+        wf = p.get("walk_forward_regime_audit") if isinstance(p.get("walk_forward_regime_audit"), dict) else {}
+        wf_adv = [str(s) for s in (wf.get("h1_adverse_regimes") or []) if str(s).strip()] if wf else []
+        wf_pos = [str(s) for s in (wf.get("h1_positive_regimes") or []) if str(s).strip()] if wf else []
+        raw_ov_cap = finite_float(wf.get("low_overhead_threshold_pct")) if wf else None
+        wf_ov_cap = int(round(raw_ov_cap)) if raw_ov_cap is not None else 15
+        wf_boundary_policy = str(wf.get("boundary_policy") or "").strip() if wf else ""
+        wf_eval_mid_date = str(wf.get("eval_mid_date") or "").strip() if wf else ""
+        wf_joint = wf.get("h2_non_adverse_low_overhead") if isinstance(wf.get("h2_non_adverse_low_overhead"), dict) else {}
+        wf_joint_days = safe_int(wf_joint.get("days")) or 0
+        wf_joint_mean = finite_float(wf_joint.get("daily_mean_pct"))
+        wf_joint_delta = finite_float(wf.get("delta_non_adverse_low_overhead_vs_h2_baseline_pct"))
         out[pname] = {
-            "replay_t5_net_excess_pct": round(float(net_val), 2) if net_val is not None else None,
-            "replay_t5_win_rate_pct": round(float(win_val), 1) if win_val is not None else None,
-            "replay_samples": int(samples) if samples is not None else None,
+            "replay_t5_net_excess_pct": round(net_val, 2) if net_val is not None else None,
+            "replay_t5_win_rate_pct": round(win_val, 1) if win_val is not None else None,
+            "replay_samples": samples,
+            "wf_h1_adverse_regimes": wf_adv,
+            "wf_h1_positive_regimes": wf_pos,
+            "wf_low_overhead_threshold_pct": wf_ov_cap,
+            "wf_boundary_policy": wf_boundary_policy,
+            "wf_boundary_verified": bool(wf and wf_boundary_policy == "purged_by_exit_date"),
+            "wf_eval_mid_date": wf_eval_mid_date,
+            "wf_h1_purged_signals": (safe_int(wf.get("h1_purged_signals")) or 0) if wf else 0,
+            "wf_h1_purged_days": (safe_int(wf.get("h1_purged_days")) or 0) if wf else 0,
+            "wf_non_adverse_low_overhead_pct": (
+                round(wf_joint_mean, 2) if wf_joint_days > 0 and wf_joint_mean is not None else None
+            ),
+            "wf_non_adverse_low_overhead_days": wf_joint_days,
+            "wf_joint_delta_pct": round(wf_joint_delta, 2) if wf_joint_delta is not None else None,
         }
     return out
 
@@ -596,6 +626,7 @@ def build_daily_report(
         else (track_summary.get("track_comparison") if isinstance(track_summary, dict) else None)
     )
 
+    cur_stage = str(getattr(scan.market_regime, "regime_stage", "") or "").strip()
     active_patterns: list[dict[str, Any]] = []
     experimental_patterns: list[dict[str, Any]] = []
     for pat_name in scan.patterns_evaluated:
@@ -606,11 +637,11 @@ def build_daily_report(
         mode = spec.mode if spec is not None else "direct"
         hits = scan.signals_by_pattern.get(pat_name, [])
         rep_stats = replay_map.get(pat_name) or {}
-        net_ex = rep_stats.get("replay_t5_net_excess_pct")
+        net_ex = finite_float(rep_stats.get("replay_t5_net_excess_pct"))
         if status == "active":
             exp_tier = "active"
         elif net_ex is not None:
-            exp_tier = "positive_watch" if float(net_ex) >= 0 else "negative_watch"
+            exp_tier = "positive_watch" if net_ex >= 0 else "negative_watch"
         else:
             exp_tier = "unrated"
         entry: dict[str, Any] = {
@@ -622,10 +653,13 @@ def build_daily_report(
             "expectancy_tier": exp_tier,
             "aligned_strategy": spec.aligned_strategy if spec is not None else None,
             "hit_count": len(hits),
-            "signals": [sig.to_dict() for sig in hits[: max(1, int(max_signals_per_pattern))]],
+            "signals": [sig.to_dict() for sig in hits[: max(1, _non_neg_int(max_signals_per_pattern, default=12))]],
         }
         if rep_stats:
             entry.update(rep_stats)
+            entry["wf_today_adverse"] = bool(
+                cur_stage and cur_stage in (rep_stats.get("wf_h1_adverse_regimes") or [])
+            )
         if status == "active":
             active_patterns.append(entry)
         else:
@@ -647,8 +681,8 @@ def build_daily_report(
             if not norm_c:
                 continue
             code_strats.setdefault(norm_c, set()).add(sname)
-            if pk.get("final_score") is not None:
-                code_scores.setdefault(norm_c, []).append(float(pk["final_score"]))
+            if (fscore := finite_float(pk.get("final_score"))) is not None:
+                code_scores.setdefault(norm_c, []).append(fscore)
             if not code_names.get(norm_c) and pk.get("name"):
                 code_names[norm_c] = str(pk["name"]).strip()
     priority_counts = {c: len(s) for c, s in code_strats.items()}
@@ -856,7 +890,10 @@ def build_daily_report(
     if ai_brief_mode in {"auto", "on"} and fb_reason.startswith("llm_error:"):
         report["degradation"].append(f"AI brief fallback: {fb_reason}")
 
-    card = render_daily_im_card(report, max_chars=min(int(max_card_chars), IM_CARD_MAX_CHARS))
+    card = render_daily_im_card(
+        report,
+        max_chars=min(_non_neg_int(max_card_chars, default=IM_CARD_MAX_CHARS), IM_CARD_MAX_CHARS),
+    )
     report["im_card_markdown"] = card
     report["im_card_chars"] = len(card)
     return report
@@ -864,7 +901,7 @@ def build_daily_report(
 
 def ensure_im_card_length(text: str, *, max_chars: int = IM_CARD_MAX_CHARS) -> str:
     """Guarantee IM card fits strictly within ``max_chars`` (<= 1199), preserving alerts & links."""
-    limit = min(max(80, int(max_chars)), IM_CARD_MAX_CHARS)
+    limit = min(max(80, _non_neg_int(max_chars, default=IM_CARD_MAX_CHARS)), IM_CARD_MAX_CHARS)
     cleaned = text.strip()
     if len(cleaned) <= limit:
         return cleaned
@@ -944,6 +981,45 @@ def _clean_announcement_snippet(text: object, *, max_len: int = 44) -> str:
     return cleaned
 
 
+def _is_wf_joint_positive(pat: dict[str, Any]) -> bool:
+    """Return True when today is non-adverse and H2 Joint OOS (>=15d) is positive."""
+    if pat.get("wf_today_adverse"):
+        return False
+    joint_pct = finite_float(pat.get("wf_non_adverse_low_overhead_pct"))
+    if joint_pct is None:
+        return False
+    return (
+        (safe_int(pat.get("wf_non_adverse_low_overhead_days")) or 0) >= 15
+        and joint_pct > 0.0
+    )
+
+
+def _im_pattern_rank_key(pat: dict[str, Any]) -> tuple[int, int, float, str]:
+    is_active = pat.get("status") == "active"
+    adverse = bool(pat.get("wf_today_adverse"))
+    non_neg = pat.get("expectancy_tier") != "negative_watch"
+    if is_active:
+        tier = 1 if adverse else 0
+    elif non_neg and not adverse:
+        tier = 2
+    elif _is_wf_joint_positive(pat):
+        tier = 3
+    elif non_neg:
+        tier = 4
+    elif not adverse:
+        tier = 5
+    else:
+        tier = 6
+    joint_val = finite_float(pat.get("wf_non_adverse_low_overhead_pct"))
+    joint_sort = -joint_val if joint_val is not None else 999.0
+    return (
+        tier,
+        -(safe_int(pat.get("hit_count")) or 0),
+        joint_sort,
+        str(pat.get("pattern") or ""),
+    )
+
+
 def render_daily_im_card(
     report: dict[str, Any],
     *,
@@ -951,14 +1027,15 @@ def render_daily_im_card(
 ) -> str:
     """Render alert-first concise <1200-char Markdown card directing details to the dashboard."""
     reg = report.get("market_regime") or {}
-    seal = reg.get("seal_rate_pct")
-    seal_str = "-" if seal is None else f"{float(seal):.1f}%"
-    prev_ret = reg.get("prev_limit_up_avg_return_pct")
-    prev_str = "-" if prev_ret is None else f"{float(prev_ret):+.2f}%"
-    amt = reg.get("total_amount_yi")
-    amt_str = "-" if amt is None else f"{float(amt):,.0f}亿"
-    med = reg.get("median_return_pct")
-    med_part = "" if med is None else f" · 中位 {float(med):+.2f}%"
+    seal = finite_float(reg.get("seal_rate_pct"))
+    seal_str = "-" if seal is None else f"{seal:.1f}%"
+    prev_ret = finite_float(reg.get("prev_limit_up_avg_return_pct"))
+    prev_str = "-" if prev_ret is None else f"{prev_ret:+.2f}%"
+    amt = finite_float(reg.get("total_amount_yi"))
+    amt_str = "-" if amt is None else f"{amt:,.0f}亿"
+    med = finite_float(reg.get("median_return_pct"))
+    med_part = "" if med is None else f" · 中位 {med:+.2f}%"
+    adv_pct = finite_float(reg.get("advance_ratio_pct"))
 
     lines = [f"**AlphaSift A股盘后观察 ({report.get('trade_date', '-')})**"]
     if report.get("pack_is_stale"):
@@ -968,15 +1045,15 @@ def render_daily_im_card(
         )
     lines.append(
         f"> 盘面 **{reg.get('regime_stage_label', '-')}**｜"
-        f"上涨 {float(reg.get('advance_ratio_pct', 0.0)):.1f}%{med_part}｜"
-        f"涨跌停 {reg.get('non_st_limit_up_count', 0)}/{reg.get('non_st_limit_down_count', 0)}（封板 {seal_str}）｜"
-        f"最高 {reg.get('max_consecutive_limit_up', 0)}板 · 昨涨停 {prev_str} · 成交 {amt_str}"
+        f"上涨 {(adv_pct if adv_pct is not None else 0.0):.1f}%{med_part}｜"
+        f"涨跌停 {_non_neg_int(reg.get('non_st_limit_up_count'))}/{_non_neg_int(reg.get('non_st_limit_down_count'))}（封板 {seal_str}）｜"
+        f"最高 {_non_neg_int(reg.get('max_consecutive_limit_up'))}板 · 昨涨停 {prev_str} · 成交 {amt_str}"
     )
 
     # Alert-first block: announcement risks BEFORE strategies and patterns, with reserved budget.
     ann = report.get("announcement_risks") or {}
     flagged = ann.get("flagged_items") or []
-    checked = int(ann.get("checked_count") or 0)
+    checked = _non_neg_int(ann.get("checked_count"))
     if flagged:
         lines.append(f"**⚠️ 公告排雷预警（{checked}检/{len(flagged)}中）**")
         bullet_budget = 340
@@ -1009,14 +1086,14 @@ def render_daily_im_card(
     strategies = report.get("strategies") or []
     rules_runs = [s for s in strategies if not (s.get("track") == "ai" or s.get("llm_ranked"))]
     ai_runs = [s for s in strategies if (s.get("track") == "ai" or s.get("llm_ranked"))]
-    rules_picks = sum(
-        int(s["pick_count"]) if s.get("pick_count") is not None else len(s.get("picks") or [])
-        for s in rules_runs
-    )
-    ai_picks = sum(
-        int(s["pick_count"]) if s.get("pick_count") is not None else len(s.get("picks") or [])
-        for s in ai_runs
-    )
+    def _strategy_pick_count(entry: dict[str, Any]) -> int:
+        raw = safe_int(entry.get("pick_count"), default=-1)
+        if raw >= 0:
+            return raw
+        return len(entry.get("picks") or [])
+
+    rules_picks = sum(_strategy_pick_count(s) for s in rules_runs)
+    ai_picks = sum(_strategy_pick_count(s) for s in ai_runs)
     ai_hl = report.get("ai_highlights") or []
     if ai_runs:
         added_n = sum(len(h.get("added_by_ai") or []) for h in ai_hl if isinstance(h, dict))
@@ -1041,7 +1118,7 @@ def render_daily_im_card(
     consensus = syn.get("consensus_picks") or []
     if consensus:
         top_c = "、".join(
-            f"{c['code']} {str(c.get('name') or '')[:6]}({c['strategy_count']}策略)"
+            f"{c.get('code') or ''} {str(c.get('name') or '')[:6]}({_non_neg_int(c.get('strategy_count'))}策略)"
             for c in consensus[:4]
         )
         lines.append(f"**多策略共识({len(consensus)})**：{top_c}")
@@ -1055,27 +1132,34 @@ def render_daily_im_card(
     pat_sec = report.get("patterns") or {}
     active = pat_sec.get("active") or []
     experimental = pat_sec.get("experimental") or []
-    active_hits = sum(int(p.get("hit_count") or 0) for p in active)
-    exp_hits = sum(int(p.get("hit_count") or 0) for p in experimental)
+    active_hits = sum(_non_neg_int(p.get("hit_count")) for p in active)
+    exp_hits = sum(_non_neg_int(p.get("hit_count")) for p in experimental)
     top_hit_pats = [
         p for p in (*active, *experimental)
-        if int(p.get("hit_count") or 0) > 0
+        if _non_neg_int(p.get("hit_count")) > 0
     ]
-    top_hit_pats.sort(
-        key=lambda p: (
-            0 if p.get("status") == "active" else (1 if p.get("expectancy_tier") != "negative_watch" else 2),
-            -int(p.get("hit_count") or 0),
-        )
-    )
-    preferred_pats = [p for p in top_hit_pats if p.get("expectancy_tier") != "negative_watch"] or top_hit_pats
+    top_hit_pats.sort(key=_im_pattern_rank_key)
+    preferred_pats = [
+        p for p in top_hit_pats
+        if p.get("status") == "active" or p.get("expectancy_tier") != "negative_watch" or _is_wf_joint_positive(p)
+    ] or top_hit_pats
     if preferred_pats:
         pat_parts = []
         for p in preferred_pats[:3]:
             dname = str(p.get("display_name") or p.get("pattern") or "")
             sigs = "、".join(str(s.get("name") or s.get("code") or "")[:6] for s in (p.get("signals") or [])[:2])
-            tag = "" if p.get("status") == "active" else "·观察期"
+            tag_parts: list[str] = []
+            if p.get("status") != "active":
+                tag_parts.append("观察期")
+            if p.get("wf_today_adverse"):
+                tag_parts.append("逆风")
+            elif _is_wf_joint_positive(p):
+                joint_pct = finite_float(p.get("wf_non_adverse_low_overhead_pct"))
+                if joint_pct is not None:
+                    tag_parts.append(f"联合OOS{joint_pct:+.2f}%")
+            tag = ("·" + "·".join(tag_parts)) if tag_parts else ""
             sig_txt = f"：{sigs}" if sigs else ""
-            pat_parts.append(f"{dname}({int(p.get('hit_count') or 0)}只{tag}{sig_txt})")
+            pat_parts.append(f"{dname}({_non_neg_int(p.get('hit_count'))}只{tag}{sig_txt})")
         lines.append("**形态雷达**：" + "；".join(pat_parts))
     else:
         lines.append(
@@ -1102,14 +1186,8 @@ def render_daily_im_card(
 
 
 def write_daily_report(path: str | Path, report: dict[str, Any]) -> Path:
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return output
+    return atomic_write_strict_json(path, report, indent=2, trailing_newline=True)
 
 
 def write_daily_card(path: str | Path, card_text: str) -> Path:
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(ensure_im_card_length(card_text) + "\n", encoding="utf-8")
-    return output
+    return atomic_write_text(path, ensure_im_card_length(card_text) + "\n")

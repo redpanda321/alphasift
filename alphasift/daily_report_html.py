@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import html
-import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from alphasift.daily_brief import BRIEF_DISCLAIMER, resolve_strategy_display_names
+from alphasift.daily_report import _is_wf_joint_positive
+from alphasift.jsonutil import atomic_write_text, dumps_strict_json, finite_float, safe_int
 
 _DIST_BUCKETS: tuple[tuple[str, str, str], ...] = (
     ("le_neg7", "≤-7%", "down"),
@@ -21,6 +22,26 @@ _DIST_BUCKETS: tuple[tuple[str, str, str], ...] = (
     ("ge_pos7", "≥7%", "up"),
 )
 _GITHUB_URL = "https://github.com/ZhuLinsen/alphasift"
+_WF_MIN_DAYS = 15
+
+
+def _build_wf_cli(pat: dict[str, Any]) -> str:
+    """Build reproducible CLI replay command matching the pattern's Walk-Forward filter."""
+    pat_id = str(pat.get("pattern") or "").strip()
+    if not pat_id:
+        return ""
+    adv = [str(s).strip() for s in (pat.get("wf_h1_adverse_regimes") or []) if str(s).strip()]
+    pos = [str(s).strip() for s in (pat.get("wf_h1_positive_regimes") or []) if str(s).strip()]
+    joint_days = safe_int(pat.get("wf_non_adverse_low_overhead_days"))
+    raw_cap = finite_float(pat.get("wf_low_overhead_threshold_pct"))
+    ov_cap = int(round(raw_cap)) if raw_cap is not None else 15
+    if adv or joint_days > 0:
+        adv_arg = f" --exclude-regimes {','.join(adv)}" if adv else ""
+        ov_arg = f" --max-overhead-pct {ov_cap}" if joint_days > 0 else ""
+        return f"alphasift patterns replay --pattern {pat_id}{adv_arg}{ov_arg}"
+    if pos:
+        return f"alphasift patterns replay --pattern {pat_id} --allowed-regimes {','.join(pos)}"
+    return f"alphasift patterns replay --pattern {pat_id}"
 
 
 def _esc(val: object) -> str:
@@ -51,7 +72,7 @@ def _safe_detail_url(raw: object, fallback: str = "../index.html") -> str:
 def _js_json(val: object) -> str:
     """Serialize JSON safely for inline <script> blocks by escaping HTML-closing sequences."""
     return (
-        json.dumps(val, ensure_ascii=False)
+        dumps_strict_json(val, indent=None)
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
         .replace("&", "\\u0026")
@@ -63,18 +84,13 @@ def _js_json(val: object) -> str:
 def _i18n(key: str, **vars_map: object) -> str:
     if not vars_map:
         return f'data-i18n="{_esc(key)}"'
-    payload = html.escape(json.dumps(vars_map, ensure_ascii=False), quote=True)
+    payload = html.escape(dumps_strict_json(vars_map, indent=None), quote=True)
     return f'data-i18n="{_esc(key)}" data-i18n-vars="{payload}"'
 
 
 def _fmt_pct(val: object, digits: int = 2) -> str:
-    if val is None:
-        return '<span class="dim">–</span>'
-    try:
-        num = float(val)
-    except (TypeError, ValueError):
-        return '<span class="dim">–</span>'
-    if num != num:
+    num = finite_float(val)
+    if num is None:
         return '<span class="dim">–</span>'
     cls = "up" if num > 0 else ("down" if num < 0 else "")
     sign = "+" if num > 0 else ""
@@ -82,13 +98,8 @@ def _fmt_pct(val: object, digits: int = 2) -> str:
 
 
 def _fmt_num(val: object, digits: int = 1, suffix: str = "", suffix_i18n: str = "") -> str:
-    if val is None:
-        return '<span class="dim">–</span>'
-    try:
-        num = float(val)
-    except (TypeError, ValueError):
-        return '<span class="dim">–</span>'
-    if num != num:
+    num = finite_float(val)
+    if num is None:
         return '<span class="dim">–</span>'
     if suffix_i18n:
         return f'{num:.{digits}f}<span {_i18n(suffix_i18n)}>{_esc(suffix)}</span>'
@@ -98,7 +109,7 @@ def _fmt_num(val: object, digits: int = 1, suffix: str = "", suffix_i18n: str = 
 def _render_dist_svg(dist: dict[str, Any] | None) -> str:
     if not isinstance(dist, dict) or not dist:
         return f'<div class="empty" {_i18n("no_dist")}>暂无涨跌幅分布统计</div>'
-    counts = [int(dist.get(k) or 0) for k, _, _ in _DIST_BUCKETS]
+    counts = [safe_int(dist.get(k)) for k, _, _ in _DIST_BUCKETS]
     max_v = max(1, *counts)
     width, height, top, bot = 360, 120, 18, 22
     bar_h = height - top - bot
@@ -132,15 +143,17 @@ def _render_mini_kline_svg(bars: list[Any] | None) -> str:
     parsed: list[tuple[float, float, float, float]] = []
     for item in bars:
         if isinstance(item, (list, tuple)) and len(item) >= 4:
-            try:
-                parsed.append((float(item[0]), float(item[1]), float(item[2]), float(item[3])))
-            except (TypeError, ValueError):
-                continue
+            o_f = finite_float(item[0])
+            h_f = finite_float(item[1])
+            l_f = finite_float(item[2])
+            c_f = finite_float(item[3])
+            if o_f is not None and h_f is not None and l_f is not None and c_f is not None:
+                parsed.append((o_f, max(o_f, h_f, l_f, c_f), min(o_f, h_f, l_f, c_f), c_f))
     if not parsed:
         return '<span class="dim">–</span>'
     lo = min(b[2] for b in parsed)
     hi = max(b[1] for b in parsed)
-    span = max(hi - lo, hi * 0.005, 1e-6)
+    span = max(hi - lo, abs(hi) * 0.005, 1e-6)
     w, h, pad = 96, 28, 2
     step = (w - pad * 2) / len(parsed)
     bw = max(1.8, step * 0.65)
@@ -161,7 +174,13 @@ def _render_mini_kline_svg(bars: list[Any] | None) -> str:
 def _render_ladder(ladder: dict[str, Any] | None) -> str:
     if not isinstance(ladder, dict) or not ladder:
         return f'<div class="empty" {_i18n("ladder_empty")}>今日无非 ST 连板或首板分布</div>'
-    items = sorted(((int(k), int(v)) for k, v in ladder.items() if int(v or 0) > 0), reverse=True)
+    raw_items: list[tuple[int, int]] = []
+    for k, v in ladder.items():
+        board_n = safe_int(k, default=-1)
+        cnt_n = safe_int(v)
+        if board_n >= 0 and cnt_n > 0:
+            raw_items.append((board_n, cnt_n))
+    items = sorted(raw_items, reverse=True)
     if not items:
         return f'<div class="empty" {_i18n("ladder_empty")}>今日无非 ST 连板分布</div>'
     max_cnt = max(1, *(cnt for _, cnt in items))
@@ -187,9 +206,9 @@ def _render_case_studies(track_summary: dict[str, Any] | None) -> str:
         windows = cmp.get("windows") or {}
         win = windows.get("5") or next(iter(windows.values()), {})
         cases = (win or {}).get("ai_case_studies") or {}
-        adds = cases.get("best_ai_adds") or []
-        avoids = cases.get("best_ai_avoids") or []
-        misses = cases.get("missed_by_ai") or []
+        adds = [x for x in (cases.get("best_ai_adds") or []) if isinstance(x, dict)]
+        avoids = [x for x in (cases.get("best_ai_avoids") or []) if isinstance(x, dict)]
+        misses = [x for x in (cases.get("missed_by_ai") or []) if isinstance(x, dict)]
         if not (adds or avoids or misses):
             continue
         strat_key = str(cmp.get("strategy") or "")
@@ -222,6 +241,15 @@ def _render_case_studies(track_summary: dict[str, Any] | None) -> str:
     return f'<div style="margin-top:14px;"><h3 class="subhead" {_i18n("case_section_title")}>历史同日配对 · AI 个股级案例复盘</h3><div class="grid">{"".join(cards)}</div></div>'
 
 
+def _policy_html(raw: object) -> str:
+    policy = str(raw or "cn_only").strip() or "cn_only"
+    if policy == "cn_only_regime_slice_only":
+        return f'<code {_i18n("policy_cn_slice")}>仅A股 · 情绪仅切片观察</code>'
+    if policy == "cn_only":
+        return f'<code {_i18n("policy_cn")}>仅A股</code>'
+    return f"<code>{_esc(policy)}</code>"
+
+
 def render_daily_report_html(
     report: dict[str, Any],
     *,
@@ -231,16 +259,25 @@ def render_daily_report_html(
     trade_date = _esc(report.get("trade_date") or "-")
     pack_date = _esc(report.get("pack_trade_date") or "-")
     detail_url = _safe_detail_url(report.get("detail_url"), fallback="../index.html")
+    dash_base = detail_url.split("#", 1)[0].split("?", 1)[0]
+
+    def _dash_link(hash_frag: str, i18n_key: str, zh_text: str, *, pat_id: str | None = None) -> str:
+        href = f"{dash_base}?pat={pat_id}#{hash_frag}" if pat_id else f"{dash_base}#{hash_frag}"
+        pat_attr = f' data-dash-pat="{_esc(pat_id)}"' if pat_id else ""
+        return (
+            f'<a class="dash-link no-print" data-dash-hash="{_esc(hash_frag)}"{pat_attr}'
+            f' href="{_esc(href)}" {_i18n(i18n_key)}>{zh_text}</a>'
+        )
     is_stale = bool(report.get("pack_is_stale"))
     stale_reason = str(report.get("stale_reason") or "").strip()
 
-    reg = report.get("market_regime") or {}
-    syn = report.get("cross_strategy_synthesis") or {}
-    brief = report.get("ai_brief") or {}
-    ann = report.get("announcement_risks") or {}
-    strategies = report.get("strategies") or []
-    ai_hl = report.get("ai_highlights") or []
-    pat_sec = report.get("patterns") or {}
+    reg = report.get("market_regime") if isinstance(report.get("market_regime"), dict) else {}
+    syn = report.get("cross_strategy_synthesis") if isinstance(report.get("cross_strategy_synthesis"), dict) else {}
+    brief = report.get("ai_brief") if isinstance(report.get("ai_brief"), dict) else {}
+    ann = report.get("announcement_risks") if isinstance(report.get("announcement_risks"), dict) else {}
+    strategies = [x for x in (report.get("strategies") or []) if isinstance(x, dict)]
+    ai_hl = [x for x in (report.get("ai_highlights") or []) if isinstance(x, dict)]
+    pat_sec = report.get("patterns") if isinstance(report.get("patterns"), dict) else {}
     degradation = report.get("degradation") or []
     summary_names = (track_summary.get("strategy_names") or {}) if isinstance(track_summary, dict) else {}
     report_names = report.get("strategy_display_names") if isinstance(report.get("strategy_display_names"), dict) else {}
@@ -262,7 +299,7 @@ def render_daily_report_html(
     warn_items = "".join(f"<li>{_esc(w)}</li>" for w in (brief.get("risk_warnings") or []))
     watch_items = "".join(f"<li>{_esc(w)}</li>" for w in (brief.get("watch_points") or []))
     brief_block = f"""
-    <section class="panel brief-box">
+    <section class="panel brief-box" id="brief">
       <div class="sec-head"><h2 {_i18n("sec_brief")}>盘后要点综述</h2>{brief_badge}</div>
       <div class="brief-headline">{_esc(brief.get("headline") or "暂无摘要")}</div>
       <div class="grid two-col">
@@ -286,28 +323,36 @@ def render_daily_report_html(
     adv_pct = _fmt_num(reg.get("advance_ratio_pct"), 1, "%")
     med_pct = _fmt_pct(reg.get("median_return_pct"))
     amt_str = _fmt_num(reg.get("total_amount_yi"), 0, " 亿", suffix_i18n="unit_yi")
-    seal_str = _fmt_num(reg.get("seal_rate_pct"), 1, "%")
+    seal_val = finite_float(reg.get("seal_rate_pct"))
+    seal_str = _fmt_num(seal_val, 1, "%")
     prev_lu = _fmt_pct(reg.get("prev_limit_up_avg_return_pct"))
-    lu = int(reg.get("non_st_limit_up_count") or 0)
-    ld = int(reg.get("non_st_limit_down_count") or 0)
-    max_streak = int(reg.get("max_consecutive_limit_up") or 0)
+    prev_win_val = finite_float(reg.get("prev_limit_up_win_rate_pct"))
+    lu = safe_int(reg.get("non_st_limit_up_count"))
+    ld = safe_int(reg.get("non_st_limit_down_count"))
+    max_streak = safe_int(reg.get("max_consecutive_limit_up"))
+    adv_cnt = safe_int(reg.get("advancing_count"))
+    dec_cnt = safe_int(reg.get("declining_count"))
+    traded_cnt = safe_int(reg.get("traded_count"))
+    one_up_cnt = safe_int(reg.get("one_price_limit_up_count"))
+    one_dn_cnt = safe_int(reg.get("one_price_limit_down_count"))
+    broken_cnt = safe_int(reg.get("non_st_broken_board_count"))
     reg_code = str(reg.get("regime_stage") or "-")
     reg_label = str(reg.get("regime_stage_label") or "-")
     stage_txt = f"盘面 · {_esc(reg_label)}"
 
     panorama_block = f"""
-    <section class="panel" style="padding:0;overflow:hidden;">
+    <section class="panel" id="panorama" style="padding:0;overflow:hidden;">
       <div class="sec-head" style="padding:14px 18px 10px;margin:0;">
         <h2 {_i18n("sec_panorama", d=report.get("trade_date") or "-")}>A 股盘面全景（{trade_date}）</h2>
         <span class="badge accent" data-regime="{_esc(reg_code)}" data-regime-raw="{_esc(reg_label)}">{stage_txt}</span>
       </div>
       <div class="kpi-strip">
-        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_adv")}>上涨占比</div><div class="val">{adv_pct}</div><div class="sub" {_i18n("kpi_adv_sub", adv=int(reg.get('advancing_count') or 0), dec=int(reg.get('declining_count') or 0))}>涨 {int(reg.get('advancing_count') or 0)} / 跌 {int(reg.get('declining_count') or 0)}</div></div>
-        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_med")}>全市场中位数</div><div class="val">{med_pct}</div><div class="sub" {_i18n("kpi_med_sub", n=int(reg.get('traded_count') or 0))}>成交 {int(reg.get('traded_count') or 0)} 只</div></div>
-        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_amt")}>两市成交额</div><div class="val">{amt_str}</div><div class="sub" {_i18n("kpi_amt_sub", seal=f"{float(reg.get('seal_rate_pct') or 0):.1f}%" if reg.get("seal_rate_pct") is not None else "–")}>封板率 {seal_str}</div></div>
-        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_luld")}>非ST 涨停 / 跌停</div><div class="val"><span class="up">{lu}</span> / <span class="down">{ld}</span></div><div class="sub" {_i18n("kpi_luld_sub", up=int(reg.get('one_price_limit_up_count') or 0), dn=int(reg.get('one_price_limit_down_count') or 0))}>一字 {int(reg.get('one_price_limit_up_count') or 0)}/{int(reg.get('one_price_limit_down_count') or 0)}</div></div>
-        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_streak")}>连板最高</div><div class="val" {_i18n("kpi_streak_val", n=max_streak)}>{max_streak} 板</div><div class="sub" {_i18n("kpi_streak_sub", n=int(reg.get('non_st_broken_board_count') or 0))}>炸板 {int(reg.get('non_st_broken_board_count') or 0)} 只</div></div>
-        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_prevlu")}>昨涨停今日均收益</div><div class="val">{prev_lu}</div><div class="sub" {_i18n("kpi_prevlu_sub", win=f"{float(reg.get('prev_limit_up_win_rate_pct') or 0):.1f}%" if reg.get("prev_limit_up_win_rate_pct") is not None else "–")}>红盘率 {_fmt_num(reg.get('prev_limit_up_win_rate_pct'), 1, '%')}</div></div>
+        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_adv")}>上涨占比</div><div class="val">{adv_pct}</div><div class="sub" {_i18n("kpi_adv_sub", adv=adv_cnt, dec=dec_cnt)}>涨 {adv_cnt} / 跌 {dec_cnt}</div></div>
+        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_med")}>全市场中位数</div><div class="val">{med_pct}</div><div class="sub" {_i18n("kpi_med_sub", n=traded_cnt)}>成交 {traded_cnt} 只</div></div>
+        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_amt")}>两市成交额</div><div class="val">{amt_str}</div><div class="sub" {_i18n("kpi_amt_sub", seal=f"{seal_val:.1f}%" if seal_val is not None else "–")}>封板率 {seal_str}</div></div>
+        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_luld")}>非ST 涨停 / 跌停</div><div class="val"><span class="up">{lu}</span> / <span class="down">{ld}</span></div><div class="sub" {_i18n("kpi_luld_sub", up=one_up_cnt, dn=one_dn_cnt)}>一字 {one_up_cnt}/{one_dn_cnt}</div></div>
+        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_streak")}>连板最高</div><div class="val" {_i18n("kpi_streak_val", n=max_streak)}>{max_streak} 板</div><div class="sub" {_i18n("kpi_streak_sub", n=broken_cnt)}>炸板 {broken_cnt} 只</div></div>
+        <div class="kpi-cell"><div class="lbl" {_i18n("kpi_prevlu")}>昨涨停今日均收益</div><div class="val">{prev_lu}</div><div class="sub" {_i18n("kpi_prevlu_sub", win=f"{prev_win_val:.1f}%" if prev_win_val is not None else "–")}>红盘率 {_fmt_num(prev_win_val, 1, '%')}</div></div>
       </div>
       <div class="grid two-col" style="padding:14px 18px 18px;">
         <div class="sub-panel"><h3 class="subhead" {_i18n("sub_dist")}>7 档涨跌幅分布</h3>{_render_dist_svg(reg.get("return_distribution"))}</div>
@@ -317,9 +362,9 @@ def render_daily_report_html(
     """
 
     # 3. Announcement Risk Alerts & Spotlight
-    flagged = ann.get("flagged_items") or []
-    spotlight = syn.get("risk_spotlight") or []
-    checked = int(ann.get("checked_count") or 0)
+    flagged = [x for x in (ann.get("flagged_items") or []) if isinstance(x, dict)]
+    spotlight = [x for x in (syn.get("risk_spotlight") or []) if isinstance(x, dict)]
+    checked = safe_int(ann.get("checked_count"))
     if flagged:
         flag_cards_parts: list[str] = []
         for x in flagged:
@@ -345,7 +390,7 @@ def render_daily_report_html(
         if r.get("source") != "announcement"
     )
     ann_block = f"""
-    <section class="panel {'alert-hot' if flagged else ''}">
+    <section class="panel {'alert-hot' if flagged else ''}" id="announcements">
       <div class="sec-head">
         <h2 {_i18n("sec_ann")}>⚠️ 公告排雷与风险聚焦</h2>
         <span class="badge {'bad' if flagged else ''}" {_i18n("ann_badge", c=checked, f=len(flagged))}>抽检 {checked} · 高风险 {len(flagged)}</span>
@@ -368,7 +413,7 @@ def render_daily_report_html(
             if isinstance(it, dict) and it.get("title")
         )
         news_block = f"""
-    <section class="panel">
+    <section class="panel" id="news">
       <div class="sec-head">
         <h2 {_i18n("sec_news")}>📰 市场热点与政策快讯</h2>
         {f'<span class="badge">{_esc(news_sources)}</span>' if news_sources else ""}
@@ -380,7 +425,7 @@ def render_daily_report_html(
         news_block = ""
 
     # 4. Cross-strategy Consensus, Sector Concentration & AI Attribution
-    consensus = syn.get("consensus_picks") or []
+    consensus = [x for x in (syn.get("consensus_picks") or []) if isinstance(x, dict)]
     if consensus:
         c_rows_parts: list[str] = []
         for idx, c in enumerate(consensus, start=1):
@@ -390,12 +435,16 @@ def render_daily_report_html(
             if len(strat_list) > 3:
                 strat_badges += f' <span class="dim small">+{len(strat_list) - 3}</span>'
             val_parts: list[str] = []
-            if c.get("price") is not None:
-                val_parts.append(f'¥{float(c["price"]):.2f}')
-            if c.get("pe_ratio") is not None:
-                val_parts.append(f'PE {float(c["pe_ratio"]):.1f}')
-            if c.get("pb_ratio") is not None:
-                val_parts.append(f'PB {float(c["pb_ratio"]):.2f}')
+            price_f = finite_float(c.get("price"))
+            pe_f = finite_float(c.get("pe_ratio"))
+            pb_f = finite_float(c.get("pb_ratio"))
+            if price_f is not None:
+                val_parts.append(f"¥{price_f:.2f}")
+            if pe_f is not None:
+                val_parts.append(f"PE {pe_f:.1f}")
+            if pb_f is not None:
+                val_parts.append(f"PB {pb_f:.2f}")
+            strat_cnt = safe_int(c.get("strategy_count"))
             val_sub = f'<div class="small dim mono">{" · ".join(val_parts)}</div>' if val_parts else ""
             reason_sub = ""
             if c.get("reasons"):
@@ -404,7 +453,7 @@ def render_daily_report_html(
                 f'<tr><td><span class="rank-num {"top" if idx <= 3 else ""}">{idx}</span></td>'
                 f'<td class="l"><strong>{_esc(c.get("name"))}</strong> <span class="mono dim small">{_esc(c.get("code"))}</span>{val_sub}{reason_sub}</td>'
                 f'<td class="l dim">{_esc(c.get("industry"))}</td>'
-                f'<td><span class="badge accent" {_i18n("n_strats", n=int(c.get("strategy_count") or 0))}>{int(c.get("strategy_count") or 0)} 策略</span></td>'
+                f'<td><span class="badge accent" {_i18n("n_strats", n=strat_cnt)}>{strat_cnt} 策略</span></td>'
                 f'<td class="l">{strat_badges}</td>'
                 f'<td class="mono">{_fmt_num(c.get("avg_final_score"), 1)}</td>'
                 f'<td class="mono">{_fmt_pct(c.get("change_pct"))}</td>'
@@ -424,12 +473,12 @@ def render_daily_report_html(
     else:
         consensus_html = f'<div class="empty" {_i18n("no_consensus")}>今日暂无 ≥2 个策略同时选中的共识标的。</div>'
 
-    sectors = syn.get("sector_concentration") or []
+    sectors = [x for x in (syn.get("sector_concentration") or []) if isinstance(x, dict)]
     sector_html = (
         "".join(
             f'<div class="ladder-row"><span>{_esc(s.get("industry"))}</span>'
-            f'<div class="ladder-track"><div class="ladder-fill accent-bg" style="width:{min(100.0, float(s.get("share_pct") or 0.0)):.1f}%"></div></div>'
-            f'<span class="ladder-num">{int(s.get("pick_count") or 0)} ({_fmt_num(s.get("share_pct"), 1, "%")})</span></div>'
+            f'<div class="ladder-track"><div class="ladder-fill accent-bg" style="width:{min(100.0, max(0.0, finite_float(s.get("share_pct")) or 0.0)):.1f}%"></div></div>'
+            f'<span class="ladder-num">{safe_int(s.get("pick_count"))} ({_fmt_num(s.get("share_pct"), 1, "%")})</span></div>'
             for s in sectors
         )
         or f'<div class="dim small" {_i18n("no_sector")}>暂无行业分布</div>'
@@ -438,16 +487,19 @@ def render_daily_report_html(
     ai_cards_parts: list[str] = []
     none_span = f'<span {_i18n("none_lbl")}>无</span>'
     for h in ai_hl:
-        overlap_txt = f"{float(h.get('overlap_pct')):.1f}%" if h.get("overlap_pct") is not None else "–"
+        overlap_f = finite_float(h.get("overlap_pct"))
+        overlap_txt = f"{overlap_f:.1f}%" if overlap_f is not None else "–"
+        rules_cnt = safe_int(h.get("rules_pick_count"))
+        ai_cnt = safe_int(h.get("ai_pick_count"))
         mv = h.get("llm_market_view")
         view_html = f'<div><b {_i18n("ai_view")}>市场观点：</b>{_esc(mv)}</div>' if mv else ""
-        added_names = "、".join(f'{x.get("name")}({x.get("code")})' for x in (h.get("added_by_ai") or []))
-        dropped_names = "、".join(f'{x.get("name")}({x.get("code")})' for x in (h.get("dropped_by_ai") or []))
+        added_names = "、".join(f'{x.get("name")}({x.get("code")})' for x in (h.get("added_by_ai") or []) if isinstance(x, dict))
+        dropped_names = "、".join(f'{x.get("name")}({x.get("code")})' for x in (h.get("dropped_by_ai") or []) if isinstance(x, dict))
         added_html = _esc(added_names) if added_names else none_span
         dropped_html = _esc(dropped_names) if dropped_names else none_span
         ai_cards_parts.append(
             f'<div class="card"><div class="card-top"><h3>{_sname_span(h.get("strategy"))}<span class="badge ai" {_i18n("ai_rebalance")}>AI 调仓</span></h3>'
-            f'<div class="sub" {_i18n("ai_sub", ov=overlap_txt, r=int(h.get("rules_pick_count") or 0), a=int(h.get("ai_pick_count") or 0))}>重合度 {overlap_txt} · 规则 {int(h.get("rules_pick_count") or 0)} / AI {int(h.get("ai_pick_count") or 0)}</div></div>'
+            f'<div class="sub" {_i18n("ai_sub", ov=overlap_txt, r=rules_cnt, a=ai_cnt)}>重合度 {overlap_txt} · 规则 {rules_cnt} / AI {ai_cnt}</div></div>'
             f'<div class="prose small" style="padding:10px 14px;">{view_html}'
             f'<div><b {_i18n("ai_add")}>AI 新增：</b>{added_html}</div>'
             f'<div><b {_i18n("ai_drop")}>AI 剔除：</b>{dropped_html}</div>'
@@ -455,7 +507,7 @@ def render_daily_report_html(
         )
     ai_cards = "".join(ai_cards_parts)
 
-    resonance = syn.get("strategy_pattern_resonance") or []
+    resonance = [x for x in (syn.get("strategy_pattern_resonance") or []) if isinstance(x, dict)]
     res_items: list[str] = []
     for r in resonance:
         strat_spans = ", ".join(_sname_span(s) for s in (r.get("strategies") or []))
@@ -473,15 +525,15 @@ def render_daily_report_html(
     )
 
     synthesis_block = f"""
-    <section class="panel">
-      <div class="sec-head"><h2 {_i18n("sec_syn")}>跨策略共识、行业分布与 AI 归因</h2></div>
+    <section class="panel" id="synthesis">
+      <div class="sec-head"><h2 {_i18n("sec_syn")}>跨策略共识、行业分布与 AI 归因</h2>{_dash_link("track-comparison-section", "link_ai_board", "历史 AI 归因 →")}</div>
       <h3 class="subhead" {_i18n("sub_multi_cons")}>多策略共识标的</h3>
       {consensus_html}
       <div class="grid two-col" style="margin-top:12px;">
         <div class="sub-panel"><h3 class="subhead" {_i18n("sub_sector_conc")}>候选行业集中度</h3><div class="ladder-list">{sector_html}</div></div>
         <div class="sub-panel"><h3 class="subhead" {_i18n("sub_res")}>策略 × 形态共振观察</h3>{res_html}</div>
       </div>
-      {f'<div style="margin-top:12px;"><h3 class="subhead" {_i18n("sub_ai_today")}>今日 AI 调仓对比</h3><div class="grid">{ai_cards}</div></div>' if ai_cards else ""}
+      {f'<div id="ai-rebalance" style="margin-top:12px;"><h3 class="subhead" {_i18n("sub_ai_today")}>今日 AI 调仓对比</h3><div class="grid">{ai_cards}</div></div>' if ai_cards else ""}
       {_render_case_studies(track_summary)}
     </section>
     """
@@ -491,10 +543,10 @@ def render_daily_report_html(
     for st in strategies:
         tr = "ai" if st.get("track") == "ai" or st.get("llm_ranked") else "rules"
         badge = '<span class="badge ai">AI</span>' if tr == "ai" else f'<span class="badge" {_i18n("badge_rules")}>规则</span>'
-        picks = st.get("picks") or []
+        picks = [x for x in (st.get("picks") or []) if isinstance(x, dict)]
         if picks:
             rows = "".join(
-                f'<tr><td><span class="rank-num {"top" if int(pk.get("rank") or 9) <= 3 else ""}">{int(pk.get("rank") or 0)}</span></td>'
+                f'<tr><td><span class="rank-num {"top" if safe_int(pk.get("rank"), default=9) <= 3 else ""}">{safe_int(pk.get("rank"))}</span></td>'
                 f'<td class="l"><strong>{_esc(pk.get("name"))}</strong> <span class="mono dim small">{_esc(pk.get("code"))}</span></td>'
                 f'<td class="l dim">{_esc(pk.get("industry"))}</td>'
                 f'<td class="mono">{_fmt_num(pk.get("final_score"), 1)}</td>'
@@ -513,14 +565,14 @@ def render_daily_report_html(
             )
         else:
             tbl = f'<div class="empty" {_i18n("no_picks")}>无入选股票</div>'
-        n_picks = int(st.get("pick_count") or len(picks))
+        n_picks = safe_int(st.get("pick_count"), default=len(picks)) or len(picks)
         strat_cards.append(
             f'<div class="card"><div class="card-top"><h3>{_sname_span(st.get("strategy"))}{badge}</h3>'
             f'<div class="sub" {_i18n("strat_picks_cnt", n=n_picks)}>入选 {n_picks} 只</div></div>{tbl}</div>'
         )
     strat_block = f"""
-    <section class="panel">
-      <div class="sec-head"><h2 {_i18n("sec_strats")}>今日策略精选全览</h2><span class="badge" {_i18n("strat_runs_badge", n=len(strategies))}>{len(strategies)} 组运行</span></div>
+    <section class="panel" id="strategies">
+      <div class="sec-head"><h2 {_i18n("sec_strats")}>今日策略精选全览</h2><span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;"><span class="badge" {_i18n("strat_runs_badge", n=len(strategies))}>{len(strategies)} 组运行</span>{_dash_link("leaderboard", "link_leaderboard", "T+N 排行 →")}</span></div>
       {f'<div class="grid">{"".join(strat_cards)}</div>' if strat_cards else f'<div class="empty" {_i18n("no_strats")}>未附加策略运行结果。</div>'}
     </section>
     """
@@ -528,12 +580,21 @@ def render_daily_report_html(
     # 6. Pattern Radar Cards (active + expectancy-tiered experimental)
     pat_cards = []
     for bucket, is_active in (("active", True), ("experimental", False)):
-        pats_list = list(pat_sec.get(bucket) or [])
+        pats_list = [x for x in (pat_sec.get(bucket) or []) if isinstance(x, dict)]
         if not is_active:
             pats_list.sort(
                 key=lambda p: (
-                    0 if p.get("expectancy_tier") == "positive_watch" else (1 if p.get("expectancy_tier") != "negative_watch" else 2),
-                    -int(p.get("hit_count") or 0),
+                    0 if p.get("expectancy_tier") == "positive_watch" and not p.get("wf_today_adverse") else (
+                        1 if _is_wf_joint_positive(p) else (
+                            2 if p.get("expectancy_tier") != "negative_watch" and not p.get("wf_today_adverse") else (
+                                3 if p.get("expectancy_tier") != "negative_watch" else (
+                                    4 if not p.get("wf_today_adverse") else 5
+                                )
+                            )
+                        )
+                    ),
+                    -safe_int(p.get("hit_count")),
+                    str(p.get("pattern") or ""),
                 )
             )
         for pat in pats_list:
@@ -541,17 +602,46 @@ def render_daily_report_html(
             dname = str(pat.get("display_name") or pkey)
             exp_tier = str(pat.get("expectancy_tier") or "")
             badge = '<span class="badge active">active</span>' if is_active else (
-                '<span class="badge warn">负期望·观察</span>'
+                f'<span class="badge warn" {_i18n("pat_neg_watch")}>负期望·观察</span>'
                 if exp_tier == "negative_watch"
-                else '<span class="badge">观察期</span>'
+                else f'<span class="badge" {_i18n("pat_exp_watch")}>观察期</span>'
             )
-            net_ex = pat.get("replay_t5_net_excess_pct")
+            p_mid = str(pat.get("wf_eval_mid_date") or "").strip()
+            p_sig = safe_int(pat.get("wf_h1_purged_signals"))
+            p_days = safe_int(pat.get("wf_h1_purged_days"))
+            purged_tip = (
+                (f"H1 exit_date < {p_mid} · purged {p_sig} ({p_days}d)" if p_mid else f"purged {p_sig} ({p_days}d)")
+                if pat.get("wf_boundary_verified")
+                else ""
+            )
+            purged_title_attr = f' title="{_esc(purged_tip)}"' if purged_tip else ""
+            wf_adv_badge = (
+                f'<span class="badge bad"{purged_title_attr} {_i18n("pat_wf_adverse")}>今日情绪逆风</span>'
+                if pat.get("wf_today_adverse")
+                else ""
+            )
+            wf_pending_badge = (
+                f'<span class="badge warn" {_i18n("pat_wf_pending")}>边界待复核</span>'
+                if pat.get("wf_boundary_verified") is False
+                else ""
+            )
+            net_ex = finite_float(pat.get("replay_t5_net_excess_pct"))
             replay_note = (
-                f' · T+5净超额 {float(net_ex):+.2f}%'
+                f'<span {_i18n("pat_t5_net", v=f"{net_ex:+.2f}%")}> · T+5净超额 {net_ex:+.2f}%</span>'
                 if net_ex is not None
                 else ""
             )
-            sigs = pat.get("signals") or []
+            wf_joint_pct = finite_float(pat.get("wf_non_adverse_low_overhead_pct"))
+            wf_joint_days = safe_int(pat.get("wf_non_adverse_low_overhead_days"))
+            if wf_joint_pct is not None and wf_joint_days > 0:
+                wf_joint_low = wf_joint_days < _WF_MIN_DAYS
+                cls_attr = ' class="wf-low"' if wf_joint_low else ""
+                low_tag = f'<span class="tag-low">&lt;{_WF_MIN_DAYS}d</span>' if wf_joint_low else ""
+                replay_note += (
+                    f'<span{cls_attr}{purged_title_attr} {_i18n("pat_wf_joint", v=f"{wf_joint_pct:+.2f}%", d=wf_joint_days)}>'
+                    f' · 联合OOS {wf_joint_pct:+.2f}%({wf_joint_days}d)</span>{low_tag}'
+                )
+            sigs = [x for x in (pat.get("signals") or []) if isinstance(x, dict)]
             if sigs:
                 s_rows = "".join(
                     f'<tr><td class="l"><strong>{_esc(s.get("name"))}</strong> <span class="mono dim small">{_esc(s.get("code"))}</span></td>'
@@ -569,15 +659,38 @@ def render_daily_report_html(
                 )
             else:
                 body = f'<div class="empty" {_i18n("no_pat_sig")}>今日无触发信号</div>'
-            hits_n = int(pat.get("hit_count") or 0)
-            pat_cards.append(
-                f'<div class="card {"muted-card" if not is_active else ""}"><div class="card-top"><h3><span data-pattern="{_esc(pkey)}">{_esc(dname)}</span>{badge}</h3>'
-                f'<div class="sub"><span {_i18n("pat_hits_cnt", n=hits_n)}>命中 {hits_n} 只</span>{replay_note}</div></div>{body}</div>'
+            hits_n = safe_int(pat.get("hit_count"))
+            pat_link = _dash_link("walk-forward-wrap", "link_pat_wf", "样本外回放 →", pat_id=pkey) if pkey else ""
+            cli_cmd = _build_wf_cli(pat) if pkey else ""
+            wf_cli_btn = (
+                f'<button type="button" class="wf-cli-btn no-print" data-cli="{_esc(cli_cmd)}" '
+                f'title="{_esc(cli_cmd)}" aria-label="{_esc(cli_cmd)}" '
+                f'{_i18n("wf_cli_btn")}>CLI</button>'
+                if cli_cmd
+                else ""
             )
+            pat_id_attr = f' id="pat-{_esc(pkey)}"' if pkey else ""
+            pat_cards.append(
+                f'<div class="card {"muted-card" if not is_active else ""}"{pat_id_attr}><div class="card-top"><h3><span data-pattern="{_esc(pkey)}">{_esc(dname)}</span><span style="display:inline-flex;flex-wrap:wrap;gap:4px;">{badge}{wf_adv_badge}{wf_pending_badge}</span></h3>'
+                f'<div class="sub"><span {_i18n("pat_hits_cnt", n=hits_n)}>命中 {hits_n} 只</span>{replay_note}{pat_link}{wf_cli_btn}</div></div>{body}</div>'
+            )
+    all_scan_pats = [
+        x for x in (*(pat_sec.get("active") or []), *(pat_sec.get("experimental") or []))
+        if isinstance(x, dict)
+    ]
+    wf_mid_date = next((str(p.get("wf_eval_mid_date") or "").strip() for p in all_scan_pats if str(p.get("wf_eval_mid_date") or "").strip()), "")
+    total_purged = sum(safe_int(p.get("wf_h1_purged_signals")) for p in all_scan_pats)
+    pat_boundary_footer = (
+        f'<p class="dim small" style="margin:10px 0 0;" {_i18n("pat_wf_boundary_note_stats", mid=wf_mid_date, n=total_purged)}>'
+        f'注：Walk-Forward H1 严格按实际退出日 &lt; {_esc(wf_mid_date)} 截断（累计剔除 {total_purged} 条跨界信号），避免 H2 价格区间泄漏进逆风判定。</p>'
+        if wf_mid_date
+        else f'<p class="dim small" style="margin:10px 0 0;" {_i18n("pat_wf_boundary_note")}>注：Walk-Forward H1 严格按实际退出日 &lt; 切分日截断并剔除跨界样本，避免 H2 价格区间泄漏进逆风判定。</p>'
+    )
     pat_block = f"""
-    <section class="panel">
-      <div class="sec-head"><h2 {_i18n("sec_patterns")}>无状态形态雷达命中</h2></div>
+    <section class="panel" id="patterns">
+      <div class="sec-head"><h2 {_i18n("sec_patterns")}>无状态形态雷达命中</h2>{_dash_link("walk-forward-wrap", "link_wf_board", "250日 Walk-Forward 回放 →")}</div>
       <div class="grid">{"".join(pat_cards) if pat_cards else f'<div class="empty" {_i18n("no_pats")}>无形态扫描记录</div>'}</div>
+      {pat_boundary_footer}
     </section>
     """
 
@@ -669,6 +782,13 @@ main {{ max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }}
 .rpt-header h1 {{ margin: 4px 0 8px; font-size: clamp(21px, 2.5vw, 27px); letter-spacing: -0.025em; }}
 .eyebrow {{ font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; color: var(--accent-hi); }}
 .meta-row {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); font-family: var(--font-mono); }}
+.sec-pills {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }}
+.sec-pill {{
+  display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 500; color: var(--ink-2); background: var(--surface);
+  border: 1px solid var(--border); text-decoration: none;
+}}
+.sec-pill:hover {{ border-color: var(--accent-hi); color: var(--accent-hi); background: var(--accent-soft); text-decoration: none; }}
 
 .panel {{
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
@@ -710,6 +830,31 @@ main {{ max-width: 1180px; margin: 0 auto; padding: 24px 20px 60px; }}
 .badge.active, .badge.ok {{ color: var(--down); background: var(--down-soft); border-color: rgba(52,211,153,0.3); }}
 .badge.bad {{ color: var(--up); background: var(--up-soft); border-color: rgba(248,113,113,0.3); }}
 .badge.warn {{ color: var(--warn); background: var(--warn-soft); border-color: rgba(251,191,36,0.3); }}
+.dash-link {{
+  display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 600;
+  color: var(--accent-hi); padding: 2px 8px; border-radius: 5px;
+  background: var(--accent-soft); border: 1px solid rgba(59,130,246,0.22);
+  text-decoration: none; white-space: nowrap; font-family: var(--font-sans);
+}}
+.dash-link:hover {{ background: rgba(59,130,246,0.22); text-decoration: none; }}
+.card .sub .dash-link {{ margin-left: 6px; padding: 0 6px; font-size: 10.5px; vertical-align: middle; }}
+.wf-low {{ opacity: 0.72; }}
+.tag-low {{
+  display: inline-block; margin-left: 4px; padding: 0 4px; border-radius: 4px;
+  font-size: 10px; font-weight: 600; font-family: var(--font-mono);
+  color: var(--warn); background: var(--warn-soft); border: 1px solid rgba(251,191,36,0.3);
+  vertical-align: middle;
+}}
+.wf-cli-btn {{
+  display: inline-flex; align-items: center; margin-left: 5px; padding: 0 6px;
+  border-radius: 5px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--accent-hi); font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  cursor: pointer; vertical-align: middle; line-height: 1.5;
+}}
+.wf-cli-btn:hover {{ border-color: var(--accent-hi); background: var(--accent-soft); }}
+.wf-cli-btn.copied {{ border-color: var(--down); color: var(--down); background: var(--down-soft); }}
+section[id], #ai-rebalance, .card[id] {{ scroll-margin-top: 64px; }}
+.card:target {{ border-color: var(--accent-hi); box-shadow: 0 0 0 1px var(--accent-hi); opacity: 1; }}
 
 .rank-num {{
   display: inline-flex; align-items: center; justify-content: center;
@@ -756,11 +901,15 @@ tr:last-child td {{ border-bottom: 0; }}
 .empty {{ padding: 14px; text-align: center; color: var(--muted); font-size: 12.5px; }}
 footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }}
 @media print {{
+  @page {{ margin: 12mm; }}
   .no-print, .topbar {{ display: none !important; }}
   :root {{ --bg: #ffffff; --surface: #ffffff; --sub: #f8fafc; --ink: #111111; --ink-2: #222222; --muted: #555555; --border: #dddddd; }}
-  body {{ background: #ffffff; color: #111111; }}
+  body {{ background: #ffffff; color: #111111; font-size: 12px; }}
   main {{ max-width: 100%; padding: 0; }}
   .panel {{ box-shadow: none; break-inside: avoid; border-color: #dddddd; }}
+  .card, tr {{ break-inside: avoid; }}
+  .grid, .grid.two-col {{ grid-template-columns: 1fr; }}
+  table {{ font-size: 11px; }}
 }}
 </style>
 </head>
@@ -807,8 +956,17 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
       <span><span {_i18n("meta_tdate")}>交易日</span> <b>{trade_date}</b></span>
       <span>· <span {_i18n("meta_pdate")}>数据包</span> <code>{pack_date}</code></span>
       <span class="badge {'warn' if is_stale else 'ok'}" {_i18n("badge_stale" if is_stale else "badge_sync")}>{'旧包降级' if is_stale else '数据同步'}</span>
-      <span>· <span {_i18n("meta_policy")}>口径：</span><code>{_esc(report.get('usage_policy') or 'cn_only')}</code></span>
+      <span>· <span {_i18n("meta_policy")}>口径：</span>{_policy_html(report.get('usage_policy'))}</span>
     </div>
+    <nav class="sec-pills no-print" aria-label="Section navigation">
+      <a class="sec-pill" href="#brief" {_i18n("nav_brief")}>盘后综述</a>
+      <a class="sec-pill" href="#panorama" {_i18n("nav_panorama")}>盘面全景</a>
+      {f'<a class="sec-pill" href="#news" {_i18n("nav_news")}>市场快讯</a>' if news_items else ""}
+      <a class="sec-pill" href="#announcements" {_i18n("nav_ann")}>公告排雷</a>
+      <a class="sec-pill" href="#synthesis" {_i18n("nav_syn")}>共识与 AI</a>
+      <a class="sec-pill" href="#strategies" {_i18n("nav_strats")}>策略精选</a>
+      <a class="sec-pill" href="#patterns" {_i18n("nav_patterns")}>形态雷达</a>
+    </nav>
   </header>
   {stale_html}
   {deg_html}
@@ -839,6 +997,13 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
       badge_stale: "旧包降级",
       badge_sync: "数据同步",
       meta_policy: "口径：",
+      nav_brief: "盘后综述",
+      nav_panorama: "盘面全景",
+      nav_news: "市场快讯",
+      nav_ann: "公告排雷",
+      nav_syn: "共识与 AI",
+      nav_strats: "策略精选",
+      nav_patterns: "形态雷达",
       sec_brief: "盘后要点综述",
       brief_badge_rule: "规则统计合成",
       sub_regime: "盘面宽度与情绪",
@@ -901,10 +1066,25 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
       col_kline: "近20日K线",
       no_pat_sig: "今日无触发信号",
       no_pats: "无形态扫描记录",
+      pat_neg_watch: "负期望·观察",
+      pat_exp_watch: "观察期",
+      pat_wf_adverse: "今日情绪逆风",
+      pat_wf_joint: " · 联合OOS {{v}}({{d}}d)",
+      policy_cn_slice: "仅A股 · 情绪仅切片观察",
+      policy_cn: "仅A股",
       deg_prefix: "降级说明：",
       footer_tag: "量化形态观测与回测基准",
       footer_repo: "GitHub 开源仓库",
       dist_flat: "平盘",
+      link_ai_board: "历史 AI 归因 →",
+      link_leaderboard: "T+N 排行 →",
+      link_wf_board: "250日 Walk-Forward 回放 →",
+      link_pat_wf: "样本外回放 →",
+      wf_cli_btn: "CLI",
+      wf_cli_copied: "已复制",
+      pat_wf_pending: "边界待复核",
+      pat_wf_boundary_note: "注：Walk-Forward H1 严格按实际退出日 &lt; 切分日截断并剔除跨界样本，避免 H2 价格区间泄漏进逆风判定。",
+      pat_wf_boundary_note_stats: "注：Walk-Forward H1 严格按实际退出日 &lt; {{mid}} 截断（累计剔除 {{n}} 条跨界信号），避免 H2 价格区间泄漏进逆风判定。",
     }},
     en: {{
       page_title: "AlphaSift · CN Post-Close Research Brief (" + TRADE_DATE + ")",
@@ -919,6 +1099,13 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
       badge_stale: "Stale Fallback",
       badge_sync: "Pack Synced",
       meta_policy: "Policy: ",
+      nav_brief: "Brief",
+      nav_panorama: "Panorama",
+      nav_news: "News",
+      nav_ann: "Filings",
+      nav_syn: "Consensus & AI",
+      nav_strats: "Strategies",
+      nav_patterns: "Patterns",
       sec_brief: "Executive Post-Close Brief",
       brief_badge_llm: "AI Brief · {{model}}",
       brief_badge_rule: "Rule Synthesis",
@@ -999,12 +1186,28 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
       no_pat_sig: "No signals triggered today",
       no_pats: "No pattern scan recorded",
       pat_hits_cnt: "{{n}} hits",
+      pat_neg_watch: "Neg Exp · Watch",
+      pat_exp_watch: "Observational",
+      pat_t5_net: " · T+5 Net {{v}}",
+      pat_wf_adverse: "WF Adverse Regime",
+      pat_wf_joint: " · Joint OOS {{v}}({{d}}d)",
+      policy_cn_slice: "CN Only · Regime Slice",
+      policy_cn: "CN Only",
       stale_banner: "⚠️ <b>Stale Pack Mode</b>: Pack date <code>{{pack}}</code> trails target <code>{{exp}}</code> ({{reason}}). Rendered in observation mode; unforced IM push suppressed.",
       deg_prefix: "Degradation: ",
       disclaimer: "Research & observational metrics only — not investment advice or buy/sell instructions.",
       footer_tag: "Quantitative Discovery & Benchmark",
       footer_repo: "GitHub Repository",
       dist_flat: "Flat",
+      link_ai_board: "Historical AI Attribution →",
+      link_leaderboard: "T+N Leaderboard →",
+      link_wf_board: "250D Walk-Forward Audit →",
+      link_pat_wf: "OOS Audit →",
+      wf_cli_btn: "CLI",
+      wf_cli_copied: "Copied",
+      pat_wf_pending: "Boundary Unverified",
+      pat_wf_boundary_note: "Note: Walk-Forward H1 is strictly cut by actual exit_date &lt; split_date with cross-boundary trades purged so H2 prices never leak into adverse-regime selection.",
+      pat_wf_boundary_note_stats: "Note: Walk-Forward H1 is cut strictly by actual exit_date &lt; {{mid}} ({{n}} cross-boundary trades purged) so H2 prices never leak into adverse-regime selection.",
     }},
     ja: {{
       page_title: "AlphaSift · 中国A株 引け後クオンツレポート (" + TRADE_DATE + ")",
@@ -1019,6 +1222,13 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
       badge_stale: "旧パック縮退",
       badge_sync: "同期済み",
       meta_policy: "方針：",
+      nav_brief: "要約",
+      nav_panorama: "パノラマ",
+      nav_news: "ニュース",
+      nav_ann: "適時開示",
+      nav_syn: "コンセンサス",
+      nav_strats: "戦略",
+      nav_patterns: "パターン",
       sec_brief: "引け後エグゼクティブ要約",
       brief_badge_llm: "AI 分析合成 · {{model}}",
       brief_badge_rule: "統計ルール合成",
@@ -1099,12 +1309,28 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
       no_pat_sig: "本日のシグナルなし",
       no_pats: "パターン検出記録なし",
       pat_hits_cnt: "{{n}} 件検出",
+      pat_neg_watch: "負期待・観測",
+      pat_exp_watch: "観測期間",
+      pat_t5_net: " · T+5純超過 {{v}}",
+      pat_wf_adverse: "WF 本日逆風局面",
+      pat_wf_joint: " · 複合OOS {{v}}({{d}}日)",
+      policy_cn_slice: "中国A株のみ・局面スライス",
+      policy_cn: "中国A株のみ",
       stale_banner: "⚠️ <b>旧パック縮退モード</b>：パック日付 <code>{{pack}}</code> が目標日 <code>{{exp}}</code> より古い状態です（{{reason}}）。観測用表示のみとし、強制指定なしの通知は抑制しました。",
       deg_prefix: "縮退説明：",
       disclaimer: "本レポートは研究・エンジニアリング観測目的であり、投資助言や売買推奨ではありません。",
       footer_tag: "クオンツ観測・T+N検証ベンチマーク",
       footer_repo: "GitHub リポジトリ",
       dist_flat: "横ばい",
+      link_ai_board: "AI 帰属履歴 →",
+      link_leaderboard: "T+N ランキング →",
+      link_wf_board: "250日 Walk-Forward 検証 →",
+      link_pat_wf: "OOS 検証 →",
+      wf_cli_btn: "CLI",
+      wf_cli_copied: "コピー済",
+      pat_wf_pending: "境界未検証",
+      pat_wf_boundary_note: "注：Walk-Forward の H1 は実際の決済日 &lt; 分割日で厳密に切断し境界跨ぎ標本を除外しており、H2 価格の逆風判定への混入を防止しています。",
+      pat_wf_boundary_note_stats: "注：Walk-Forward の H1 は実際の決済日 &lt; {{mid}} で厳密に切断（境界跨ぎ {{n}} 件除外）しており、H2 価格の逆風判定への混入を防止しています。",
     }},
   }};
   var REGIME_MAP = {{
@@ -1163,11 +1389,23 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
     var link = document.getElementById("back-dashboard-link");
     if (!link) return;
     if (DETAIL_BASE.indexOf("http") !== 0 && DETAIL_BASE.indexOf("../index.html") !== 0) return;
+    var baseClean = DETAIL_BASE.split("#")[0].split("?")[0];
     var p = new URLSearchParams();
     if (lang !== "zh") p.set("lang", lang);
     if (theme !== "dark") p.set("theme", theme);
     var q = p.toString();
-    link.setAttribute("href", q ? DETAIL_BASE.split("?")[0] + "?" + q : DETAIL_BASE);
+    link.setAttribute("href", q ? baseClean + "?" + q : DETAIL_BASE);
+    document.querySelectorAll("a[data-dash-hash]").forEach(function (a) {{
+      var h = a.getAttribute("data-dash-hash");
+      if (!h) return;
+      var ap = new URLSearchParams();
+      if (lang !== "zh") ap.set("lang", lang);
+      if (theme !== "dark") ap.set("theme", theme);
+      var patId = a.getAttribute("data-dash-pat");
+      if (patId) ap.set("pat", patId);
+      var aq = ap.toString();
+      a.setAttribute("href", (aq ? baseClean + "?" + aq : baseClean) + "#" + h);
+    }});
   }}
   function applyLang(nextLang) {{
     lang = (nextLang === "en" || nextLang === "ja") ? nextLang : "zh";
@@ -1234,6 +1472,48 @@ footer {{ margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--borde
       try {{ localStorage.setItem("alphasift-theme", theme); }} catch (e) {{}}
     }});
   }}
+  function fallbackCopyPlainText(text, onDone) {{
+    try {{
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (onDone) onDone();
+    }} catch (e) {{}}
+  }}
+  function copyPlainText(text, onDone) {{
+    if (navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(text).then(function () {{ if (onDone) onDone(); }}).catch(function () {{
+        fallbackCopyPlainText(text, onDone);
+      }});
+    }} else {{
+      fallbackCopyPlainText(text, onDone);
+    }}
+  }}
+  var patSec = document.getElementById("patterns");
+  if (patSec) {{
+    patSec.addEventListener("click", function (e) {{
+      var b = e.target && e.target.closest ? e.target.closest(".wf-cli-btn[data-cli]") : null;
+      if (!b) return;
+      var cli = b.getAttribute("data-cli");
+      if (!cli) return;
+      copyPlainText(cli, function () {{
+        var dict = I18N[lang] || I18N.zh;
+        if (b._cliTimer) clearTimeout(b._cliTimer);
+        b.classList.add("copied");
+        b.textContent = dict.wf_cli_copied || "Copied";
+        b._cliTimer = setTimeout(function () {{
+          b.classList.remove("copied");
+          b.textContent = (I18N[lang] || I18N.zh).wf_cli_btn || "CLI";
+        }}, 1500);
+      }});
+    }});
+  }}
 }})();
 </script>
 </body>
@@ -1248,10 +1528,7 @@ def write_daily_report_html(
     track_summary: dict[str, Any] | None = None,
 ) -> Path:
     """Render and write a standalone HTML daily report to disk."""
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    return atomic_write_text(
+        output_path,
         render_daily_report_html(report, track_summary=track_summary),
-        encoding="utf-8",
     )
-    return path

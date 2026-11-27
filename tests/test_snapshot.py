@@ -530,6 +530,72 @@ def test_fetch_us_snapshot_single_ticker_with_multiindex(monkeypatch):
     assert download_kwargs["end"] > pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d")
 
 
+def test_fetch_us_snapshot_scrubs_nan_inf_volumes_and_failing_fast_info(monkeypatch):
+    import sys
+    import types
+
+    multi_cols = pd.MultiIndex.from_tuples(
+        [
+            ("AAPL", "Close"),
+            ("AAPL", "Volume"),
+            ("BADINF", "Close"),
+            ("BADINF", "Volume"),
+        ],
+        names=["Ticker", "Price"],
+    )
+    hist_df = pd.DataFrame(
+        {
+            ("AAPL", "Close"): [100.0, 102.0],
+            ("AAPL", "Volume"): [float("nan"), float("nan")],
+            ("BADINF", "Close"): [50.0, float("inf")],
+            ("BADINF", "Volume"): [1_000.0, 1_000.0],
+        },
+        index=pd.date_range("2026-05-19", periods=2),
+    )
+    hist_df.columns = multi_cols
+
+    class FlakyFastInfo:
+        @property
+        def market_cap(self):
+            raise RuntimeError("fast_info unavailable")
+
+        @property
+        def shares(self):
+            return float("nan")
+
+    class FakeTicker:
+        def __init__(self, ticker):
+            self.fast_info = FlakyFastInfo()
+            self.info = {
+                "trailingPE": float("inf"),
+                "priceToBook": float("nan"),
+                "industry": None,
+                "shortName": None,
+            }
+
+    fake_yf = types.ModuleType("yfinance")
+    fake_yf.download = lambda *args, **kwargs: hist_df
+    fake_yf.Ticker = FakeTicker
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+
+    from alphasift.snapshot_us import fetch_us_snapshot
+
+    df = fetch_us_snapshot(["AAPL", "BADINF"])
+
+    assert list(df["code"]) == ["AAPL"]
+    row = df.iloc[0]
+    assert row["price"] == 102.0
+    assert row["change_pct"] == 2.0
+    assert row["amount"] == 0.0
+    assert row["avg_amount"] == 0.0
+    assert row["volume_ratio"] == 1.0
+    assert row["total_mv"] == 0.0
+    assert row["turnover_rate"] == 0.0
+    assert pd.isna(row["pe_ratio"])
+    assert row["industry"] == ""
+    assert row["name"] == "AAPL"
+
+
 def test_fetch_sina_stops_when_snapshot_budget_is_spent(monkeypatch):
     import alphasift.snapshot as snapshot_module
 
@@ -654,3 +720,112 @@ def test_fetch_em_datacenter_requests_ohlcv_bse_and_quote_date(monkeypatch):
     assert df.loc[0, "circ_mv"] == pytest.approx(2.0e11)
     assert df.loc[1, "PRE_CLOSE_PRICE"] == 21.9
     assert df.loc[1, "circ_mv"] == pytest.approx(1.2e9)
+
+
+def test_eastmoney_request_interval_ignores_nonfinite_and_invalid_env(monkeypatch):
+    import math
+    from alphasift.snapshot import (
+        _EM_REQUEST_JITTER_SECONDS,
+        _EM_REQUEST_MIN_INTERVAL_SECONDS,
+        _eastmoney_request_interval_seconds,
+        _float_env,
+    )
+
+    monkeypatch.setenv("ALPHASIFT_EASTMONEY_MIN_INTERVAL_SEC", "nan")
+    monkeypatch.setenv("ALPHASIFT_EASTMONEY_JITTER_SEC", "-inf")
+    assert _float_env("ALPHASIFT_EASTMONEY_MIN_INTERVAL_SEC", 1.5) == 1.5
+    assert _float_env("ALPHASIFT_EASTMONEY_JITTER_SEC", 0.4) == 0.4
+
+    delay = _eastmoney_request_interval_seconds()
+    assert math.isfinite(delay)
+    assert delay >= _EM_REQUEST_MIN_INTERVAL_SECONDS
+    assert delay <= _EM_REQUEST_MIN_INTERVAL_SECONDS + _EM_REQUEST_JITTER_SECONDS
+
+    monkeypatch.setenv("ALPHASIFT_EASTMONEY_MIN_INTERVAL_SEC", "bad-float")
+    monkeypatch.setenv("ALPHASIFT_EASTMONEY_JITTER_SEC", "inf")
+    assert _float_env("ALPHASIFT_EASTMONEY_MIN_INTERVAL_SEC", 2.0) == 2.0
+    assert _float_env("ALPHASIFT_EASTMONEY_JITTER_SEC", 0.5) == 0.5
+    assert math.isfinite(_eastmoney_request_interval_seconds())
+
+
+def test_snapshot_health_and_persisted_health_scrub_nonfinite_and_bool(tmp_path):
+    import json
+    from alphasift.snapshot import (
+        _SOURCE_HEALTH,
+        _load_persisted_source_health,
+        _order_sources_by_persisted_health,
+        _record_persisted_outcome,
+        _record_source_failure,
+        _record_source_success,
+        _save_persisted_source_health,
+        _source_disabled_reason,
+        snapshot_source_health_snapshot,
+    )
+
+    _SOURCE_HEALTH.clear()
+    try:
+        _SOURCE_HEALTH["em"] = {
+            "successes": float("nan"),
+            "failures": float("inf"),
+            "total_failures": True,  # type: ignore[dict-item]
+            "disabled_until": float("nan"),
+            "last_rows": "bad",  # type: ignore[dict-item]
+            "avg_rows": -10.0,
+            "last_success_at": float("-inf"),
+            "last_failure_at": True,  # type: ignore[dict-item]
+        }
+        assert _source_disabled_reason("em") is None
+        _record_source_success("em", rows=float("nan"))  # type: ignore[arg-type]
+        _record_source_success("em", rows=True)  # type: ignore[arg-type]
+        _record_source_success("em", rows=25)
+        _record_source_failure("sina", error="timeout")
+
+        snap = snapshot_source_health_snapshot(["em", "sina"])
+        assert snap["em"]["successes"] == 3.0
+        assert snap["em"]["last_rows"] == 25.0
+        assert snap["em"]["avg_rows"] == 25.0
+        assert snap["sina"]["failures"] == 1.0
+        json.dumps(snap, allow_nan=False)
+
+        health_path = tmp_path / "snapshot_health.json"
+        health_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "sources": {
+                        "em": {
+                            "last_success_at": float("nan"),
+                            "last_failure_at": float("inf"),
+                            "consecutive_failures": True,
+                            "last_duration_sec": float("nan"),
+                        },
+                        "sina": {
+                            "last_success_at": -5.0,
+                            "last_failure_at": 100.0,
+                            "consecutive_failures": 2,
+                            "last_duration_sec": 1.25,
+                        },
+                    },
+                },
+                allow_nan=True,
+            ),
+            encoding="utf-8",
+        )
+        loaded = _load_persisted_source_health(health_path)
+        assert loaded["em"]["last_success_at"] == 0.0
+        assert loaded["em"]["last_failure_at"] == 0.0
+        assert loaded["em"]["consecutive_failures"] == 0
+        assert "last_duration_sec" not in loaded["em"]
+        assert loaded["sina"]["last_success_at"] == 0.0
+        assert loaded["sina"]["consecutive_failures"] == 2
+
+        ordered, _ = _order_sources_by_persisted_health(["sina", "em"], loaded, now=150.0)
+        assert ordered == ["em", "sina"]
+
+        _record_persisted_outcome(loaded, "em", ok=False, started=float("nan"), error="bad")
+        assert loaded["em"]["last_duration_sec"] == 0.0
+        assert loaded["em"]["consecutive_failures"] == 1
+        _save_persisted_source_health(health_path, loaded, touched={"em"})
+        json.dumps(json.loads(health_path.read_text(encoding="utf-8")), allow_nan=False)
+    finally:
+        _SOURCE_HEALTH.clear()
